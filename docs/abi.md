@@ -701,7 +701,7 @@ blocks the caller until a reply. When the message is delivered, the kernel
 puts a reply capability to the caller in the receiver's caller slot (TCB slot
 4, at offset 128), which no `CPtr` reaches. It is derived from the caller's
 master reply capability, which sits in the caller's TCB slot 3 (at offset 96)
-from retype until the TCB is finalised, as a derivation root at depth 0. The
+from retype (or boot, for the root task) until the TCB is finalised, as a derivation root at depth 0. The
 reply capability's Grant is the Grant of the capability the receiver received
 on; it carries no other rights. It is consumed by `Reply`, by the reply phase
 of `ReplyRecv`, or, once saved, by `Send`, `NBSend` or `Call` on it (`Call`
@@ -1458,7 +1458,9 @@ interface](design.md#hyper-v-interface), explains the behaviour.
 - Checks run in this order, and the first failure is returned:
   1. the label is valid for this capability type (for `GetSint`, also that a
      usable SynIC exists), else `IllegalOperation`;
-  2. enough message registers and extra capabilities, else `TruncatedMessage`;
+  2. enough message registers and extra capabilities, else `TruncatedMessage`
+     (for `Hypervisor_PostMessage`, the payload's registers are counted only
+     after step 3 has checked `payload_size`);
   3. argument values, in message-register order (`InvalidArgument`,
      `RangeError`, `InvalidCapability`);
   4. the capability's own limits: an IOPort's range, a restricted Hypervisor
@@ -2074,7 +2076,7 @@ so the loader survives its own CR3 write; it and the direct map alias the
 kernel image with weaker permissions until the kernel replaces these tables
 in M3. The kernel's own direct map maps the 2 MiB regions covering the image
 with 4 KiB pages, text and read-only data read-only and everything NX, so from
-M3 no alias of the image is weaker than its own mapping (`docs/design.md`,
+M3 no alias of the image is weaker than its own mapping, except `.rootimage`, which is writable and never executed there and becomes RAM untyped in M5 (`docs/design.md`,
 [Privilege levels](design.md#privilege-levels)).
 
 ### Handoff structure

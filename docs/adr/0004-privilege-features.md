@@ -1,4 +1,4 @@
-# 0004: The kernel requires NX, PGE, PAT, SMEP and SMAP, and maps itself from static tables shared by every address space
+# 0004: The kernel requires NX, PGE, PAT, SMEP, SMAP and XSAVE, and maps itself from static tables shared by every address space
 
 Status: accepted, M1 (2026-10-29)
 
@@ -79,7 +79,8 @@ alias the kernel image writable.
   off; if the host CPU lacks them, a new ADR makes them optional.
 - Every scenario needs the new QEMU model from M3. Golden outputs that print
   CPU features depend on it.
-- After M3 no alias of the kernel image is weaker than its own mapping, so
+- After M3 no alias of the kernel image is weaker than its own mapping,
+  except `.rootimage`, which is writable and never executed there and becomes RAM untyped in M5, so
   `docs/boot.md`'s "weaker permissions until M3" becomes true. A kernel
   write bug cannot patch kernel code through the direct map.
 - The kernel never reaches a device register write-back, whatever the MTRRs

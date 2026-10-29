@@ -26,7 +26,7 @@ Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 a
 - `rustup target add` worked again this session; the `build-std` fallback is kept (ADR 0001).
 
 ## Decisions this milestone
-- ADR 0004: the kernel requires NX, PGE, PAT, SMEP and SMAP, and maps itself from static tables shared by every address space
+- ADR 0004: the kernel requires NX, PGE, PAT, SMEP, SMAP and XSAVE, and maps itself from static tables shared by every address space
 - ADR 0005: paging structures keep back-references to the capabilities mapped in them, instead of ASIDs; PCID is off
 - ADR 0006: the direct map covers at most 64 GiB, and the loader allocates below it (amends ADR 0002)
 - ADR 0007: the root task's objects come from a boot region outside every untyped, and a two-page BootInfo describes the rest

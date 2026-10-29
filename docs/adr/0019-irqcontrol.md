@@ -30,8 +30,8 @@ thread.
 - Vectors `0x30`-`0xEF` are device vectors, allocated by the kernel. The IRQ
   number is the vector minus `0x30`. Kernel vectors sit at the top: timer
   `0xFD`, error `0xFE`, spurious `0xFF`; the PIC is remapped to `0x20`-`0x2F`
-  and masked. Only `#BP` has DPL 3; vectors 17, 21, 29, 30 and the reserved
-  exception vectors cannot occur and panic ([ADR
+  and masked. Only `#BP` has DPL 3; vectors 9, 15, 17 and 20 to 31 cannot occur
+  and panic ([ADR
   0008](0008-kernel-entry-and-exit.md)).
 - IRQControl's invocations name a source and return the IRQ number:
   `GetISA(isa_irq)` applies the MADT overrides in the kernel;

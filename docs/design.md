@@ -105,7 +105,7 @@ with proptest and Miri, where seL4 relies on its proofs.
 The kernel runs in ring 0 and user code in ring 3, with nothing in rings 1
 and 2, and the kernel is mapped supervisor-only and global in PML4 slots 256
 to 511 of every address space. The kernel refuses to boot without NX, PGE,
-PAT, SMEP and SMAP, and turns UMIP on when the CPU has it
+PAT, SMEP, SMAP and XSAVE, and turns UMIP on when the CPU has it
 ([ADR 0004](adr/0004-privilege-features.md)).
 
 Hardware facts this document relies on are listed once, here. Each is from memory
@@ -231,7 +231,8 @@ the Meltdown line below.
   `.rootimage` read-write, since M5 reclaims it as RAM untyped and nothing
   executes it, the rest of those regions as the 2 MiB rule says, everything
   NX. After M3
-  no alias of the image is weaker than its mapping at `KERNEL_VIRT_BASE`.
+  no alias of the image is weaker than its mapping at `KERNEL_VIRT_BASE`,
+  except `.rootimage`, which is writable and never executed there and becomes RAM untyped in M5.
 - **Hypercall page.** `.hvcall` is a page-aligned 4 KiB section
   in the text segment, mapped RX at `KERNEL_VIRT_BASE`; M9 points
   `HV_X64_MSR_HYPERCALL` at it ([Hypercalls](#hypercalls-m9)).
@@ -820,7 +821,7 @@ MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| No untyped covers the kernel image (except reclaimed `.rootimage`), the boot region, a `kernel_reserved` page, `[0, 1 MiB)`, `ACPI_NVS`, `FIRMWARE` or `BAD` memory; the boot region holds no `kernel_reserved` page | `l4core::boot::plan` and `untyped` both subtract `kernel_reserved`; proptest over generated maps, including a reserved page inside the chosen `USABLE` range | M4 |
+| No untyped covers the kernel image (except reclaimed `.rootimage`), the boot region, a `kernel_reserved` page, `[0, 1 MiB)`, `ACPI_NVS`, `FIRMWARE` or `BAD` memory; the boot region holds no `kernel_reserved` page and touches no 2 MiB page that holds one | `l4core::boot::plan` and `untyped` both subtract `kernel_reserved`; proptest over generated maps, including a reserved page inside the chosen `USABLE` range | M4 |
 | No kernel object lies at physical address 0 | no untyped and no boot region below 1 MiB (`l4core::boot::untyped`, host test); `core/` handles are `NonZeroU64` | M2, M4 |
 | Untyped are pairwise disjoint, each aligned to its size and at least 4 KiB | `l4core::boot::untyped`; proptest | M4 |
 | RAM untyped lie inside the direct map; no device untyped lies in a write-back direct-map page; no RAM untyped lies in a 2 MiB page holding a kernel device page | `l4core::boot::untyped` with `direct_map_type`; host tests on the QEMU and Hyper-V maps | M4 |
@@ -2247,7 +2248,7 @@ state machine in `l4core` under its proptest.
 | --- | --- | --- |
 | A CapFault or VMFault reply always restarts; UnknownSyscall and UserException restart only on label 0 (`handleFaultReply` in `src/api/faults.c`, `Arch_handleFaultReply` in `src/arch/x86/api/faults.c`) | label 0 restarts, any other leaves the thread `Inactive` | one rule for every fault; a handler can stop a faulting thread without its TCB capability, where seL4's can only withhold the reply and leave it `BlockedOnReply`. Costs compatibility with seL4 pagers that reply with a non-zero label |
 | `int n` on a user trap gate becomes an UnknownSyscall (`src/arch/x86/c_traps.c`) | `int n` raises #GP, a UserException | `syscall` is the only system call entry |
-| Every vector below 32 from user mode, NMI and #MC included, becomes a UserException (`c_handle_interrupt`, `handleUserLevelFault`) | NMI, #DF and #MC are never user faults; vectors 17, 21, 29, 30 and the reserved ones panic from either ring | the thread did not cause the first three; the others cannot occur in this configuration, so one arriving means the kernel's assumptions are wrong |
+| Every vector below 32 from user mode, NMI and #MC included, becomes a UserException (`c_handle_interrupt`, `handleUserLevelFault`) | NMI, #DF and #MC are never user faults; vectors 9, 15, 17 and 20 to 31 panic from either ring | the thread did not cause the first three; the others cannot occur in this configuration, so one arriving means the kernel's assumptions are wrong |
 | The manual ("Exceptions") says the handler capability is installed in the TCB and validated, not looked up, at fault time; that is the MCS build (`handleFault` under `CONFIG_KERNEL_MCS`); non-MCS looks up the CPtr when the fault happens (`sendFaultIPC`, `src/kernel/faulthandler.c`) | the CPtr is looked up when the fault happens | microL4 follows classic, non-MCS seL4 |
 | DebugException (label 4), Timeout (MCS) | none; label 4 reserved | no debug API, no MCS |
 
