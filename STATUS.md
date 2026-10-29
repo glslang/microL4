@@ -1,5 +1,5 @@
 # Status
-Current milestone: M0 · Bootstrap and tooling
+Current milestone: M0 · Bootstrap and tooling, complete: the done-when test passed and the fresh reviewer signed off on 2026-10-29. Next: M1 · Design and ABI.
 
 ## Done
 - [x] Workspace, `xtask`, `tools/setup.sh`, `.cargo/config.toml`, `CLAUDE.md`, `STATUS.md` and `PLAN.md`
@@ -11,7 +11,11 @@ Current milestone: M0 · Bootstrap and tooling
 - [x] Host tests: 30 in `core/` (handoff validation, memory-map normalisation, ELF parser, command line), 10 in `xtask/`; the handoff layout is checked at compile time on every target; Miri clean on `core/`
 - [x] CI green on the first run (`ubuntu-latest`, QEMU 10.2); now pinned to `ubuntu-24.04` to match the cloud image's QEMU 8.2
 - [x] Hyper-V check: the CI-built VHDX from 7c4609f boots on the owner's Generation 2 VM and prints the hello over COM1, ending in `TEST PASS` (log in the PR)
-- [x] Spec check of `docs/boot.md` against seL4's x86_64 boot code, and a fresh review of the whole diff. The reviewer would sign off once its three should-fixes landed: the empty-segment underflow in the loader (also found by Codex), `arch::memory_map` trusting an unvalidated handoff, and the Hyper-V COM1 reader connecting too late. All three are fixed, along with its nits.
+- [x] Spec check of `docs/boot.md` against seL4's x86_64 boot code, and a fresh review of the whole diff. Its three should-fixes were fixed in 7c4609f, along with its nits:
+  - the empty-segment underflow in the loader, also found by Codex
+  - `arch::memory_map` trusting an unvalidated handoff
+  - the Hyper-V COM1 reader connecting too late
+- [x] M0 sign-off: the reviewer verified the fixes and approved M0 on 7c4609f.
 
 ## Next
 - [ ] Merge the M0 PR, then M1 · Design and ABI: `docs/design.md` and `docs/abi.md` v0; fold the handoff from `docs/boot.md` into `abi.md`
@@ -39,4 +43,4 @@ Current milestone: M0 · Bootstrap and tooling
   - Unlike QEMU, the map lists no MMIO or high reserved ranges.
 
 ## Last session
-2026-10-29: M0 implemented end to end. Both scenarios pass locally in about 3 s each and in CI; release builds and the build-std fallback pass too. Review fixes landed, and the owner's Hyper-V boot passed.
+2026-10-29: M0 implemented end to end and signed off. Both scenarios pass locally in about 3 s each and in CI, and so do release builds and the build-std fallback. The owner's Hyper-V boot passed. The next session starts M1 from the playbook prompt, once the M0 PR is merged.
