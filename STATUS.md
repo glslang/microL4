@@ -10,11 +10,11 @@ Current milestone: M0 · Bootstrap and tooling
 - [x] `tools/hyperv/`: create the VM, swap the VHDX, read COM1 from the named pipe, and a one-step check (not run: no Hyper-V in the cloud)
 - [x] Host tests: 30 in `core/` (handoff validation, memory-map normalisation, ELF parser, command line), 10 in `xtask/`; the handoff layout is checked at compile time on every target; Miri clean on `core/`
 - [x] CI green on the first run (`ubuntu-latest`, QEMU 10.2); now pinned to `ubuntu-24.04` to match the cloud image's QEMU 8.2
+- [x] Hyper-V check: the CI-built VHDX from 7c4609f boots on the owner's Generation 2 VM and prints the hello over COM1, ending in `TEST PASS` (log in the PR)
 - [x] Spec check of `docs/boot.md` against seL4's x86_64 boot code, and a fresh review of the whole diff. The reviewer would sign off once its three should-fixes landed: the empty-segment underflow in the loader (also found by Codex), `arch::memory_map` trusting an unvalidated handoff, and the Hyper-V COM1 reader connecting too late. All three are fixed, along with its nits.
 
 ## Next
-- [ ] Hyper-V check (owner): boot the CI-built VHDX with `tools/hyperv/Test-L4Vhdx.ps1` and paste the COM1 log into the PR
-- [ ] Then M1 · Design and ABI: `docs/design.md` and `docs/abi.md` v0; fold the handoff from `docs/boot.md` into `abi.md`
+- [ ] Merge the M0 PR, then M1 · Design and ABI: `docs/design.md` and `docs/abi.md` v0; fold the handoff from `docs/boot.md` into `abi.md`
 
 ## Open issues
 - The loader's 1:1 map of low memory is still live in the kernel. M3 must drop it before M5 creates a user address space, which uses the lower half (ADR 0002).
@@ -31,7 +31,12 @@ Current milestone: M0 · Bootstrap and tooling
 - ADR 0003: scenarios select kernel tests through `\cmdline.txt` on the ESP
 
 ## Hyper-V checks
-- M0 VHDX: not yet booted
+- M0 VHDX (7c4609f, 2026-10-29): boots with Secure Boot off; hello and `TEST PASS` on COM1 through the named pipe. It confirms the plan's Hyper-V column for M0:
+  - CPUID signature is `Microsoft Hv`.
+  - The GOP framebuffer is 1024x768 BGR at `0xF8000000`, stride 1024.
+  - The ACPI RSDP is at `0x1FFFA014`.
+  - The memory map has 10 regions, 509 MiB usable of 512 MiB; the highest RAM ends at `0x20000000`, so the direct map is the 4 GiB minimum.
+  - Unlike QEMU, the map lists no MMIO or high reserved ranges.
 
 ## Last session
-2026-10-29: M0 implemented end to end. Both scenarios pass locally in about 3 s each and in CI; release builds and the build-std fallback pass too. Review fixes landed; only the owner's Hyper-V check remains.
+2026-10-29: M0 implemented end to end. Both scenarios pass locally in about 3 s each and in CI; release builds and the build-std fallback pass too. Review fixes landed, and the owner's Hyper-V boot passed.
