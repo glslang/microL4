@@ -1,4 +1,4 @@
-# 0019: IRQControl names interrupt sources; the kernel allocates vectors, applies MADT overrides, bounds every pin to two interrupts per Ack and runs the local APIC in xAPIC mode
+# 0019: IRQControl names interrupt sources; the kernel allocates vectors, applies MADT overrides, bounds every pin to three interrupts per Ack and runs the local APIC in xAPIC mode
 
 Status: accepted, M1 (2026-10-29)
 
@@ -58,7 +58,7 @@ thread.
 - User space cannot choose an APIC priority class. The kernel runs with
   interrupts off, and drivers are ordered by thread priority, so little is
   lost.
-- Between two Acks an I/O APIC pin delivers at most two interrupts, so a
+- Between two Acks an I/O APIC pin delivers at most three interrupts, so a
   storming device costs only its driver's own scheduling; no edge that
   follows an Ack is lost.
 - Every driver binds, Acks once and services its device once, then loops:

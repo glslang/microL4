@@ -40,7 +40,7 @@ Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 a
 - ADR 0016: the reply capability is a one-shot capability in the receiver's TCB, made from a master in the caller's TCB
 - ADR 0017: IPC names up to three capabilities, copies at most one, and unwraps capabilities to the sending endpoint
 - ADR 0018: IPC does no priority inheritance; endpoint and notification queues are FIFO
-- ADR 0019: IRQControl names interrupt sources; the kernel allocates vectors, applies MADT overrides, bounds every pin to two interrupts per Ack, and runs the local APIC in xAPIC mode
+- ADR 0019: IRQControl names interrupt sources; the kernel allocates vectors, applies MADT overrides, bounds every pin to three interrupts per Ack, and runs the local APIC in xAPIC mode
 - ADR 0020: the Hypervisor capability exposes two hypercalls; SINTs are IRQ handlers; the SynIC pages are boot frames the kernel never touches
 - ADR 0021: all UART code and the debug system calls exist only with the `debug` feature
 - ADR 0022: the ABI keeps seL4's x86_64 registers and layouts, with its own numbers

@@ -39,7 +39,7 @@ source (`manual/parts/*.tex`) and kernel files in
 | [I/O ports](#io-ports) | Kernel objects (I/O ports) | M4, M7 |
 | [ACPI and the timer](#acpi-and-the-timer) | Scheduling, Interrupts | M3 |
 | [Hyper-V interface](#hyper-v-interface) | Hyper-V interface | M3, M9 |
-| [Debug](#debug) | Debug | M5, M7 |
+| [Debug](#debug) | Debug | M3, M5, M7 |
 | [Open questions](#open-questions) | | |
 
 ## Kernel execution model
@@ -225,7 +225,9 @@ the Meltdown line below.
 - **No writable alias of kernel text.** The direct map maps the 2 MiB
   regions that cover `[kernel_phys_base, kernel_phys_base + kernel_size)`
   with 4 KiB pages: the image's `.text`, `.hvcall` and `.rodata` read-only,
-  the rest of those regions as the 2 MiB rule says, everything NX. After M3
+  `.rootimage` read-write, since M5 reclaims it as RAM untyped and nothing
+  executes it, the rest of those regions as the 2 MiB rule says, everything
+  NX. After M3
   no alias of the image is weaker than its mapping at `KERNEL_VIRT_BASE`.
 - **Hypercall page.** `.hvcall` is a page-aligned 4 KiB section
   in the text segment, mapped RX at `KERNEL_VIRT_BASE`; M9 points
@@ -327,7 +329,7 @@ in `STATUS.md`, and M10 lists the risk.
 | No address space contains the loader's 1:1 map | the kernel PML4's lower half is empty after M3's CR3 switch and PGE toggle; PML4 retype copies only entries 256 to 511 | M3, M5 |
 | The kernel reaches device registers only through the UC device window, and no 2 MiB direct-map page holding a kernel device page or no RAM is WB | the M3 table builder; `l4core::vspace::direct_map_type`, host tests on the QEMU and Hyper-V memory maps and MADTs; M4 makes no RAM untyped from a 2 MiB page holding a kernel device page | M3, M4 |
 | The page below the kernel stack and below each of the four IST stacks is unmapped | linker-script holes; the M3 table builder skips them; a scenario overflows the kernel stack and expects the double-fault report | M3 |
-| No mapping of kernel text or read-only data is writable, and no mapping of kernel data is executable | M3 image tables from the linker sections; the direct map's 4 KiB pages over the image; CR0.WP; NX required; a host test of the table builder over each alias | M3 |
+| No mapping of kernel text or read-only data is writable, and no mapping of kernel data is executable; the one exception is the direct-map alias of `.rootimage`, which is writable and never executed | M3 image tables from the linker sections; the direct map's 4 KiB pages over the image; CR0.WP; NX required; a host test of the table builder over each alias | M3 |
 | The kernel image, the handoff and its memory map lie inside the direct map | the loader allocates below 64 GiB; M3 panics otherwise | M3 |
 | The kernel image, `.rootimage` included, is at most 16 MiB | `kernel/linker.ld` assertion (M3); xtask strips `root` and checks the size | M3, M5 |
 
@@ -658,18 +660,18 @@ loaded from an ELF image embedded in the kernel, in ring 3 (M5).
 
 | Step | Built in | What happens |
 | --- | --- | --- |
-| 1 | M0 | `_start` zeroes BSS, switches to the kernel stack and calls `rust_entry`; COM1 is set up in debug kernels only ([Debug](#debug)) |
-| 2 | M3 | `Handoff::validate`; panic if the kernel image, the handoff or its memory map ends above the kernel's direct map, `min(phys_map_size, 64 GiB)`, which the loader's 64 GiB allocation bound prevents ([ADR 0006](adr/0006-direct-map-bound.md)); then the handoff and its memory map (at most 256 regions, else panic) are copied into the static `BootState`. No code reads `LOADER` memory after this, except the kernel image |
-| 3 | M3 | CPU feature check, GDT, TSS, IDT, PAT, CR4 ([Privilege levels](#privilege-levels)) and CR4.MCE; `IA32_GS_BASE` = the per-CPU area; DR7 = `0x400`, its reset value, no breakpoint enabled. The firmware's GDT, IDT and stack are now dead |
-| 4 | M3 | The kernel's page tables, from `.bss`, replace the loader's; the 1:1 map is gone ([The kernel half](#the-kernel-half)) |
-| 5 | M3 | ACPI is parsed; the local APIC timer and the TSC are calibrated in one window, giving `tsc_hz`; Hyper-V overlay pages the firmware left enabled are switched off ([ACPI and the timer](#acpi-and-the-timer), [Firmware leftovers](#firmware-leftovers-m3)). The kernel device pages (the local APIC, at most four I/O APICs, the HPET) are mapped in the kernel device window at `KERNEL_DEVICE_BASE`, and they, the MSI window and a locked Hyper-V hypercall page go into `BootPlan.kernel_reserved`. Only now are `USABLE`, `LOADER` and `ACPI_RECLAIMABLE` pages free |
+| 1 | M0 | `_start` zeroes BSS, switches to the kernel stack and calls `rust_entry`, which sets up COM1; from M7 only in debug kernels ([Debug](#debug)) |
+| 2 | M3 | CPU feature check: refuse to boot if a required feature is missing ([CPU features](#cpu-features)). `Handoff::validate`; panic if the kernel image, the handoff or its memory map ends above the kernel's direct map, `min(phys_map_size, 64 GiB)`, which the loader's 64 GiB allocation bound prevents ([ADR 0006](adr/0006-direct-map-bound.md)); then the handoff and its memory map (at most 256 regions, else panic) are copied into the static `BootState` (the kernel's own `.bss`; no CPU or firmware state changes before the feature check). No code reads `LOADER` memory after this, except the kernel image |
+| 3 | M3 | GDT, TSS, IDT, `IA32_PAT` ([Privilege levels](#privilege-levels)) and CR4.MCE; `IA32_GS_BASE` = the per-CPU area; DR7 = `0x400`, its reset value, no breakpoint enabled. The firmware's GDT, IDT and stack are now dead |
+| 4 | M3 | ACPI is parsed through the loader's direct map: the kernel device pages (the local APIC, at most four I/O APICs, the HPET), the ISA overrides and the ECAM ranges ([ACPI and the timer](#acpi-and-the-timer)). Then the kernel's page tables are built in `.bss`, with the kernel device window at `KERNEL_DEVICE_BASE`, and replace the loader's in the order [The kernel half](#the-kernel-half) gives (CR4.SMEP, SMAP, PGE and UMIP, then CR3); the 1:1 map is gone |
+| 5 | M3 | The local APIC, the PIC and the I/O APICs are set up; the local APIC timer and the TSC are calibrated in one window, giving `tsc_hz`; Hyper-V overlay pages the firmware left enabled are switched off ([ACPI and the timer](#acpi-and-the-timer), [Firmware leftovers](#firmware-leftovers-m3)). The kernel device pages, the MSI window and a locked Hyper-V hypercall page go into `BootPlan.kernel_reserved`. Only now are `USABLE`, `LOADER` and `ACPI_RECLAIMABLE` pages free |
 | 6 | M4 | `l4core::boot::plan` sizes the boot region; the kernel allocates and zeroes it |
 | 7 | M4 | The root CNode is made in the boot region and the fixed capabilities written |
 | 8 | M5 | The root ELF is copied from `.rootimage` into image frames; its VSpace, IPC buffer and TCB are built. `.rootimage` is unmapped from the kernel window, ending with a CR4.PGE toggle ([The kernel half](#the-kernel-half)) |
 | 9 | M4 | `l4core::boot::untyped` computes the untyped; caps go into the CNode, descriptors and the rest of BootInfo into its frames |
 | 10 | M5 | Syscall MSRs are written, `IA32_FS_BASE` and `IA32_KERNEL_GS_BASE` get the root task's bases (0), and the kernel exits to the root task through `iretq` |
 
-In M4, which has no root task, steps 7 and 9 run, the kernel prints the
+In M4, which has no root task, steps 6, 7 and 9 run, the kernel prints the
 BootInfo summary and the self-tests run instead of step 10.
 
 ### What each physical page becomes
@@ -678,12 +680,12 @@ The rules are applied in this order; a later row overrides an earlier one.
 
 | Physical range | Becomes | Why |
 | --- | --- | --- |
-| `USABLE`, `LOADER`, `ACPI_RECLAIMABLE` | RAM untyped | the loader, its tables, the handoff and the map are dead after steps 2 and 4; ACPI is parsed in step 5 |
+| `USABLE`, `LOADER`, `ACPI_RECLAIMABLE` | RAM untyped | the loader, its tables, the handoff and the map are dead after steps 2 and 4; ACPI is parsed in step 4 |
 | `RESERVED`, `MMIO`, ranges absent from the map, below `2^phys_addr_bits` | device untyped | PCI BARs, ECAM ([Memory map](abi.md#memory-map)) |
 | `ACPI_NVS`, `FIRMWARE`, `BAD` | nothing | firmware-owned or broken |
 | the kernel image, except `.rootimage` | nothing | |
 | `.rootimage` | RAM untyped (from the `LOADER` row) | reclaimed in step 8 |
-| the GOP framebuffer, page-rounded | its own device untyped, listed first | `fb` (M8) |
+| the GOP framebuffer, page-rounded | its own device untyped, listed first; none at all if any 2 MiB page it touches is write-back in the direct map (a debug kernel warns) | `fb` (M8) gets all of it or none of it |
 | any 2 MiB page the direct map maps write-back | no device untyped | a device frame would alias a WB mapping ([The kernel half](#the-kernel-half), H8) |
 | any 2 MiB page holding a kernel device page | no RAM untyped | the direct map maps it UC, so a RAM frame there would alias |
 | `[0, 1 MiB)` | nothing | no kernel object at physical address 0; legacy areas; the AP trampoline of the multi-core stretch goal |
@@ -770,8 +772,8 @@ so CPtr `n` names slot `n` (seL4 `create_root_cnode`). Slots 0 to 15 are fixed
 ([Initial CSpace](abi.md#initial-cspace)): seL4's number where seL4 has the
 same object, null where microL4 has none, and on Hyper-V the Hypervisor
 capability in slot 12 and the SynIC message and event-flag frames in slots 13
-and 14. All three are null elsewhere, and also when the firmware locked the
-hypercall MSR to a page outside `.hvcall`; the kernel then prints why. From
+and 14. All three are null elsewhere, before M9, when an M9 privilege is missing,
+and when the firmware locked the hypercall MSR to a page outside `.hvcall`; the kernel then prints why. From
 slot 16 come the second BootInfo frame, the paging structures, the image
 frames and the untyped, then empty slots. An 8 MiB span plus the three pages
 after it needs at most 2 PDPTs, 2 PDs and 6 PTs, and 16 + 1 + 10 + 2048 + 448
@@ -815,9 +817,9 @@ MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
 | Untyped are pairwise disjoint, each aligned to its size and at least 4 KiB | `l4core::boot::untyped`; proptest | M4 |
 | RAM untyped lie inside the direct map; no device untyped lies in a write-back direct-map page; no RAM untyped lies in a 2 MiB page holding a kernel device page | `l4core::boot::untyped` with `direct_map_type`; host tests on the QEMU and Hyper-V maps | M4 |
 | The kernel image, the handoff and its memory map lie below the direct map's end | the loader's 64 GiB `AllocateMaxAddress` bound; M3 check, panic otherwise | M3 |
-| The kernel image, `.rootimage` included, fits `KERNEL_IMAGE_MAX` = 16 MiB | `kernel/linker.ld` assert; xtask strips `root` and checks the image | M5 |
-| The root task never holds a capability to kernel memory: kernel image, stacks, descriptor tables, kernel page tables, kernel device pages, or the boot-region pages that hold its CNode, TCB and paging structures (as frames or untyped) | the plan excludes them from every untyped and frame; M4 self-test checks every BootInfo descriptor against the kernel ranges | M4 |
-| No `USABLE`, `LOADER` or `ACPI_RECLAIMABLE` page is written or handed out before step 5 ends: the firmware's GDT, IDT and stack, the loader's tables, ACPI and any firmware-enabled Hyper-V overlay are dead by then | the step order in `kmain`; the boot plan (step 6) is the first allocator; review | M3, M4 |
+| The kernel image, `.rootimage` included, fits `KERNEL_IMAGE_MAX` = 16 MiB | `kernel/linker.ld` assert (M3); xtask strips `root` and checks the image (M5) | M3, M5 |
+| The root task never holds a capability to kernel memory: kernel image, stacks, descriptor tables, kernel page tables, kernel device pages, or the boot-region pages that hold its CNode, TCB and paging structures (as frames or untyped) | the plan excludes them from every untyped and frame; M4 self-test checks every BootInfo descriptor against the kernel ranges | M4, M5 |
+| No `USABLE`, `LOADER` or `ACPI_RECLAIMABLE` page outside the kernel image is written or handed out before step 5 ends: the firmware's GDT, IDT and stack, the loader's tables, ACPI and any firmware-enabled Hyper-V overlay are dead by then | the step order in `kmain`; the boot plan (step 6) is the first allocator; review | M3, M4 |
 | Boot never drops memory silently: it panics if the untyped or slots do not fit | count checks in `l4core::boot`; host test on recorded maps | M4 |
 | BootInfo's layout is identical in the kernel and in `libsys` | one `l4core::bootinfo` type; compile-time offset asserts | M4 |
 | Slot `untyped.start + i` holds the untyped `untyped_list[i]` describes, for every `i` below `untyped.end - untyped.start`; every slot in `empty` is null | `l4core::boot` slot plan; host test; M4 self-test | M4 |
@@ -851,7 +853,7 @@ Every entry from ring 3 runs `swapgs`, builds one trap frame at the top of
 the single kernel stack and copies it into the current TCB; every exit
 rebuilds the frame from the next thread's TCB and leaves by `sysretq` only if
 that thread entered by `syscall`, else by `iretq`, with RIP always below
-2^47. NMI, #DF, #MC and #DB run on their own IST stacks and never touch GS.
+2^47. NMI, #DF, #MC and #DB run on their own IST stacks and never read GS.
 
 ### Descriptor tables and MSRs
 
@@ -2749,7 +2751,7 @@ its handler ([ADR 0019](adr/0019-irqcontrol.md)).
 
 | Vectors | Use | Handling |
 | --- | --- | --- |
-| `0x00`-`0x1F` | CPU exceptions | from ring 3: a fault to the thread's handler ([Faults](#faults)), except NMI, #DF and #MC, which panic ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)); 17, 21, 29, 30 and the reserved vectors panic from either ring; from ring 0: panic with the decoded frame (M3), except a `#DB` at `syscall_entry`, which returns ([Kernel entry and exit](#kernel-entry-and-exit)) |
+| `0x00`-`0x1F` | CPU exceptions | from ring 3: a fault to the thread's handler ([Faults](#faults)), except NMI, #DF and #MC, which panic ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)); 9, 15, 17 and 20 to 31 cannot occur and panic from either ring; from ring 0: panic with the decoded frame (M3), except a `#DB` at `syscall_entry`, which returns ([Kernel entry and exit](#kernel-entry-and-exit)) |
 | `0x20`-`0x2F` | 8259 PIC, remapped here and masked | never expected; spurious: no EOI unless the vector's ISR bit is set (an injected MSI) |
 | `0x30`-`0xEF` | 192 device vectors, allocated by the kernel to I/O APIC pins, MSIs and SINTs | IRQ number = vector - `0x30`; see [Delivery](#delivery-1) |
 | `0xF0`-`0xFC` | reserved for IPIs (multi-core stretch goal) | unexpected: logged in debug builds, EOI |
@@ -2764,9 +2766,9 @@ debug](#nmi-double-fault-machine-check-and-debug)). `#BP` (3) has DPL 3, so
 `int n` from ring 3 is a `#GP` fault and cannot enter a device or timer
 handler. `int1` raises `#DB` without a DPL check (from memory; check in M10
 brief 5): from ring 3 it is UserException 1; a ring-0 `#DB` returns only when
-the saved RIP is exactly `syscall_entry`, and any other panics. Vectors 17
-(`#AC`, CR0.AM = 0), 21 (`#CP`, no CET), 29 and 30 (SEV only) and the reserved
-exception vectors cannot occur; only an injected MSI reaches them, and the
+the saved RIP is exactly `syscall_entry`, and any other panics. Vectors 9, 15,
+17 (`#AC`, CR0.AM = 0) and 20 to 31 (`#VE` not enabled, `#CP` without CET, 29
+and 30 SEV only, the rest reserved) cannot occur; only an injected MSI reaches them, and the
 kernel panics. Their gates take the no-error-code entry, so the panic reads
 the frame correctly. An MSI cannot inject vectors 0-15, which the LAPIC
 rejects as illegal (SDM, from memory). The kernel takes interrupts only with
@@ -2868,8 +2870,9 @@ the driver has serviced its device. An edge pin stays open for the first edge
 after an Ack, so no edge that follows an Ack is lost, even on an I/O APIC that
 drops edges on a masked pin (82093AA datasheet, from memory; QEMU latches
 them). A second edge before Ack masks the pin, so a device the driver cannot
-or will not quiet (the PIT at its highest rate, say) costs at most two
-interrupts per Ack, and interrupt load follows the driver's own scheduling.
+or will not quiet (the PIT at its highest rate, say) costs at most three
+interrupts per Ack (two, plus one the local APIC may already hold when the
+mask lands), and interrupt load follows the driver's own scheduling.
 An edge lost while masked comes after a signal the driver has not yet
 handled, so draining the device before Ack still sees it. An MSI cannot be
 masked without touching the device; a masked SINT loses message interrupts
@@ -2938,12 +2941,12 @@ M3) executes the actions through the device window.
 | Each vector in `0x30`-`0xEF` belongs to at most one source; no other vector is issued | `core::irq` allocator, proptest | M7 |
 | An IRQ node slot holds only a notification capability with the Write right and never names a deleted notification | checks in `SetNotification`; IRQ node slots in the derivation list; model test of revoke | M7 |
 | Deleting the last IRQHandler masks its source, empties its IRQ node slot and frees its vector | finalise path, `core::irq` tests, QEMU scenario | M7 |
-| Between two Acks an I/O APIC pin delivers at most two interrupts | `core::irq` state machine, proptest, QEMU scenario with the PIT at its highest rate | M7 |
+| Between two Acks an I/O APIC pin delivers at most three interrupts: two, plus one the local APIC already holds when the mask lands | `core::irq` state machine, proptest, QEMU scenario with the PIT at its highest rate | M7 |
 | No pin is unmasked with Remote IRR set | `core::irq` actions, read-back in `ioapic.rs`, QEMU scenario that deletes a handler with a level interrupt pending | M7 |
 | Every fixed interrupt is EOI'd exactly once: `0x30`-`0xFE` always, `0x20`-`0x2F` only when its ISR bit is set, `0xFF` never | common interrupt exit, timer and device scenarios | M3, M7 |
 | User code cannot enter an interrupt handler with `int n` | DPL 0 on every gate but `#BP`; red-team brief 5 | M3, M10 |
 | No interrupt arrives before the IDT is loaded; pins stay masked until issued; the PIC, LINT0 and LINT1 stay masked | M3 init order, QEMU scenario | M3 |
-| A vector that cannot occur (17, 21, 29, 30, reserved exceptions) panics from either ring and never makes the kernel misread a frame | no-error-code gates and panic path; red-team brief 7 | M3, M10 |
+| A vector that cannot occur (9, 15, 17, 20 to 31) panics from either ring and never makes the kernel misread a frame | no-error-code gates and panic path; red-team brief 7 | M3, M10 |
 | Handling an interrupt takes constant time and reads no user memory | review of the delivery path | M7 |
 
 ### Compared with seL4
@@ -2953,14 +2956,14 @@ M3) executes the actions through the device window.
 | User space picks the vector in `GetIOAPIC` and `GetMSI` (`src/arch/x86/object/interrupt.c`) | The kernel allocates it and returns the IRQ number | No vector namespace for root to manage, and the kernel can refuse a second handler for a pin, which seL4 never checks (`ioapic_decode_map_pin_to_vector`, `src/plat/pc99/machine/ioapic.c`). Lost: user-chosen APIC priority classes, which matter little with IF = 0 in the kernel |
 | `GetIOAPIC` names an I/O APIC by its MADT index and a pin on it (`object-api-arch.xml`, `ioapic_decode_map_pin_to_vector`) | `GetIOAPIC` names a GSI; `GetISA` an ISA IRQ | GSIs are what the MADT's I/O APIC bases and overrides use, so root needs no I/O APIC ordering |
 | Overrides are printed, not applied (`MADT_ISO` in `acpi.c`); user space parses ACPI from the RSDP | `GetISA` applies them in the kernel | User space has no ACPI parser and never reads ACPI |
-| Every `IRQSignal` source is masked on delivery until Ack (`handleInterrupt`, `src/object/interrupt.c`), though an x86 MSI cannot be masked (`maskInterrupt`, `include/plat/pc99/plat/machine/interrupt.h`) | Level pins the same; an edge pin is masked only by a second delivery before Ack; MSI and SINTs never | An edge pin masked from its first delivery loses any edge between the driver's last poll and its Ack; the `pending` bit still bounds it to two interrupts per Ack; a masked SINT breaks host signalling |
+| Every `IRQSignal` source is masked on delivery until Ack (`handleInterrupt`, `src/object/interrupt.c`), though an x86 MSI cannot be masked (`maskInterrupt`, `include/plat/pc99/plat/machine/interrupt.h`) | Level pins the same; an edge pin is masked only by a second delivery before Ack; MSI and SINTs never | An edge pin masked from its first delivery loses any edge between the driver's last poll and its Ack; the `pending` bit still bounds it to three interrupts per Ack; a masked SINT breaks host signalling |
 | Deleting the handler sets the pin's mask bit and keeps its vector (`deletedIRQHandler`, `src/object/interrupt.c`; `ioapic_mask`, `ioapic.c`) | The same, and issuing a pin first checks that Remote IRR is 0 | A level interrupt pending at an earlier deletion must not leave the pin dead for its next owner |
 | PIC mode with `IRQControl_Get` for ISA IRQs (`Arch_checkIRQ`) | I/O APIC only; PIC always masked | Both platforms have an I/O APIC |
 | `GetMSI` takes PCI bus, device, function and handle | Takes no source; returns address and data | Unchecked without an IOMMU; spares drivers the APIC ID |
 | IOSpace and IOPageTable objects drive the VT-d IOMMU, with a master IOSpace capability minted per PCI device (`io.tex`, "I/O Space") | No IOMMU objects; a driver that can program DMA or MSI is trusted with the machine | Neither target gives the guest an IOMMU by default (q35 without `intel-iommu`; Hyper-V, from memory); PLAN.md records DMA as a known limitation (M10 brief 7) |
 | xAPIC or x2APIC at build time (`KernelLAPICMode`, `src/arch/x86/config.cmake`); an xAPIC kernel refuses to boot if the firmware left x2APIC on (`apic_enable`, `src/arch/x86/kernel/xapic.c`) | xAPIC only; x2APIC left on is turned off through the disabled state | One path, run on every boot; a firmware that hands over in x2APIC still boots ([Open questions](#open-questions)) |
 | DPL 3 interrupt gates for `#BP` and for vectors `int_trap_min` (158, or 160 with SMP) to 255 (`init_idt_entry`, `src/arch/x86/64/kernel/vspace.c`); 158/160-254 become unknown system calls (`c_handle_interrupt`, `src/arch/x86/c_traps.c`) | Only `#BP` is DPL 3 | `syscall` is the only entry for system calls |
-| Every exception vector from ring 3, 17, 21, 29 and 30 included, becomes a user fault (`handleUserLevelFault`, `c_traps.c`) | 17, 21, 29, 30 and the reserved vectors panic from either ring | They cannot occur here; only an injected MSI reaches them, and such a driver can already stop the machine with an NMI |
+| Every exception vector from ring 3, 17, 21, 29 and 30 included, becomes a user fault (`handleUserLevelFault`, `c_traps.c`) | 9, 15, 17 and 20 to 31 panic from either ring | They cannot occur here; only an injected MSI reaches them, and such a driver can already stop the machine with an NMI |
 | Timer 157, spurious 255 (`include/plat/pc99/plat/machine.h`); the LVT error entry is never programmed (`apic_init`, `src/arch/x86/kernel/apic.c`) | Timer `0xFD`, error `0xFE`, spurious `0xFF` | Kernel vectors above every device vector; APIC errors are logged in debug builds |
 
 ## I/O ports
@@ -3062,8 +3065,9 @@ The FADT and AML are not read: no ACPI shutdown and no PCI INTx routing
 - MADT entries from offset 44: a length below 2 or an entry past the end
   rejects the MADT (seL4 does not check; a zero length loops forever); a known
   type below its minimum length is skipped, as seL4's `acpi_madt_valid` does.
-- Fixed capacity (4 I/O APICs, 16 overrides, 4 ECAM ranges); entries past it
-  are dropped with a warning. Bounds-checked byte reads only, never a cast of
+- Fixed capacity. More than four I/O APICs or more than one HPET table is a
+  panic, since a device page left out would become device untyped; past 16
+  overrides or 4 ECAM ranges, entries are dropped with a warning. Bounds-checked byte reads only, never a cast of
   table memory. Layouts follow ACPI 6.x (from memory; the M3 host tests check
   them).
 
@@ -3188,7 +3192,8 @@ Hypervisor capability. M3 prints what it found.
 
 ### Hypercalls (M9)
 
-The kernel writes `HV_X64_MSR_GUEST_OS_ID` (`0x4000_0000`) if it is zero, then
+The kernel writes `HV_X64_MSR_GUEST_OS_ID` (`0x4000_0000`), replacing any value
+the firmware left, then
 enables the hypercall page (TLFS `hypercall-interface.md`): the 4 KiB
 page-aligned `.hvcall` section in the kernel's text, mapped read-execute,
 never mapped for user space and named by no capability. Hypercall
@@ -3323,7 +3328,9 @@ The boot summary, which scenarios match line by line, grows by milestone: M0's
 lines (image, memory map, framebuffer, RSDP, hypervisor, command line); from
 M3 the CPUID features the kernel requires, XCR0 and the XSAVE size,
 `IA32_APIC_BASE`, CR0, CR4 and EFER, and `cpu: meltdown: vulnerable`,
-`not vulnerable` or `unknown`; from M4 the BootInfo summary (untyped
+`not vulnerable` or `unknown`, the MADT flags and ACPI table list, the
+Hyper-V overlay MSRs found and, when Hyper-V allows it, the APIC frequency
+MSR; from M4 the BootInfo summary (untyped
 count, RAM and device bytes, the slot regions).
 
 ### Debug system calls
@@ -3348,8 +3355,10 @@ writes THR, so they coexist, with lines possibly interleaved.
 M7's done-when is checked three ways. The `serial` module is
 `#[cfg(feature = "debug")]`, so release code naming it does not compile.
 `cargo xtask test` builds the kernel without `debug`, disassembles it, and
-fails on any instruction immediate in `0x3F8` to `0x3FF`; that also catches a
-port write added outside `serial.rs` or inlined into another function. A
+fails on any `in` or `out` outside the IOPort invocation path in `io.rs`,
+any immediate in `0x3F8` to `0x3FF` moved into `dx`, `edx` or `rdx`, and any
+`serial` symbol (`0x3FF` alone is also the IPC buffer's alignment mask); that also catches a port write added outside `serial.rs` or
+inlined into another function. A
 scenario boots that kernel: all output comes from `uart`, and root ends the
 run through an IOPort capability for `isa-debug-exit` (`0xF4`) made from
 IOPortControl.
@@ -3358,7 +3367,7 @@ IOPortControl.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")`; xtask disassembly check for immediates `0x3F8` to `0x3FF`; release scenario | M7 |
+| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")`; xtask disassembly check (no `in` or `out` outside the IOPort path, no `0x3F8` to `0x3FF` moved into `dx`, no `serial` symbol); release scenario | M7 |
 | Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test; release scenario | M5, M7 |
 | `DebugPutChar` and `DebugDumpScheduler` change no register a thread can rely on | debug scenario comparing registers before and after | M5 |
 | Debug system calls read no user memory and take no capability | handlers use only registers and kernel state; review | M5 |
