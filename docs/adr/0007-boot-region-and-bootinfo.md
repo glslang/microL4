@@ -26,7 +26,8 @@ root task's capabilities can reach:
 ## Decision
 
 - The kernel allocates one zeroed boot region at the top of the highest
-  `USABLE` range above 1 MiB that holds no `kernel_reserved` page: root CNode
+  `USABLE` range above 1 MiB that touches no `kernel_reserved` page nor any
+  2 MiB page holding one: root CNode
   (radix 12), PML4 and paging structures, TCB, IPC buffer, BootInfo, image
   frames and, on Hyper-V, the two SynIC frames ([ADR
   0020](0020-hypervisor-capability.md)). No untyped covers it and it is never
