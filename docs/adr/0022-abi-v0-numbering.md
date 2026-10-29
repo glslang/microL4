@@ -30,9 +30,9 @@ labels.
   4 CNode, 5 and 6 Frames, 7 to 10 the paging levels from PageTable to PML4.
   seL4 interleaves architecture types after its generic ones.
 - **Invocation labels:** one global numbering in ranges of 16 per object
-  type (`0x01` Untyped, `0x10` CNode, `0x20` TCB, `0x40` paging, `0x50`
-  Frame, `0x60` IRQ, `0x70` I/O ports, `0x80` Hypervisor), so a type can gain
-  methods without renumbering another. seL4 generates one dense enumeration
+  type, two for TCB (`0x01` Untyped, `0x10` CNode, `0x20` TCB, `0x40`
+  paging, `0x50` Frame, `0x60` IRQ, `0x70` I/O ports, `0x80` Hypervisor), so
+  a type can gain methods without renumbering another. seL4 generates one dense enumeration
   from its XML interface files.
 
 ## Consequences

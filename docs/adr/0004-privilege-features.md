@@ -26,9 +26,10 @@ alias the kernel image writable.
 ## Decision
 
 - **Required features.** M3 checks CPUID before it changes any state and
-  panics with `CPU lacks <feature>` unless the CPU has NX, PGE, PAT, SMEP and
-  SMAP. It then sets EFER.NXE, CR0.WP, CR4.PGE, CR4.SMEP and CR4.SMAP and
-  never clears them. UMIP is turned on when present and otherwise skipped:
+  panics with one `CPU lacks <features>` line, naming every missing feature,
+  unless the CPU has NX, PGE, PAT, SMEP, SMAP and XSAVE (which M5 first uses;
+  [ADR 0014](0014-fp-simd.md)). EFER.NXE and CR0.WP come set from the loader and M3 checks them; M3
+  sets CR4.PGE, CR4.SMEP and CR4.SMAP. None is ever cleared. UMIP is turned on when present and otherwise skipped:
   it hides only the GDT, IDT and TSS addresses, which are fixed and public
   in microL4. PCID and LA57 are never turned on.
 - **AC and DF.** `IA32_FMASK` clears AC and DF on `syscall`, and every

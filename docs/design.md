@@ -33,7 +33,7 @@ source (`manual/parts/*.tex`) and kernel files in
 | [Scheduling](#scheduling) | Scheduling | M3, M5 |
 | [FP and SIMD](#fp-and-simd) | FP and SIMD | M5 |
 | [Faults](#faults) | (faults) | M5, M6 |
-| [IPC](#ipc) | IPC | M6 |
+| [IPC](#ipc) | IPC | M5, M6 |
 | [Notifications](#notifications) | Notifications | M6 |
 | [Interrupts](#interrupts) | Interrupts | M3, M7, M9 |
 | [I/O ports](#io-ports) | Kernel objects (I/O ports) | M4, M7 |
@@ -83,10 +83,10 @@ The kernel never blocks and has no kernel threads.
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | Kernel code runs with interrupts disabled, from entry to exit; only the idle thread's halt loop runs with `IF = 1` in ring 0 | `IA32_FMASK` clears IF; every IDT gate is an interrupt gate; no `sti` outside the idle loop (review, M10 brief 5) | M3, M5 |
-| Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; M10 brief 6 | M2, M4, M6, M10 |
-| A system call restarted after a preemption point continues its work and never repeats a completed step | progress lives in the objects (untyped watermark, Zombie capabilities, revoke cursor); proptest with preemption injected at random | M2, M4 |
+| Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; M10 brief 6 | M2, M4, M5, M6, M10 |
+| A system call restarted after a preemption point continues its work and never repeats a completed step | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random | M2, M4 |
 | The kernel allocates no memory after boot | the kernel links no allocator; every object comes from `Untyped_Retype` | M4 |
-| The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map; SMAP on (M3); no `stac` anywhere (xtask lint) | M3, M5 |
+| The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map; SMAP on (M3); no `stac` anywhere (CI grep over `kernel/`) | M3, M5 |
 | Every exception and interrupt entry clears RFLAGS.AC and DF before any Rust code runs | `clac` and `cld` in every entry stub ([Kernel entry and exit](#kernel-entry-and-exit)) | M3 |
 | `unsafe` appears only in `kernel/src/arch/`, each block with a `SAFETY:` comment; `core/` has none | `#![deny(unsafe_code)]` outside `arch`, `clippy::undocumented_unsafe_blocks`, `#![forbid(unsafe_code)]` in `core/` | M0 |
 
@@ -131,7 +131,8 @@ source in M1; the milestone named checks it.
 
 ### Rings and segments
 
-M3 loads this GDT, and `IA32_STAR` = `0x0013_0008_0000_0000`.
+M3 loads this GDT; M5, which adds system calls, writes `IA32_STAR` =
+`0x0013_0008_0000_0000`.
 
 | Index | Offset | Selector used | Descriptor |
 | --- | --- | --- | --- |
@@ -177,10 +178,12 @@ M3 loads this GDT, and `IA32_STAR` = `0x0013_0008_0000_0000`.
 | CR4.UMIP | M3 | run without it | it hides the GDT, IDT and TSS addresses [H11], which are fixed and public in microL4 (no KASLR), so it protects nothing; on when present as hygiene |
 | CR4.PCIDE | never set | | PCID is off in v0 ([Address spaces](#address-spaces)) |
 | CR4.LA57 | never set | the loader refuses (`docs/boot.md`) | 4-level paging only |
+| XSAVE (CPUID.1:ECX bit 26) | M3 checks it; M5 sets CR4.OSXSAVE and XCR0 | refuse to boot | eager FP switching ([FP and SIMD](#fp-and-simd)) |
 
 "Refuse to boot" means that M3 checks CPUID [H12] before it changes any
-state and panics with `CPU lacks <feature>`, which reaches COM1 as a
-`KERNEL PANIC` line. Hardening that is silently missing on one target is
+state and panics with one line, `CPU lacks <features>`, naming every missing
+feature, which reaches COM1 as a `KERNEL PANIC` line. XSAVE, which M5 first
+uses, is checked from M3 with the rest. Hardening that is silently missing on one target is
 hardening the M10 red team never tested. QEMU's default model lacks SMEP and
 SMAP [H1], so from M3 xtask's `base_command()` passes `-cpu max,la57=off`,
 and a scenario key `qemu_args:` appends arguments, so a refusal test boots
@@ -318,7 +321,7 @@ in `STATUS.md`, and M10 lists the risk.
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | User code runs only in ring 3 and in 64-bit mode | the GDT has no DPL-3 32-bit code descriptor and there is no LDT; user CS and SS are fixed selectors, never taken from user registers | M3, M5 |
-| The kernel never runs without NX, PGE, PAT, SMEP and SMAP | `arch::cpu::check_features` before any other M3 step; a scenario with `qemu_args: -cpu qemu64` expects `CPU lacks SMEP` | M3 |
+| The kernel never runs without NX, PGE, PAT, SMEP, SMAP and XSAVE | `arch::cpu::check_features` before any other M3 step; the `cpu_refuse` scenario boots `qemu_args: -cpu qemu64` and expects one `CPU lacks` line naming SMEP, SMAP and XSAVE | M3 |
 | CR0.WP, EFER.NXE, CR4.SMEP, CR4.SMAP and CR4.PGE are set before the first user instruction and never cleared | M3 init; the boot summary prints CR0, CR4 and EFER and a scenario matches the line | M3 |
 | Every boot states its Meltdown exposure | M3 prints `cpu: meltdown: vulnerable`, `not vulnerable` or `unknown` from `RDCL_NO`; a scenario matches the line; the Hyper-V check records it in `STATUS.md`; M10 lists the accepted risk | M3, M10 |
 | Kernel code always runs with RFLAGS.AC = 0 and DF = 0 | `IA32_FMASK` includes AC and DF; `clac` and `cld` at every exception and interrupt entry; review of `arch` entry code | M3, M5 |
@@ -372,7 +375,7 @@ A back-reference is a word: 0 for none, or the physical address of the
 capability slot holding the capability that installed the entry, with bit 0
 set. Retype zeroes the object, so a new paging structure has no entries and
 no back-references; a new PML4 then gets entries 256 to 511 from the kernel
-PML4. Device untyped retype only into frames, and device frames are not
+PML4. Device untyped retype only into frames and device untyped, and device frames are not
 zeroed ([Retype](#retype)).
 
 ### Capabilities
@@ -505,8 +508,9 @@ word:
   maps only `Uncached` or `WriteCombining`. The direct map is WB over RAM and
   UC over, or absent from, the pages device untyped come from, so no
   physical page is ever mapped both cacheable and uncacheable [H8]. A device
-  frame mapped WC keeps a UC alias in the direct map; both types are
-  uncacheable, and the kernel never touches that alias.
+  frame mapped WC keeps a UC alias in the direct map. The SDM allows no
+  mixed-type alias at all, so this is an accepted deviation: both types are
+  uncacheable, and the kernel never touches that alias [H8].
 - The capability must be unmapped, the address aligned and in range, the
   table at the mapping level present (a PageTable for 4 KiB, a PageDirectory
   for 2 MiB) and the target entry not present, whatever it holds. Then the
@@ -715,7 +719,9 @@ it.
 Everything sized at run time comes from one boot region, chosen like seL4's
 rootserver region (`init_freemem`, `src/kernel/boot.c`): the top of the
 highest `USABLE` range above 1 MiB, inside the direct map, that fits without
-touching a `kernel_reserved` page. It is aligned to the 128 KiB root CNode and
+touching a `kernel_reserved` page or any 2 MiB page that holds one (the direct
+map maps such a page UC, so a WB user frame there would alias it). M3 panics
+if the kernel image shares a 2 MiB page with a kernel device page. It is aligned to the 128 KiB root CNode and
 holds, in order of decreasing alignment as in seL4's
 `create_rootserver_objects`, the root CNode, the 8 KiB PML4, PDPT, PD and
 PTs, the IPC buffer, BootInfo, image frames, on Hyper-V the two SynIC frames
@@ -779,7 +785,9 @@ frames and the untyped, then empty slots. An 8 MiB span plus the three pages
 after it needs at most 2 PDPTs, 2 PDs and 6 PTs, and 16 + 1 + 10 + 2048 + 448
 is under 4096, so a valid image cannot run out of slots. Every boot-made
 capability is an original; the TCB's slots hold copies derived from slots 2, 3
-and 10.
+and 10, and its `reply` slot holds its reply master, made by boot as a
+derivation root, since the root TCB is never retyped (seL4 does the same in
+`create_initial_thread`, `src/kernel/boot.c`).
 
 BootInfo is one 8 KiB `#[repr(C)]` struct in `l4core::bootinfo`, shared by the
 kernel and `libsys` with compile-time offset asserts: a 1 KiB header and 448
@@ -1130,14 +1138,14 @@ in `Untyped_Retype`.
 | 4 | Notification | 3 | [Object types and sizes](abi.md#object-types-and-sizes) | badge, 0 = unbadged | [Notifications](#notifications) |
 | 5 | CNode | 4 | `2^(radix + 5)`, radix 1 to 42 | guard size (bits 0 to 5) and guard (bits 6 to 63) | [Capability addressing](#capability-addressing) |
 | 6 | Frame | 5, 6 | `2^12`, `2^21` | mapping record: `mapped`, `table >> 13` (23 bits), `vaddr >> 12` (35 bits) | [Address spaces](#address-spaces) |
-| 7 to 9 | PageTable, PageDirectory, PDPT | 7 to 9 | `2^13` ([Objects](#objects)) | mapping record: `mapped`, parent `table`, `index` (33 bits) | [Address spaces](#address-spaces) |
+| 7 to 9 | PageTable, PageDirectory, PDPT | 7 to 9 | `2^13` ([Objects](#objects)) | mapping record: `mapped`, parent `table`, `index` (33 bits in all) | [Address spaces](#address-spaces) |
 | 10 | PML4 | 10 | `2^13` ([Objects](#objects)) | 0 | [Address spaces](#address-spaces) |
 | 11 | IRQControl | none; one at boot | | 0 | [Interrupts](#interrupts) |
 | 12 | IRQHandler | none; from IRQControl | | the IRQ | [Interrupts](#interrupts) |
 | 13 | IOPortControl | none; one at boot | | 0 | [I/O ports](#io-ports) |
 | 14 | IOPort | none; from IOPortControl | | the port range | [I/O ports](#io-ports) |
 | 15 | Hypervisor | none; one at boot on Hyper-V | | `restricted`, `connection`, `post`, `signal`; see [The Hypervisor capability](#the-hypervisor-capability-m9) | [Hyper-V interface](#hyper-v-interface) |
-| 16 | Reply | none; the master at TCB retype, the others by `Call` | names a TCB | bit 0: master | [Reply capabilities](#reply-capabilities) |
+| 16 | Reply | none; the master at TCB retype (the root task's at boot), the others by `Call` or fault delivery | names a TCB | bit 0: master | [Reply capabilities](#reply-capabilities) |
 | 17 | Zombie | none; kernel-internal | names the CNode or TCB being destroyed | bits 0 to 47: slots left to clear; bit 63: 1 for a TCB | [Deletion and finalisation](#deletion-and-finalisation) |
 | 18 to 23 | reserved; no ASID pool type, since back-references replace ASID pools | 11 and up | | | [Address spaces](#address-spaces) |
 | 24 to 31 | reserved | | | | |
@@ -1217,8 +1225,9 @@ point. The paging code uses it to rewrite a mapped capability's back-reference
 in both directions first and panics on a mismatch.
 
 `core/` makes a `SlotAddr` only from a CNode capability and an index below
-`2^radix`, a TCB capability and a slot number, an IRQ number, a link it
-wrote, or a back-reference word `l4core::vspace` wrote (L2 and L3 in
+`2^radix`, a TCB handle (from a TCB capability, a queue or binding link, a
+reply capability, or the current thread) and a slot number, an IRQ number, a
+link it wrote, or a back-reference word `l4core::vspace` wrote (L2 and L3 in
 [Back-references instead of ASIDs](#back-references-instead-of-asids)); the
 kernel makes them only at boot. `arch` reads and writes
 `PHYS_MAP_BASE + addr` by value through raw pointers, never holding a
@@ -1304,8 +1313,8 @@ IRQHandlers, IOPorts and the IRQ node; M9 for Hypervisor capabilities.
 | A back-reference never names an empty slot | `finalise` runs before unlink and zeroing; proptest with mapped capabilities ([Address spaces](#address-spaces)) | M2, M5 |
 | The last capability to an object is finalised exactly once, before its slot empties | `is_final` and the Zombie algorithm; proptest with random preemption | M2 |
 | Every TCB, Endpoint, Notification, CNode and paging structure lies in RAM inside the direct map, below 64 GiB | retype refuses kernel objects from device untyped; RAM untyped only below the direct map's end, `min(phys_map_size, 64 GiB)`; host test of the untyped builder | M2, M4 |
-| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch` | M2, M4, M5, M7 |
-| Capabilities are created only by boot, retype, IRQControl and IOPortControl invocations and `Call`; every other capability is derived from one its holder has | the only callers of `insert_root` and `insert_derived`; red-team brief 1 | M2, M10 |
+| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, the current thread, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch` | M2, M4, M5, M7 |
+| Capabilities are created only by boot, retype, IRQControl and IOPortControl invocations, `Call` and fault delivery (reply capabilities), and deletion (Zombies); every other capability is derived from one its holder has | the only callers of `insert_root` and `insert_derived`; red-team brief 1 | M2, M10 |
 | Destroying a CNode or TCB is preemptible, recurses at most two levels, and keeps every invariant at each step | Zombie algorithm; proptest with random preemption points over nested and cyclic containers, including deleting a slot inside the container its own deletion destroys | M2 |
 | No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; TCB finalisation suspends first; proptest | M2, M5 |
 | The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container; proptest | M2, M7 |
@@ -1381,8 +1390,10 @@ seL4 does below its chunk size. A device untyped only sets its watermark to
 ### Copies, revoke and reclaim
 
 - Copying an untyped (Copy, Mint, IPC transfer) needs it to have no children
-  (`RevokeFirst`). The copy is an original child; the source's watermark
-  goes to its size, so only the copy allocates (seL4 `setUntypedCapAsFull`).
+  (`RevokeFirst`). The copy is an original child and keeps the source's
+  watermark, so memory the source handed out is reset before anything is
+  made there again; the source's watermark then goes to its size, so only the
+  copy allocates (seL4 `setUntypedCapAsFull`).
   Moving an untyped carries its watermark.
 - Revoking an untyped deletes every capability derived from it, so every
   object in its region is finalised and the next retype resets it. This is
@@ -1425,7 +1436,7 @@ and retypes again.
 | `CONFIG_RESET_CHUNK_BITS` = 8; a preemption check every 100 work units | 4 KiB chunks; how often `preempt` polls is the kernel's choice | Fewer checks per page; `core/` stays agnostic of the polling cost |
 | `size_bits` too small is `InvalidArgument` 1, too large `RangeError` 0 to 47 in object-size bits; a device type error is `InvalidArgument` 1; `node_depth` over 64 is `RangeError` 1 to 64, reported after `InvalidRoot` (`lookupSlotForCNodeOp`, `src/kernel/cspace.c`) | `RangeError` with the exact range of the argument at fault; the device error is `InvalidArgument` 0 (`type`); `node_depth` 0 to 64, checked before the root | Detail words name the argument at fault and its real range |
 | `size_bits` of 64 or more is `RangeError` 0 to 47 for every type, fixed-size ones included (`decodeUntypedInvocation`), although `objects.tex`, "Summary of Object Sizes", says it is ignored | Ignored for fixed-size types | As the manual; the argument means nothing for them |
-| A destination that is not a CNode is `MissingCapability` with `node_depth` bits left | 0 bits left; `InvalidRoot` when `root` is not a CNode | One meaning for "bits left" ([Lookup failures](#lookup-failures)) |
+| A destination that is not a CNode is `MissingCapability` with `node_depth` bits left | 0 bits left; `InvalidRoot` when `root` is not a CNode | One meaning for "bits left" in CNode lookups ([Lookup failures](#lookup-failures)); paging `FailedLookup` counts virtual-address bits |
 | No derivation depth limit | Retype fails at depth 4095 | Field width ([Derivation tracking](#derivation-tracking)) |
 
 ## Capability addressing
@@ -1506,7 +1517,7 @@ CNode and Untyped invocations. M5: capability lookups from the TCB's root.
 
 | seL4 | microL4 | Reason |
 | --- | --- | --- |
-| An empty source slot is `MissingCapability` with the source depth as bits left (`src/object/cnode.c`) | 0 bits left | "Bits left" means the same in every report |
+| An empty source slot is `MissingCapability` with the source depth as bits left (`src/object/cnode.c`) | 0 bits left | "Bits left" means the same in every CNode lookup report |
 | Rotate reports a pivot that fails to resolve as a source, but an empty pivot as not a source (`src/object/cnode.c`) | Both as a source | The was-source word means the same for every pivot failure |
 
 ## Derivation tracking
@@ -1624,7 +1635,8 @@ with children (`RevokeFirst`). It gives an unmapped copy of a Frame, whether
 or not the source is mapped. PML4 and Hypervisor capabilities derive. Rights
 only shrink: Copy and Mint take `rights(source) & rights(argument)`; nothing
 else touches rights. A badge is set once and copies keep it (`ipc.tex`,
-"Endpoint Badges"); Mint with badge 0 is a Copy. A Hypervisor Mint only
+"Endpoint Badges"); Mint with badge 0 on an unbadged source is a Copy, and
+any Mint of a badged source fails. A Hypervisor Mint only
 narrows ([The Hypervisor capability](#the-hypervisor-capability-m9)); data 0
 is a Copy.
 
@@ -1643,11 +1655,12 @@ mints each badge once and gives clients only badged capabilities.
 
 ### Built when
 
-M2: `l4core::cdt` (insert, move, swap, unlink, runs, `is_final`) and the
-slot operations, against `model/`, which keeps an explicit parent map;
+M2: `l4core::cdt` (insert, move, swap, unlink, runs, `is_final`), the
+slot operations and every type's derive rule (paging included), against
+`model/`, which keeps an explicit parent map;
 proptest compares capabilities and parents after every step, including at
 random preemption points. M4: CNode invocations decoded. M5: reply masters
-and reply capabilities, paging derive rules, the TCB installs. M6: IPC
+and reply capabilities, the TCB installs. M6: IPC
 transfer, `CNode_SaveCaller` and `CNode_CancelBadgedSends`. M7: the
 IRQ-node install. M9: Hypervisor narrowing.
 
@@ -1711,11 +1724,11 @@ absorbs that (`seL4_TCBBits` in
 | 0 | CSpace root: a CNode capability, or a Zombie while a deletion of that CNode is interrupted | Configure, SetSpace |
 | 1 | VSpace root: a VSpace (PML4) capability | Configure, SetSpace |
 | 2 | IPC buffer frame: a non-device Frame capability that is not a SynIC page | Configure, SetIPCBuffer |
-| 3, 4 | reply master and caller ([Reply capabilities](#reply-capabilities)) | IPC |
+| 3, 4 | reply master and caller ([Reply capabilities](#reply-capabilities)) | retype (the master), IPC (the caller) |
 
 Slots 0 to 2 hold copies derived from the capabilities the caller passes and
 sit in the derivation list like CNode slots, so revoking the original empties
-them. Every install goes through `l4core::cdt`'s one child-insert function, so
+them. Every install goes through `insert_derived`, whose child insert checks the depth limit, so
 a copy that would exceed `MAX_DERIVATION_DEPTH` (4095) is refused with
 IllegalOperation. No CPtr can name a TCB slot.
 
@@ -1802,8 +1815,10 @@ SetTimeoutEndpoint (MCS). Nothing is added.
 ### Creation and configuration
 
 Untyped_Retype zeroes the TCB, then sets `Inactive`, priority 0, MCP 0, a full
-slice and `rflags = 0x202`, copies the FP template into `xsave`, and in debug
-builds appends the TCB to the debug list. `exit` is `Iret`, its zero value.
+slice and `rflags = 0x202`, copies the FP template into `xsave`, puts the
+thread's reply master in its `reply` slot ([Reply
+capabilities](#reply-capabilities)), and in debug builds appends the TCB to
+the debug list. `exit` is `Iret`, its zero value.
 The creator calls Configure, SetSchedParams, and WriteRegisters with
 `rip`, `rsp` and `resume_target`.
 
@@ -1828,7 +1843,7 @@ fetch; with an empty CSpace slot every lookup fails. Neither is a kernel error.
 
 | Target | Suspend | Resume |
 | --- | --- | --- |
-| current thread (the caller) | the empty success reply (`rsi` = 0, `rdi` = 0) is written first, then `Inactive`; another thread is chosen. A later Resume continues after the `syscall` as if Suspend returned NoError | no effect |
+| current thread (the caller) | for a `Call`, the empty success reply (`rsi` = 0, `rdi` = 0) is written first (a `Send` leaves the registers alone); then `Inactive`; another thread is chosen. A later Resume continues after the `syscall` as if Suspend returned NoError | no effect |
 | ready (`Running` or `Restart`) | dequeued, `Inactive` | no effect |
 | blocked on send, receive or notification | removed from the queue, `Inactive` | IPC cancelled, `Restart`: it re-executes its system call, or its faulting instruction if it was sending a fault |
 | `BlockedOnReply` | the server's reply capability to it is deleted ([Reply capabilities](#reply-capabilities)), `Inactive` | the same, then `Restart` |
@@ -1874,7 +1889,7 @@ the kernel implements in `arch` over the direct map and host tests over a
 | A user thread always runs in ring 3 on the user CS and SS; no invocation names CS or SS | register set excludes them; frame initialised at retype | M5 |
 | Returning to ring 3 never faults in ring 0 | sanitiser plus the exit path's checks; red-team scenario resuming threads with random registers | M5, M10 |
 | User FS and GS bases stay below 2^47, and CR4.FSGSBASE = 0 | sanitiser; arch init; boot self-test reads CR4 | M5 |
-| TCB slot 0 holds only a CNode or a Zombie left by an interrupted deletion, slot 1 only a VSpace root, slot 2 only a non-device Frame that is not a SynIC page, or nothing; no CPtr names a TCB slot | `l4core::tcb` decode checks, host tests | M5 |
+| In a TCB that is not itself being destroyed, slot 0 holds only a CNode or a Zombie left by an interrupted deletion, slot 1 only a VSpace root, slot 2 only a non-device Frame that is not a SynIC page, or nothing; no CPtr names a TCB slot | `l4core::tcb` decode checks, host tests | M5 |
 | The kernel never uses a SynIC message or event page as an IPC buffer | SetIPCBuffer and Configure compare the frame with the addresses recorded at boot; host test | M5, M9 |
 | No TCB slot install exceeds `MAX_DERIVATION_DEPTH` | the one child-insert function in `l4core::cdt`; host test at depth 4095 | M5 |
 | At every kernel exit after a TCB is finalised, no ready or endpoint queue, reply capability, scheduler action, `current`, FP owner or debug list names it; nor, from M6, any notification queue or bound notification | finalisation sequence; scheduler proptest and scenarios with deletes (M5); IPC state-machine proptest (M6); red-team brief 2 | M5, M6 |
@@ -2037,18 +2052,18 @@ is about to run, with no #NM trap. The kernel never uses FP or SIMD registers.
 | CR4.FSGSBASE, CR4.PKE | 0 | [FS and GS base](#fs-and-gs-base); PKRU stays disabled |
 | XCR0 | `0x3` | x87 and SSE; every other component disabled |
 
-(Bit meanings from memory; check in M5.) At boot the kernel requires
-CPUID.1:ECX.XSAVE (bit 26) and panics `XSAVE required` without it, checks
+(Bit meanings from memory; check in M5.) The M3 feature check already
+requires CPUID.1:ECX.XSAVE (bit 26) ([CPU features](#cpu-features)). M5 checks
 that CPUID.(EAX=0xD, ECX=0).EAX has bits 0 and 1 before XSETBV (as seL4's
 `Arch_initFpu` checks its feature mask), writes XCR0, and reads
 CPUID.(EAX=0xD, ECX=0).EBX, the area size for the enabled features: it
 panics if that exceeds the TCB's 1024-byte reserve (for x87 and SSE it is
-576). The boot summary prints the required CPUID features, XCR0 and the size,
-for the Hyper-V check. QEMU's default TCG model, `qemu64`, lacks XSAVE
+576). From M5 the boot summary also prints XCR0 and the size, for the
+Hyper-V check. QEMU's default TCG model, `qemu64`, lacks XSAVE
 (from memory), so from M3 xtask's `base_command()` passes
 `-cpu max,la57=off`, and a scenario `cpu_refuse` uses the `qemu_args:` key to
-boot `-cpu qemu64` and expect the kernel's refusal line, which from M5 names
-XSAVE among the missing features. The Hyper-V VM runs with processor
+boot `-cpu qemu64` and expect the kernel's one refusal line, which names XSAVE
+among the missing features. The Hyper-V VM runs with processor
 compatibility mode off (`tools/hyperv/New-L4Vm.ps1`).
 
 Only x87 and SSE, seL4's default (`XSAVE_FEATURE_SET` 3, `XSAVE_SIZE` 576 in
@@ -2223,7 +2238,7 @@ state machine in `l4core` under its proptest.
 | A fault message carries only the faulting thread's own registers and fault data | encoder reads only the faulting TCB; host tests | M5 |
 | A fault reply changes only the registers its fault type names, through `sanitise`, and only label 0 restarts | `l4core::regs` reply decoder, host tests | M5 |
 | Fault delivery never blocks or faults the kernel and allocates nothing | delivery is a Call that blocks the faulting thread and touches kernel memory only | M5 |
-| A ring-0 #DB returns only to `syscall_entry`; every other ring-0 #DB, and any of vectors 17, 21, 29, 30 or a reserved vector, panics | IDT handlers; QEMU scenario: a thread runs `syscall` with TF set and is single-stepped into its own handler | M5 |
+| A ring-0 #DB returns only to `syscall_entry`; every other ring-0 #DB, and any of vectors 9, 15, 17 or 20 to 31, panics | IDT handlers (M3); QEMU scenario: a thread runs `syscall` with TF set and is single-stepped into its own handler (M5) | M3, M5 |
 | No user action makes the kernel take an exception in ring 0 | the kernel never dereferences user addresses; syscall fuzzer; red-team briefs 5 and 6 | M10 |
 
 ### Compared with seL4
@@ -2291,7 +2306,7 @@ places them.
 | `bound_notification` | the bound notification, or null |
 | `fault` | the fault being delivered or awaiting its reply, or none; [Faults](#faults) fixes its contents |
 | IPC buffer slot (slot 2, offset 64) | a derived copy of the buffer's frame capability ([Creation and configuration](#creation-and-configuration), `TCB_SetIPCBuffer`) |
-| `reply` slot (slot 3, offset 96) | the thread's master reply capability, made when the TCB is retyped |
+| `reply` slot (slot 3, offset 96) | the thread's master reply capability, made when the TCB is retyped, or by boot for the root task |
 | `caller` slot (slot 4, offset 128) | the reply capability this thread answers with `Reply` |
 
 No TCB slot is reachable through a `CPtr`. `Restart` means the thread
@@ -2456,12 +2471,13 @@ The reply capability is classic seL4's
   object in an untyped's region descends from that untyped.
 - **Created** when a `Call` or a fault meets a receiver. Its Grant is the
   Grant of the capability the receiver received on; it has no other rights.
-- **Destroyed** when used; when its holder receives on an endpoint again;
+- **Destroyed** when used; while it is in the holder's `caller` slot, when
+  its holder receives on an endpoint again or the holder's TCB is deleted (a
+  saved one survives both);
   when it is deleted from a CSpace slot, directly or with the CNode that
   holds it (it has no children, so revoking it does nothing); when the
   caller leaves `BlockedOnReply` any other way (`cancel_ipc` deletes the one
-  capability derived from the caller's master); and when the holder's TCB is
-  deleted.
+  capability derived from the caller's master).
 - **Saving.** It cannot be copied, minted or sent by IPC, but can be moved.
   `CNode_SaveCaller` (label `0x18`) moves it from the caller slot into a
   CSpace slot, so a server can keep a client waiting while it serves others;
@@ -2503,9 +2519,9 @@ again. After `cancel_all_ipc` nothing refers to the endpoint, so its memory
 may be reused once its finalisation
 ([Deletion and finalisation](#deletion-and-finalisation)) completes.
 
-To reuse a badge, a server revokes the badged capability's children, calls
-`CNode_CancelBadgedSends` to flush senders already queued with it, then
-deletes and re-mints it; messages already delivered are not affected.
+To reuse a badge, a server follows [Badges, revoke and
+`CNode_CancelBadgedSends`](#badges-revoke-and-cnode_cancelbadgedsends);
+messages already delivered are not affected.
 
 `cancel_all_ipc`, `cancel_badged_sends` and `cancel_all_signals` are not
 preemptible in v0, as in seL4 (`cancelAllIPC`, `cancelBadgedSends`,
@@ -2595,7 +2611,7 @@ delivered registers with the model.
 | Queued threads are served in arrival order | host tests; proptest against the model's FIFO queues | M5, M6 |
 | No queue, link or reply capability refers to a deleted endpoint, notification or TCB: finalisation empties queues and bindings, and deleting a TCB cancels its IPC, before the memory can be retyped | `cancel_ipc` and `cancel_all_ipc` from finalisation (M5); `cancel_all_signals` and unbind (M6); proptest with deletions; red-team brief 2 | M5, M6, M10 |
 | A reply capability, other than a master, exists only while the thread it names is `BlockedOnReply`, and there is at most one per thread | `send`, `receive`, `reply`, `cancel_ipc` and their host tests; proptest | M5, M6 |
-| Every TCB's `reply` slot holds its own master reply capability, a derivation root at depth 0, from retype until finalisation; nothing but that finalisation copies, moves, revokes or deletes a master, and only a master has a reply capability derived from it | TCB retype; the capability core refuses masters as sources and inserts reply capabilities only under one; proptest | M5, M6 |
+| Every TCB's `reply` slot holds its own master reply capability, a derivation root at depth 0, from retype (or, for the root task's TCB, from boot) until finalisation; nothing but that finalisation copies, moves, revokes or deletes a master, and only a master has a reply capability derived from it | TCB retype; the capability core refuses masters as sources and inserts reply capabilities only under one; proptest | M5, M6 |
 | A thread `BlockedOnReceive` has an empty caller slot | receive step 1, host test; proptest | M5, M6 |
 | The receiver gets the first delivered-length words of the sender's message and nothing else from any thread; its other message registers keep its own values | `transfer` and host tests; proptest comparing register sets; ping-pong scenario | M5, M6 |
 | The kernel reads an IPC buffer only through a non-device frame capability in the TCB's IPC buffer slot, writes it only with Write, and touches only its 128 words | `IpcEnv` buffer accessor takes a word index below 128; `TCB_SetIPCBuffer` checks ([Creation and configuration](#creation-and-configuration)) | M5 |
@@ -2617,7 +2633,7 @@ delivered registers with the model.
 | `CNode_SaveCaller` with an empty caller slot succeeds and leaves the destination empty (`src/object/cnode.c`, `invokeCNodeSaveCaller`) | returns `IllegalOperation` | the server learns it had nothing to save instead of failing later on an empty slot |
 | Non-MCS `cancelIPC` clears the fault record only for `BlockedOnReply`, and non-MCS `cancelAllIPC` and `cancelBadgedSends` restart a fault sender without clearing it; MCS clears it in `cancelIPC` and makes a cancelled fault sender `Inactive` (`src/object/endpoint.c`, `cancelIPC`, `restart_thread_if_no_fault`) | every cancellation clears it and restarts the thread, which re-raises the fault if its cause remains | `doIPCTransfer` (`src/kernel/thread.c`) sends a fault message whenever the record is set, so a stale record would turn a later ordinary send into a fault message, and `doReplyTransfer` would treat the reply to a later `Call` as a fault reply |
 | `NBRecv` with nothing pending sets only the badge register (`src/kernel/thread.c`, `doNBRecvFailedTransfer`) | also sets `rsi` to 0 | every register a receive returns is defined, so the model can compare it and `libsys` can rely on it |
-| The master reply capability is made when the thread is first started (`src/kernel/thread.c`, `restart`, and `src/kernel/boot.c` for the initial thread, both calling `setupReplyMaster`) | made when the TCB is retyped | the master then exists for the TCB's whole life, so no path has to check for it; nothing observable changes, since only a started thread can `Call` or fault |
+| The master reply capability is made when the thread is first started (`src/kernel/thread.c`, `restart`, and `src/kernel/boot.c` for the initial thread, both calling `setupReplyMaster`) | made when the TCB is retyped, and by boot for the root task's TCB | the master then exists for the TCB's whole life, so no path has to check for it; nothing observable changes, since only a started thread can `Call` or fault |
 | A reply transfers the message, then deletes the reply capability (`src/kernel/thread.c`, `doReplyTransfer`) | deletes it first, then transfers | "consumed when used" holds before any other effect. It differs only when a saved reply capability sits in the very slot the caller names as its receive slot: seL4 finds that slot full and moves no capability, microL4 can fill it |
 | A fastpath handles common `Call` and `ReplyRecv` cases (`src/arch/x86/c_traps.c`, `include/arch/x86/arch/fastpath/fastpath.h`) | none in v0 | one path to model and test; timings under TCG mean little (PLAN.md, Risks) |
 
@@ -3326,12 +3342,12 @@ a panic only exits with failure.
 
 The boot summary, which scenarios match line by line, grows by milestone: M0's
 lines (image, memory map, framebuffer, RSDP, hypervisor, command line); from
-M3 the CPUID features the kernel requires, XCR0 and the XSAVE size,
-`IA32_APIC_BASE`, CR0, CR4 and EFER, and `cpu: meltdown: vulnerable`,
+M3 the CPUID features the kernel requires, `IA32_APIC_BASE`, CR0, CR4 and EFER, and `cpu: meltdown: vulnerable`,
 `not vulnerable` or `unknown`, the MADT flags and ACPI table list, the
 Hyper-V overlay MSRs found and, when Hyper-V allows it, the APIC frequency
 MSR; from M4 the BootInfo summary (untyped
-count, RAM and device bytes, the slot regions).
+count, RAM and device bytes, the slot regions); from M5 XCR0 and the XSAVE
+size.
 
 ### Debug system calls
 
@@ -3407,7 +3423,7 @@ touches the ABI needs an ADR. Sorted by milestone.
 | Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5: a scenario sets TF and calls `Yield`, on QEMU and Hyper-V | No trap is taken; the RIP special case stays as insurance |
 | Is `swapgs` worth keeping on one core? | seL4's uniprocessor build avoids it and a class of mistakes with it | M5 | Keep it for the multi-core stretch goal; the IST handlers never read GS |
 | Which register is a cancelled thread's restart point? | Cancelled threads become `Restart` and re-execute `syscall`; IPC relies on their argument registers being untouched | M5 | Restart `rip` is the saved user `rcx` minus 2, the length of `syscall`; IPC writes a blocked thread's registers only on completion |
-| In what order are each invocation's errors checked? | The M10 fuzzer's model needs it | M5 | The order `docs/abi.md` lists them in; `TCB_Configure` follows seL4's order (buffer, long-running delete, CSpace root, VSpace root) |
+| In what order are each invocation's errors checked? | The M10 fuzzer's model needs it | M5 | The order `docs/abi.md` lists them in; the TCB invocations that install capabilities give an explicit order, seL4's (buffer, long-running delete, CSpace root, VSpace root) |
 | Enable AVX? | It costs 256 more bytes of save and restore per switch and makes behaviour differ between hosts | M5, with the user-target decision | No; it fits the 1024-byte XSAVE reserve if it is wanted later |
 | Which target do user crates build for? | A target with SSE needs the XSAVE switching to be exercised | M5 | `x86_64-unknown-none` for every user crate through M10; nothing planned needs floating point |
 | Are Read and Write the only Frame rights? | The capability header has four rights bits, all assigned | M5 | Yes; execute permission comes from a map attribute, off by default |

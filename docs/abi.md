@@ -54,8 +54,8 @@ register use.
 | --- | --- | --- |
 | `rdx` | system call number | preserved |
 | `rdi` | capability pointer (destination or source) | badge of the received message (receive phases); otherwise preserved |
-| `rsi` | `MessageInfo` | `MessageInfo` of the received or reply message |
-| `r10`, `r8`, `r9`, `r15` | message registers MR0, MR1, MR2, MR3 | MR0 to MR3 of the received or reply message |
+| `rsi` | `MessageInfo` | `MessageInfo` of the received or reply message; preserved by `Send`, `NBSend`, `Reply` and `Yield` |
+| `r10`, `r8`, `r9`, `r15` | message registers MR0, MR1, MR2, MR3 | MR0 to MR3 of the received or reply message; preserved by `Send`, `NBSend`, `Reply` and `Yield` |
 | `rcx`, `r11` | destroyed by `syscall` (user RIP, RFLAGS) | destroyed |
 | `rax`, `rbx`, `rbp`, `r12`, `r13`, `r14` | ignored | preserved |
 | `rsp` | ignored | preserved; a value at or above 2^47 reads back as 0 |
@@ -190,7 +190,8 @@ codes are seL4's:
 | 5 | `AlignmentError` | | |
 
 The detail words for each code are in [Error detail
-words](#error-detail-words). IPC itself returns no error codes; what a
+words](#error-detail-words). IPC returns no error codes except `InvalidCapability` from a `Call` on an
+endpoint capability without the rights it needs; what a
 thread sees when an IPC cannot complete is in [Errors, faults and silent
 drops](#errors-faults-and-silent-drops).
 
@@ -703,10 +704,11 @@ from retype until the TCB is finalised, as a derivation root at depth 0. The
 reply capability's Grant is the Grant of the capability the receiver received
 on; it carries no other rights. It is consumed by `Reply`, by the reply phase
 of `ReplyRecv`, or, once saved, by `Send`, `NBSend` or `Call` on it (`Call`
-then also returns an empty kernel reply). It is deleted unused when its holder
-receives on an endpoint, when it is deleted from a CSpace slot (directly or
-with the CNode holding it), when the caller is suspended, restarted or
-deleted, and when the holder's TCB is deleted. It cannot be copied, minted or
+then also returns an empty kernel reply). It is deleted unused when it is deleted from
+a CSpace slot (directly or with the CNode holding it) and when the caller is
+suspended, restarted or deleted; while it is still in the holder's `caller`
+slot, also when the holder receives on an endpoint or its TCB is deleted (a
+saved one survives both). It cannot be copied, minted or
 transferred; it can be moved. `Reply` with an empty caller slot does nothing.
 
 ### CNode_SaveCaller
@@ -740,7 +742,8 @@ checked in the order listed, as in seL4 (`src/object/cnode.c`,
 | Wait | `Recv` | Read | if a signal is pending, return the word and clear it; else block |
 | Poll | `NBRecv` | Read | if a signal is pending, return the word and clear it; else return 0 |
 
-The message registers and `extra_caps` of a signal are ignored. Only the
+The message registers of a signal are ignored, and its `extra_caps`, though
+still looked up, are not transferred. Only the
 bound thread may wait on or poll a bound notification. A pending signal
 through an unbadged capability returns word 0, like an empty poll.
 
@@ -844,7 +847,7 @@ explains the behaviour.
 | --- | --- |
 | Object type | 1 ([Object types and sizes](#object-types-and-sizes)) |
 | Size | 2^11 = 2048 bytes, `TCB_BITS` = 11, aligned to its size |
-| Why | five 32-byte capability slots at offset 0, a 192-byte register frame, at most 256 bytes of scheduling and IPC state, and a 1024-byte XSAVE reserve at offset 1024 (576 used). 1 KiB cannot hold even the used XSAVE area, the frame and the slots; the layout is internal to the kernel apart from the slots at offset 0 |
+| Why | five 32-byte capability slots at offset 0, a 192-byte register frame, at most 256 bytes of scheduling and IPC state, and a 1024-byte XSAVE reserve at offset 1024 (576 used). the slots, the frame and the used XSAVE area (928 bytes) would fit 1 KiB, but not with the scheduling and IPC state as well, so 2 KiB; the layout is internal to the kernel apart from the slots at offset 0 |
 
 After `Untyped_Retype`, a TCB is `Inactive` with priority 0, MCP 0, every
 register 0 except `rflags` = `0x202`, the initial FP state below, empty CSpace,
@@ -1008,14 +1011,24 @@ TCB's slots and installs copies derived from the given capabilities; sets the
 IPC buffer address. The kernel reaches the buffer through the frame at offset
 `ipc_buffer` modulo the frame size. Priority is not changed.
 
-Errors: `TruncatedMessage` (fewer than 3 words, fewer than 2 extra capabilities,
-or no frame when `ipc_buffer` ≠ 0); `IllegalOperation` (extra capability 0 is
-not a CNode after `cspace_root_data` is applied, 1 is not a valid VSpace root,
-2 is not a non-device Frame, deleting the current CSpace or VSpace root would
-be long-running, or a derived copy would exceed `MAX_DERIVATION_DEPTH`);
-`InvalidCapability` 3 (extra capability 2 is one of the two SynIC pages);
-`AlignmentError` (`ipc_buffer` not a multiple of 1024); any error from applying
-`cspace_root_data` or deriving a capability ([Capabilities](#capabilities)).
+Errors, checked in this order as in seL4's `decodeTCBConfigure`; the first
+failure is returned, and no slot changes unless every check passes:
+
+1. `TruncatedMessage`: fewer than 3 words, fewer than 2 extra capabilities,
+   or no frame when `ipc_buffer` ≠ 0.
+2. The buffer, when `ipc_buffer` ≠ 0: `IllegalOperation` if extra capability
+   2 is not a non-device Frame or its derived copy would exceed
+   `MAX_DERIVATION_DEPTH`; `InvalidCapability` 3 if it is one of the two
+   SynIC pages; `AlignmentError` if `ipc_buffer` is not a multiple of 1024.
+3. `IllegalOperation` if deleting the current CSpace root (slot 0) would be
+   long-running.
+4. The CSpace root: any error from applying `cspace_root_data`
+   ([Capabilities](#capabilities)); `IllegalOperation` if the result is not a
+   CNode or its derived copy would exceed `MAX_DERIVATION_DEPTH`.
+5. The VSpace root: `IllegalOperation` if extra capability 1 is not a valid
+   VSpace root or its derived copy would exceed `MAX_DERIVATION_DEPTH`.
+
+Every depth refusal is decided while decoding, before any slot is emptied.
 
 #### `0x24` `TCB_SetPriority`
 
@@ -1060,11 +1073,15 @@ seL4).
 Extra capability 0: the IPC buffer frame, a non-device Frame capability,
 needed only if `ipc_buffer` ≠ 0.
 
-Errors: `TruncatedMessage`; `IllegalOperation` (not a non-device Frame, or the
-derived copy would exceed `MAX_DERIVATION_DEPTH`); `InvalidCapability` 1
-(the frame is one of the two SynIC pages, whose physical addresses the kernel
-records at boot; the kernel never reads them through a capability);
-`AlignmentError`; any error from deriving the capability.
+Effect: deletes the old buffer frame from slot 2, installs a copy derived
+from the given capability (or leaves slot 2 empty when `ipc_buffer` = 0), and
+sets the IPC buffer address.
+
+Errors, checked in this order (step 2 of `TCB_Configure`): `TruncatedMessage`;
+`IllegalOperation` (not a non-device Frame, or the derived copy would exceed
+`MAX_DERIVATION_DEPTH`); `InvalidCapability` 1 (the frame is one of the two
+SynIC pages, whose physical addresses the kernel records at boot; the kernel
+never reads them through a capability); `AlignmentError`.
 
 #### `0x28` `TCB_SetSpace`
 
@@ -1074,15 +1091,16 @@ records at boot; the kernel never reads them through a capability);
 | 1 | `cspace_root_data` | as for `TCB_Configure` |
 
 Extra capabilities: 0 the CSpace root, 1 the VSpace root, as for
-`TCB_Configure`. Errors: as for `TCB_Configure`, without the buffer cases
-(the depth refusal included).
+`TCB_Configure`. Errors: steps 1, 3, 4 and 5 of `TCB_Configure`, in that
+order (fewer than 2 words or 2 extra capabilities is `TruncatedMessage`).
 
 #### `0x29` `TCB_Suspend`
 
 No arguments. The target becomes `Inactive`: any IPC it is blocked in is
 cancelled (a pending fault included) and it leaves the ready queue. If the
-target is the caller, the empty success reply (`rsi` = 0, `rdi` = 0) is
-written first; it takes effect when the caller is resumed, which continues
+target is the caller and the invocation is a `Call`, the empty success reply
+(`rsi` = 0, `rdi` = 0) is written first (with `Send` or `NBSend` the caller's
+registers are left alone, as for any `Send`); it takes effect when the caller is resumed, which continues
 after its `syscall` as if Suspend returned `NoError`. Suspending an
 `Inactive` thread does nothing. Errors: none of its own.
 
@@ -1346,7 +1364,7 @@ Extra capability 0: the VSpace, a PML4 capability. Result: none.
 | --- | --- |
 | `TruncatedMessage` | fewer than 1 message register, or no extra capability |
 | `InvalidCapability`, cap 1 | the extra capability is not a PML4 |
-| `InvalidCapability`, cap 0 | the structure is mapped, or still holds entries (left when its parent was deleted); `Unmap` it first |
+| `InvalidCapability`, cap 0 | the structure is mapped, or still holds entries (left when its parent was deleted or unmapped); `Unmap` it first |
 | `InvalidArgument`, arg 0 | `vaddr` with the ignored bits cleared is at or above `USER_TOP` |
 | `FailedLookup` | `PageDirectory_Map`: no PDPT covers `vaddr` (39). `PageTable_Map`: no PDPT (39) or no PageDirectory (30) covers `vaddr` |
 | `DeleteFirst` | the entry this structure would occupy is present: a structure, or for `PageTable_Map` a 2 MiB frame |
@@ -2128,6 +2146,7 @@ accesses; which ranges become untyped for user space is in `docs/design.md`,
 ## Invocation label index
 
 One global numbering, grouped by object type; label 0 is invalid. A label
+marked with a milestone returns `IllegalOperation` until that milestone. A label
 outside the invoked capability's own rows returns `IllegalOperation`.
 Endpoints and notifications have no labels: their `label` is user data.
 
@@ -2136,13 +2155,13 @@ Endpoints and notifications have no labels: their `label` is user data.
 | `0x01` | `Untyped_Retype` | `0x40` | `PDPT_Map` |
 | `0x10` | `CNode_Revoke` | `0x41` | `PDPT_Unmap` |
 | `0x11` | `CNode_Delete` | `0x42` | `PageDirectory_Map` |
-| `0x12` | `CNode_CancelBadgedSends` | `0x43` | `PageDirectory_Unmap` |
+| `0x12` | `CNode_CancelBadgedSends` (M6) | `0x43` | `PageDirectory_Unmap` |
 | `0x13` | `CNode_Copy` | `0x44` | `PageTable_Map` |
 | `0x14` | `CNode_Mint` | `0x45` | `PageTable_Unmap` |
 | `0x15` | `CNode_Move` | `0x50` | `Frame_Map` |
 | `0x16` | `CNode_Mutate` | `0x51` | `Frame_Unmap` |
 | `0x17` | `CNode_Rotate` | `0x52` | `Frame_Remap` |
-| `0x18` | `CNode_SaveCaller` | `0x53` | `Frame_GetAddress` (M9) |
+| `0x18` | `CNode_SaveCaller` (M6) | `0x53` | `Frame_GetAddress` (M9) |
 | `0x20` | `TCB_ReadRegisters` | `0x60` | `IRQControl_GetISA` |
 | `0x21` | `TCB_WriteRegisters` | `0x61` | `IRQControl_GetIOAPIC` |
 | `0x22` | `TCB_CopyRegisters` | `0x62` | `IRQControl_GetMSI` (M9) |
@@ -2154,8 +2173,8 @@ Endpoints and notifications have no labels: their `label` is user data.
 | `0x28` | `TCB_SetSpace` | `0x71` to `0x73` | `IOPort_In8`, `IOPort_In16`, `IOPort_In32` |
 | `0x29` | `TCB_Suspend` | `0x74` to `0x76` | `IOPort_Out8`, `IOPort_Out16`, `IOPort_Out32` |
 | `0x2A` | `TCB_Resume` | `0x80` | `Hypervisor_PostMessage` (M9) |
-| `0x2B` | `TCB_BindNotification` | `0x81` | `Hypervisor_SignalEvent` (M9) |
-| `0x2C` | `TCB_UnbindNotification` | `0x82` | `Hypervisor_Eom` (M9) |
+| `0x2B` | `TCB_BindNotification` (M6) | `0x81` | `Hypervisor_SignalEvent` (M9) |
+| `0x2C` | `TCB_UnbindNotification` (M6) | `0x82` | `Hypervisor_Eom` (M9) |
 | `0x2D` | `TCB_SetTLSBase` | `0x83` | `Hypervisor_VpIndex` (M9) |
 
 Reserved: `0x02` to `0x0F` (Untyped), `0x19` to `0x1F` (CNode), `0x2E` to
