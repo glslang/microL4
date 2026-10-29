@@ -8,18 +8,21 @@ Current milestone: M0 · Bootstrap and tooling
 - [x] Scenario runner (`cargo xtask test`): 60-second timeout, expected lines in order, exit status checked; `hello` and `panic` pass locally on QEMU 8.2.2 (TCG)
 - [x] `cargo xtask image` (GPT disk, FAT32 ESP, dynamic VHDX) and the CI workflow that uploads the VHDX
 - [x] `tools/hyperv/`: create the VM, swap the VHDX, read COM1 from the named pipe, and a one-step check (not run: no Hyper-V in the cloud)
-- [x] Host tests: 31 in `core/` (handoff layout, memory-map normalisation, ELF parser, command line), 10 in `xtask/`; Miri clean on `core/`
+- [x] Host tests: 30 in `core/` (handoff validation, memory-map normalisation, ELF parser, command line), 10 in `xtask/`; the handoff layout is checked at compile time on every target; Miri clean on `core/`
+- [x] CI green on the first run (`ubuntu-latest`, QEMU 10.2); now pinned to `ubuntu-24.04` to match the cloud image's QEMU 8.2
+- [x] Spec check of `docs/boot.md` against seL4's x86_64 boot code, and a fresh review of the whole diff. The reviewer would sign off once its three should-fixes landed: the empty-segment underflow in the loader (also found by Codex), `arch::memory_map` trusting an unvalidated handoff, and the Hyper-V COM1 reader connecting too late. All three are fixed, along with its nits.
 
 ## Next
-- [ ] CI green on the M0 PR
 - [ ] Hyper-V check (owner): boot the CI-built VHDX with `tools/hyperv/Test-L4Vhdx.ps1` and paste the COM1 log into the PR
 - [ ] Then M1 · Design and ABI: `docs/design.md` and `docs/abi.md` v0; fold the handoff from `docs/boot.md` into `abi.md`
 
 ## Open issues
 - The loader's 1:1 map of low memory is still live in the kernel. M3 must drop it before M5 creates a user address space, which uses the lower half (ADR 0002).
 - `kprintln!` has no lock. Fine while interrupts are off; M3 must add one when it turns them on.
-- The firmware's GDT and IDT sit in memory reported as `USABLE`. The kernel must load its own (M3) before reusing that memory (M4).
-- No guard page under the 64 KiB boot stack; a kernel stack overflow corrupts BSS silently until M3 maps a guard.
+- The firmware's IDT and stack (and, on some firmware, its GDT) sit in memory reported as `USABLE`. The kernel must load its own GDT and IDT (M3) before reusing that memory (M4).
+- No guard page under the 64 KiB boot stack; a kernel stack overflow corrupts `.data` silently until M3 maps a guard.
+- M4 must make device untyped from the gaps in the memory map, not only from `MMIO` entries, or the virtio-net and framebuffer BARs go missing (`docs/boot.md`, Memory map).
+- M5 must put the embedded root-task image in its own reclaimable section (`docs/boot.md`, Comparison with seL4).
 - `rustup target add` worked in this session, unlike the plan's test; the `build-std` fallback is kept and was tested with `XTASK_FORCE_BUILD_STD=1` (ADR 0001).
 
 ## Decisions this milestone
@@ -31,4 +34,4 @@ Current milestone: M0 · Bootstrap and tooling
 - M0 VHDX: not yet booted
 
 ## Last session
-2026-10-29: M0 implemented end to end. Both scenarios pass locally in about 3 s each; release builds and the build-std fallback pass too.
+2026-10-29: M0 implemented end to end. Both scenarios pass locally in about 3 s each and in CI; release builds and the build-std fallback pass too. Review fixes landed; only the owner's Hyper-V check remains.

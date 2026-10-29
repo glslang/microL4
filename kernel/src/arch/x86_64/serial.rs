@@ -18,6 +18,7 @@ const LSR: u16 = COM1 + 5;
 const LCR_DLAB: u8 = 0x80;
 const LCR_8N1: u8 = 0x03;
 const LSR_THR_EMPTY: u8 = 0x20;
+const LSR_TX_IDLE: u8 = 0x40;
 
 /// Polls before giving up on one byte, so a missing or stuck UART cannot hang
 /// the kernel. At 115200 baud a byte takes about 87 µs; this is far longer.
@@ -25,6 +26,8 @@ const MAX_SPINS: u32 = 100_000;
 
 /// Sets COM1 to 115200 baud, 8N1, FIFOs on, interrupts off.
 pub fn init() {
+    // Let the loader's last bytes leave before the FIFO is reset.
+    wait_for(LSR_TX_IDLE);
     // SAFETY: these are the standard 16550 registers at COM1, which both
     // supported platforms provide, and programming them has no effect on
     // memory.
@@ -39,14 +42,19 @@ pub fn init() {
     }
 }
 
-fn write_byte(b: u8) {
+/// Polls the line status register until `bit` is set, or gives up.
+fn wait_for(bit: u8) {
     for _ in 0..MAX_SPINS {
         // SAFETY: reading the line status register has no side effects.
-        if unsafe { inb(LSR) } & LSR_THR_EMPTY != 0 {
-            break;
+        if unsafe { inb(LSR) } & bit != 0 {
+            return;
         }
         core::hint::spin_loop();
     }
+}
+
+fn write_byte(b: u8) {
+    wait_for(LSR_THR_EMPTY);
     // SAFETY: writing the transmit register only sends the byte.
     unsafe { outb(DATA, b) };
 }

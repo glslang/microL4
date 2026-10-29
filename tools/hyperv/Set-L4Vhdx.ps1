@@ -28,7 +28,7 @@ Get-VMHardDiskDrive -VMName $VMName | Remove-VMHardDiskDrive
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DiskPath) | Out-Null
 Copy-Item -Force -LiteralPath $VhdxPath -Destination $DiskPath
 Unblock-File -LiteralPath $DiskPath
-$drive = Add-VMHardDiskDrive -VMName $VMName -Path $DiskPath -Passthru
+$drive = Add-VMHardDiskDrive -VMName $VMName -ControllerType SCSI -Path $DiskPath -Passthru
 Set-VMFirmware -VMName $VMName -FirstBootDevice $drive
 
 Write-Host "VM '$VMName' now boots $DiskPath (copied from $VhdxPath)."

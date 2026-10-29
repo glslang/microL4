@@ -1,8 +1,9 @@
 /*
  * The kernel image. It is linked at KERNEL_VIRT_BASE (l4core::handoff) and
  * the loader maps it there, contiguously, at whatever physical address it
- * allocated. Each output section starts on a page so that text, read-only
- * data and writable data get separate page permissions.
+ * allocated. The first section of each PT_LOAD segment starts on a page, so
+ * that text, read-only data and writable data get separate page permissions.
+ * .bss follows .data in the writable segment without page alignment.
  */
 ENTRY(_start)
 

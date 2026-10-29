@@ -33,6 +33,8 @@ fn inb(port: u16) -> u8 {
 
 /// 115200 baud, 8N1, FIFOs on, interrupts off; the same as the kernel uses.
 pub fn init() {
+    // Let the firmware's last bytes leave before the FIFO is reset.
+    wait_for(0x40);
     outb(COM1 + 1, 0x00);
     outb(COM1 + 3, 0x80);
     outb(COM1, 0x01);
@@ -42,13 +44,18 @@ pub fn init() {
     outb(COM1 + 4, 0x03);
 }
 
-fn write_byte(b: u8) {
+/// Polls the line status register until `bit` is set, or gives up.
+fn wait_for(bit: u8) {
     for _ in 0..MAX_SPINS {
-        if inb(COM1 + 5) & 0x20 != 0 {
-            break;
+        if inb(COM1 + 5) & bit != 0 {
+            return;
         }
         core::hint::spin_loop();
     }
+}
+
+fn write_byte(b: u8) {
+    wait_for(0x20);
     outb(COM1, b);
 }
 

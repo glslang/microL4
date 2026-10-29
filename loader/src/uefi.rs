@@ -119,7 +119,7 @@ pub struct ConfigurationTable {
 }
 
 // EFI_ALLOCATE_TYPE
-pub const ALLOCATE_ANY_PAGES: u32 = 0;
+pub const ALLOCATE_MAX_ADDRESS: u32 = 1;
 
 // EFI_MEMORY_TYPE
 pub const RESERVED_MEMORY_TYPE: u32 = 0;

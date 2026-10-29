@@ -153,7 +153,7 @@ fn boot(image: Handle, st: &SystemTable) -> Result<Launch, Error> {
     let mut pt = PageTables::alloc(bs, paging::tables_needed(phys_map_size, kernel_size), nx)?;
     pt.map_identity(phys_map_size)?;
     pt.map_direct(phys_map_size)?;
-    for seg in elf.segments().filter(|s| s.memsz > 0) {
+    for seg in elf.segments() {
         pt.map_kernel_segment(&seg, kernel_phys)?;
     }
     log!(
@@ -198,13 +198,16 @@ fn boot(image: Handle, st: &SystemTable) -> Result<Launch, Error> {
 }
 
 /// Allocates `pages` zeroed 4 KiB pages of LoaderData and returns the
-/// physical address of the first.
+/// physical address of the first. The pages lie below [`MAX_PHYS_MAP`], so
+/// the direct map always covers them: they come from RAM, which raises
+/// `phys_map_size` up to that limit.
 fn alloc_pages(bs: &BootServices, pages: usize) -> Result<u64, Error> {
-    let mut addr = 0u64;
-    // SAFETY: a plain AllocatePages call with a valid out pointer.
+    // For AllocateMaxAddress, the highest address the allocation may use.
+    let mut addr = MAX_PHYS_MAP - 1;
+    // SAFETY: a plain AllocatePages call with a valid in/out pointer.
     unsafe {
         (bs.allocate_pages)(
-            uefi::ALLOCATE_ANY_PAGES,
+            uefi::ALLOCATE_MAX_ADDRESS,
             uefi::LOADER_DATA,
             pages,
             &mut addr,

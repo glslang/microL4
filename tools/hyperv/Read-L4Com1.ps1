@@ -38,6 +38,8 @@ try {
             if ((Get-Date) -gt $deadline) {
                 throw "COM1 pipe \\.\pipe\$PipeName did not appear within $TimeoutSeconds s. Is the VM running?"
             }
+        } catch [System.UnauthorizedAccessException] {
+            throw "Access to \\.\pipe\$PipeName was denied. Run PowerShell as Administrator."
         }
     }
 

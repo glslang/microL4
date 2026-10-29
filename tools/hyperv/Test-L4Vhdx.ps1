@@ -36,10 +36,15 @@ param(
 $ErrorActionPreference = 'Stop'
 
 & (Join-Path $PSScriptRoot 'Set-L4Vhdx.ps1') -VhdxPath $VhdxPath -VMName $VMName
-Start-VM -Name $VMName
+# Hyper-V drops COM1 output while no client is connected, and the loader's
+# first line comes a few seconds into the boot. Start the VM as a job and go
+# straight into the reader, whose connect loop waits for the pipe to appear.
+$start = Start-VM -Name $VMName -AsJob
 try {
     $result = & (Join-Path $PSScriptRoot 'Read-L4Com1.ps1') -PipeName $PipeName -TimeoutSeconds $TimeoutSeconds -LogPath $LogPath
 } finally {
+    # Surfaces a Start-VM failure, if there was one, then stops the VM.
+    Receive-Job -Job $start -Wait -AutoRemoveJob | Out-Null
     Stop-VM -Name $VMName -TurnOff -Force
 }
 

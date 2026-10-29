@@ -49,13 +49,16 @@ pub const fn phys_to_virt(phys: u64) -> u64 {
     PHYS_MAP_BASE + phys
 }
 
-/// The memory map the loader left, as a slice.
-///
-/// The caller must have called [`Handoff::validate`] on `h` first.
+/// The memory map the loader left, as a slice. Panics if the handoff is
+/// invalid, so that safe code cannot conjure a slice from a bad one.
 pub fn memory_map(h: &Handoff) -> &'static [MemoryRegion] {
-    // SAFETY: `validate` checked that the array is aligned and lies inside the
-    // direct map, which the loader built. The loader wrote it, and nothing
-    // writes loader memory afterwards: the kernel allocates nothing yet.
+    if let Err(e) = h.validate() {
+        panic!("bad handoff: {e}");
+    }
+    // SAFETY: `validate` just checked that the array is aligned and lies
+    // inside the direct map, which the loader built. The loader wrote it, and
+    // nothing writes loader memory afterwards: the kernel allocates nothing
+    // yet. MemoryRegion is plain integers, so any contents are valid.
     unsafe {
         core::slice::from_raw_parts(
             phys_to_virt(h.memory_map) as *const MemoryRegion,

@@ -5,6 +5,7 @@ use core::arch::asm;
 const EFER: u32 = 0xC000_0080;
 const EFER_NXE: u64 = 1 << 11;
 const CR4_LA57: u64 = 1 << 12;
+const CR0_WP: u64 = 1 << 16;
 const DEBUG_EXIT_PORT: u16 = 0xF4;
 /// Makes QEMU exit with status 35, the same failure status as the kernel's.
 const DEBUG_EXIT_FAILURE: u32 = 0x11;
@@ -85,20 +86,28 @@ pub fn fail() -> ! {
     }
 }
 
-/// Loads `pml4` into CR3 and jumps to the kernel with `handoff` in `rdi`.
+/// Sets CR0.WP, so that ring 0 honours read-only pages, loads `pml4` into
+/// CR3 and jumps to the kernel with `handoff` in `rdi`.
 ///
 /// # Safety
 ///
-/// Boot services must be gone and interrupts off. `pml4` must map the code
-/// running this function 1:1 and `entry` at its link address, and `handoff`
-/// must be the physical address of a complete Handoff.
+/// Boot services must be gone and interrupts off, and nothing may write
+/// memory the firmware's tables map read-only after this point. `pml4` must
+/// map the code running this function 1:1 and `entry` at its link address,
+/// and `handoff` must be the physical address of a complete Handoff.
 pub unsafe fn enter_kernel(pml4: u64, entry: u64, handoff: u64) -> ! {
-    // SAFETY: the caller upholds the contract above. After the CR3 write the
-    // next instruction is still mapped, by the 1:1 mapping.
+    let cr0: u64;
+    // SAFETY: reading CR0 has no side effects.
+    unsafe { asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: the caller upholds the contract above. Setting WP only makes
+    // writes to read-only pages fault, and nothing here writes memory. After
+    // the CR3 write the next instruction is still mapped, by the 1:1 map.
     unsafe {
         asm!(
+            "mov cr0, {cr0}",
             "mov cr3, {pml4}",
             "jmp {entry}",
+            cr0 = in(reg) cr0 | CR0_WP,
             pml4 = in(reg) pml4,
             entry = in(reg) entry,
             in("rdi") handoff,

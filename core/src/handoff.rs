@@ -228,6 +228,32 @@ impl RegionKind {
     }
 }
 
+// The loader and the kernel are built for different targets, so each build
+// checks the layout docs/boot.md specifies rather than trusting both compilers
+// to agree.
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(offset_of!(Handoff, magic) == 0);
+    assert!(offset_of!(Handoff, version) == 8);
+    assert!(offset_of!(Handoff, size) == 12);
+    assert!(offset_of!(Handoff, kernel_phys_base) == 16);
+    assert!(offset_of!(Handoff, kernel_size) == 24);
+    assert!(offset_of!(Handoff, phys_map_size) == 32);
+    assert!(offset_of!(Handoff, memory_map) == 40);
+    assert!(offset_of!(Handoff, memory_map_len) == 48);
+    assert!(offset_of!(Handoff, rsdp) == 56);
+    assert!(offset_of!(Handoff, framebuffer) == 64);
+    assert!(offset_of!(Handoff, cmdline_len) == 96);
+    assert!(offset_of!(Handoff, cmdline) == 104);
+    assert!(size_of::<Handoff>() == 360);
+    assert!(size_of::<Framebuffer>() == 32);
+    assert!(offset_of!(Framebuffer, width) == 16);
+    assert!(offset_of!(Framebuffer, stride) == 24);
+    assert!(offset_of!(Framebuffer, format) == 28);
+    assert!(size_of::<MemoryRegion>() == 24);
+    assert!(offset_of!(MemoryRegion, kind) == 16);
+};
+
 /// Sorts `regions` by base, drops empty ones and merges neighbours of the same
 /// kind that touch. Returns how many entries of `regions` are now meaningful.
 ///
@@ -273,37 +299,8 @@ pub fn total_bytes(regions: &[MemoryRegion], kind: RegionKind) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::mem::{offset_of, size_of};
+    use core::mem::size_of;
     use std::vec::Vec;
-
-    // The loader and the kernel are built for different targets, so pin the
-    // layout here rather than trusting both compilers to agree.
-    #[test]
-    fn handoff_layout_is_pinned() {
-        assert_eq!(offset_of!(Handoff, magic), 0);
-        assert_eq!(offset_of!(Handoff, version), 8);
-        assert_eq!(offset_of!(Handoff, size), 12);
-        assert_eq!(offset_of!(Handoff, kernel_phys_base), 16);
-        assert_eq!(offset_of!(Handoff, kernel_size), 24);
-        assert_eq!(offset_of!(Handoff, phys_map_size), 32);
-        assert_eq!(offset_of!(Handoff, memory_map), 40);
-        assert_eq!(offset_of!(Handoff, memory_map_len), 48);
-        assert_eq!(offset_of!(Handoff, rsdp), 56);
-        assert_eq!(offset_of!(Handoff, framebuffer), 64);
-        assert_eq!(offset_of!(Handoff, cmdline_len), 96);
-        assert_eq!(offset_of!(Handoff, cmdline), 104);
-        assert_eq!(size_of::<Handoff>(), 360);
-    }
-
-    #[test]
-    fn framebuffer_and_region_layout_is_pinned() {
-        assert_eq!(size_of::<Framebuffer>(), 32);
-        assert_eq!(offset_of!(Framebuffer, width), 16);
-        assert_eq!(offset_of!(Framebuffer, stride), 24);
-        assert_eq!(offset_of!(Framebuffer, format), 28);
-        assert_eq!(size_of::<MemoryRegion>(), 24);
-        assert_eq!(offset_of!(MemoryRegion, kind), 16);
-    }
 
     #[test]
     fn magic_spells_its_name() {

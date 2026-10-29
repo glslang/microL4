@@ -9,10 +9,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# ubuntu-24.04 matches the cloud sessions' image (QEMU 8.2), so scenario
+# output, and from M8 golden images, agree between CI and sessions.
 jobs:
   test:
     name: Test and build the VHDX
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +40,7 @@ jobs:
 
   lint:
     name: rustfmt and clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +53,7 @@ jobs:
 
   miri:
     name: Miri on core
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
