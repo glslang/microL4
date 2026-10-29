@@ -4,8 +4,9 @@
 //! its physical address in `rdi`. Every address inside it is physical; the
 //! kernel reaches them through the direct map at [`PHYS_MAP_BASE`].
 //!
-//! This layout is a boot ABI, specified in `docs/boot.md`. Change it only
-//! together with that note and an ADR, and bump [`HANDOFF_VERSION`].
+//! This layout is a boot ABI, specified in `docs/abi.md`, "Boot handoff".
+//! Change it only together with that section and an ADR, and bump
+//! [`HANDOFF_VERSION`].
 
 use core::fmt;
 
@@ -229,7 +230,7 @@ impl RegionKind {
 }
 
 // The loader and the kernel are built for different targets, so each build
-// checks the layout docs/boot.md specifies rather than trusting both compilers
+// checks the layout docs/abi.md specifies rather than trusting both compilers
 // to agree.
 const _: () = {
     use core::mem::{offset_of, size_of};

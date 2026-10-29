@@ -34,7 +34,8 @@ cargo xtask run
 ## Layout
 
 - `loader/` is a UEFI application that loads `kernel.elf`, builds the first
-  page tables and hands over to the kernel ([`docs/boot.md`](docs/boot.md)).
+  page tables and hands over to the kernel ([`docs/boot.md`](docs/boot.md);
+  the handoff itself is in [`docs/abi.md`](docs/abi.md)).
 - `kernel/` is the kernel, running in ring 0 in the upper half.
 - `core/` holds logic shared by both and tested on the host.
 - `xtask/` builds disk images, runs QEMU and checks scenarios.

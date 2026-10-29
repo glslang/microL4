@@ -3,7 +3,7 @@
 //! The loader jumps to `_start` in 64-bit mode on its own page tables, with
 //! interrupts off and the physical address of the [`Handoff`] in `rdi`. Those
 //! tables map this image at KERNEL_VIRT_BASE, physical memory at
-//! PHYS_MAP_BASE and, for now, low memory 1:1. See docs/boot.md.
+//! PHYS_MAP_BASE and, for now, low memory 1:1. See docs/abi.md, "Boot handoff".
 
 use core::arch::global_asm;
 
