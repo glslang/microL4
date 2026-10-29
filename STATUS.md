@@ -16,7 +16,7 @@ Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 a
 - [ ] M3 · Paging and interrupts. First, before any feature that needs them: xtask passes `-cpu max,la57=off` and scenarios gain a `qemu_args:` key; the loader allocates below 64 GiB (ADR 0006); `tools/hyperv/New-L4Vm.ps1` turns processor compatibility mode off; the CPU feature check covers XSAVE too and prints one `CPU lacks` line naming every missing feature; the boot summary prints the CPUID features the kernel requires, `IA32_APIC_BASE` and the Meltdown line (XCR0 and the XSAVE size from M5)
 
 ## Open issues
-- QEMU's default CPU model (`qemu64`), which xtask uses today, lacks SMEP, SMAP and XSAVE (from memory). The kernel requires all three from M3 and M5 (ADRs 0004 and 0014), so M3 must change xtask first.
+- QEMU's default CPU model (`qemu64`), which xtask uses today, lacks SMEP, SMAP and XSAVE (from memory). The kernel checks for all three from M3 (ADRs 0004 and 0014), so M3 must change xtask first.
 - The loader's 1:1 map of low memory is still live in the kernel; M3 drops it (`docs/design.md`, Privilege levels).
 - `kprintln!` has no lock. Fine while interrupts are off, and the kernel never enables them outside the idle loop (`docs/design.md`, Kernel execution model).
 - The firmware's IDT and stack sit in `USABLE` memory; M3 loads the kernel's own before M4 reuses any (`docs/design.md`, Boot).

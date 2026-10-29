@@ -34,8 +34,8 @@ tracking (`lazyFPURestore` in `include/machine/fpu.h`) it switches state in
   disable flag.
 - From M3, xtask's `base_command()` passes `-cpu max,la57=off`; a scenario
   boots `-cpu qemu64` through the `qemu_args:` key and expects the kernel's
-  refusal line, which from M5 names XSAVE ([ADR
-  0004](0004-privilege-features.md)).
+  one refusal line, which names XSAVE among the missing features (the M3
+  feature check, [ADR 0004](0004-privilege-features.md)).
 
 ## Consequences
 

@@ -2127,7 +2127,7 @@ change.
 | The kernel executes no FP or SIMD instruction but XSAVE64, XRSTOR64, XSETBV, XGETBV | `x86_64-unknown-none` and `compile_error!` on SSE (both in place since M0); review of `arch` assembly | M5 |
 | XRSTOR64 in the kernel never faults | areas written only by XSAVE64 or from the template; no invocation exposes them; host test of the template's header and MXCSR | M5 |
 | XCR0 is `0x3` and the enabled area fits the TCB's reserve | boot check of CPUID leaf 0xD | M5 |
-| The kernel refuses to boot on a CPU without XSAVE, with a refusal line, rather than fault later | boot check; QEMU scenario `cpu_refuse` (`qemu_args: -cpu qemu64`) | M5 |
+| The kernel refuses to boot on a CPU without XSAVE, with its one refusal line, rather than fault later | the M3 feature check ([Privilege levels](#privilege-levels)); QEMU scenario `cpu_refuse` (`qemu_args: -cpu qemu64`) | M3 |
 | The FP owner is never a finalised TCB | TCB finalisation clears it | M5 |
 | CR0.TS = CR0.EM = 0, CR0.NE = 1, CR4.OSFXSR = OSXMMEXCPT = OSXSAVE = 1 from boot on | arch init; boot self-test reads them back | M5 |
 
