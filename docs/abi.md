@@ -1976,8 +1976,8 @@ before embedding it, and the kernel image, root image included, is at most
 | Root virtual range | Content | Mapping |
 | --- | --- | --- |
 | `[user_image_start, user_image_end)` | the root ELF's `PT_LOAD` segments, file bytes then zeros; a page no segment covers is unmapped | per segment: RX, R or RW; NX unless executable |
-| `[user_image_end, + 0x1000)` | IPC buffer | RW, NX |
-| `[user_image_end + 0x1000, + 0x2000)` | BootInfo | RW, NX |
+| `[user_image_end, user_image_end + 0x1000)` | IPC buffer, one page | RW, NX |
+| `[user_image_end + 0x1000, user_image_end + 0x3000)` | BootInfo, two pages | RW, NX |
 
 The kernel requires every segment to be page-separated, not both writable
 and executable, and inside `[USER_MIN, USER_TOP - 0x3000)`, the span to be
