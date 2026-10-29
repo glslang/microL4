@@ -1,5 +1,5 @@
 # Status
-Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 are written and spec-checked; the fresh review is in progress. Next: M2 · Capability core and model and M3 · Paging and interrupts, which can run in parallel.
+Current milestone: M1 · Design and ABI, complete: the done-when test passed and the fresh reviewers signed off on 2026-10-29. Next: M2 · Capability core and model and M3 · Paging and interrupts, which can run in parallel.
 
 ## Done
 - [x] M0 · Bootstrap and tooling (PR #1, merged 2026-10-29)
@@ -8,10 +8,10 @@ Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 a
 - [x] Six designer subagents wrote the areas (capabilities, IPC, threads, address spaces, interrupts and I/O, boot and ABI); a fresh spec checker per area compared each with the seL4 manual's source and kernel code (commit `7a852638f502`), made 143 fixes in place and raised 24 must-fix items, all settled
 - [x] `docs/abi.md` v0: system calls and registers, `MessageInfo`, IPC buffer, capability pointers and lookup, errors and detail words, object types and sizes, every invocation's label, arguments, results and errors, fault messages, BootInfo, the initial CSpace, root-task entry state, debug calls, and the boot handoff moved from `docs/boot.md`
 - [x] ADRs 0004 to 0023 and a list of open questions, each with its default and the milestone that answers it (`docs/design.md`, Open questions)
-- [ ] Fresh review of both documents against the done-when test, and its sign-off
+- [x] Fresh review against the done-when test by three reviewers, one per group of areas. They found 7 blocking contradictions, 18 should-fix items and 39 nits; all were fixed, and each reviewer re-checked its items and signed off. The link check passes, and all 189 invariants name their milestone
 
 ## Next
-- [ ] M1: fix what the fresh review reports, then tick M1
+- [ ] Merge the M1 PR, then start M2 and M3 (two sessions can run them in parallel)
 - [ ] M2 · Capability core and model, from `docs/design.md` Kernel objects to Derivation tracking: the 32-byte slot, the depth-and-`low` derivation list (ADR 0012), copy, mint, move, mutate, rotate, delete, revoke, Zombies, untyped retype, the `moved` hook for paging back-references
 - [ ] M3 · Paging and interrupts. First, before any feature that needs them: xtask passes `-cpu max,la57=off` and scenarios gain a `qemu_args:` key; the loader allocates below 64 GiB (ADR 0006); `tools/hyperv/New-L4Vm.ps1` turns processor compatibility mode off; the CPU feature check covers XSAVE too and prints one `CPU lacks` line naming every missing feature; the boot summary prints the CPUID features the kernel requires, `IA32_APIC_BASE` and the Meltdown line (XCR0 and the XSAVE size from M5)
 
@@ -57,4 +57,4 @@ Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 a
 - M1 is documents only; the next Hyper-V check is at the end of M3.
 
 ## Last session
-2026-10-29: M1 written. The shared ABI decisions came first; six designer subagents then wrote the areas in parallel, a fresh spec checker per area compared each with seL4's manual source, and the lead settled the cross-area questions (39 decisions, now in the documents and ADRs). `sel4.systems` is blocked by the proxy, so the manual was read from its LaTeX source in the seL4 repository. The fresh review is next.
+2026-10-29: M1 written. The shared ABI decisions came first; six designer subagents then wrote the areas in parallel, a fresh spec checker per area compared each with seL4's manual source, and the lead settled the cross-area questions (39 decisions, now in the documents and ADRs). `sel4.systems` is blocked by the proxy, so the manual was read from its LaTeX source in the seL4 repository. Three fresh reviewers then checked both documents; their blocking findings were contradictions between sections (the M3 boot order, XSAVE milestones, the root TCB's reply master, the M5/M6 split), all fixed. M1 signed off. The next session starts M2 or M3 from the playbook prompt, once the M1 PR is merged.
