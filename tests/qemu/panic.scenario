@@ -1,0 +1,7 @@
+# A deliberate kernel panic prints its source location and message, then
+# exits QEMU with the failure status.
+cmdline: test=panic
+exit: failure
+expect: microL4 kernel
+expect: KERNEL PANIC at kernel/src/main.rs:
+expect: deliberate panic requested by the command line

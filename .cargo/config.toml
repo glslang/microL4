@@ -1,0 +1,8 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# Kernel (and, from M5, user) crates. The kernel is linked at a fixed upper-half
+# address, so it must not be a position-independent executable. The target's
+# default code model is already `kernel`.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static"]

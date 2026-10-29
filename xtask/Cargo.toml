@@ -1,0 +1,7 @@
+[package]
+name = "xtask"
+description = "cargo xtask: build, image, run and test microL4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
