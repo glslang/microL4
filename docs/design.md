@@ -108,7 +108,7 @@ to 511 of every address space. The kernel refuses to boot without NX, PGE,
 PAT, SMEP and SMAP, and turns UMIP on when the CPU has it
 ([ADR 0004](adr/0004-privilege-features.md)).
 
-Hardware facts this note relies on are listed once, here. Each is from memory
+Hardware facts this document relies on are listed once, here. Each is from memory
 of the Intel SDM or of QEMU and Hyper-V behaviour, not checked against a
 source in M1; the milestone named checks it.
 
