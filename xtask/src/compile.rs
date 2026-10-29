@@ -108,7 +108,10 @@ fn has_prebuilt_std(target: &str) -> Result<bool> {
     if std::env::var_os("XTASK_FORCE_BUILD_STD").is_some_and(|v| v == "1") {
         return Ok(false);
     }
-    let sysroot = crate::output(Command::new("rustc").args(["--print", "sysroot"]))?;
+    // Ask the compiler cargo will use: `$RUSTC` if set, else the rustup
+    // proxy, which honours the toolchain cargo was invoked with.
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let sysroot = crate::output(Command::new(rustc).args(["--print", "sysroot"]))?;
     let lib = Path::new(sysroot.trim())
         .join("lib/rustlib")
         .join(target)

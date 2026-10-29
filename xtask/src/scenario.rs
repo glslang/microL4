@@ -32,6 +32,9 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PARALLEL: usize = 2;
 /// Serial lines shown when a scenario fails.
 const TAIL_LINES: usize = 40;
+/// Serial lines kept in the log; a guest stuck in a print loop cannot fill
+/// the disk.
+const MAX_LOG_LINES: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
@@ -270,10 +273,20 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
     let deadline = start + sc.timeout;
     let mut timed_out = false;
     loop {
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        // Checked on every line, so a guest that never stops printing still
+        // hits the limit.
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = if left.is_zero() {
+            Err(RecvTimeoutError::Timeout)
+        } else {
+            rx.recv_timeout(left)
+        };
+        match line {
             Ok(line) => {
                 matcher.feed(&line);
-                transcript.push(line);
+                if transcript.len() < MAX_LOG_LINES {
+                    transcript.push(line);
+                }
             }
             Err(RecvTimeoutError::Timeout) => {
                 timed_out = true;

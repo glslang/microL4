@@ -5,9 +5,15 @@ At the end of M0, M3, M5, M8 and M9, boot the VHDX that CI built and paste the
 COM1 log into the milestone's PR. A session that finds a failing Hyper-V log in
 a PR treats it like a failing test.
 
-The scripts need the Hyper-V PowerShell module and an elevated PowerShell, or
-membership of Hyper-V Administrators. They work in Windows PowerShell 5.1 and
-PowerShell 7.
+The scripts need the Hyper-V PowerShell module and an elevated PowerShell:
+membership of Hyper-V Administrators manages the VM but may not open its COM1
+pipe. They work in Windows PowerShell 5.1 and PowerShell 7. Windows client
+editions refuse to run unsigned scripts by default; allow them for the current
+window with:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+```
 
 ## Once: create the VM
 

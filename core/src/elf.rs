@@ -150,8 +150,16 @@ impl<'a> Elf<'a> {
         self.entry
     }
 
-    /// The loadable segments, in file order.
+    /// The non-empty loadable segments, in file order. A `PT_LOAD` with
+    /// `memsz == 0` occupies no memory, so it is validated by
+    /// [`Elf::parse`] but never yielded: its address need not lie anywhere
+    /// near the image.
     pub fn segments(&self) -> impl Iterator<Item = Segment> + 'a {
+        self.load_headers().filter(|s| s.memsz > 0)
+    }
+
+    /// Every `PT_LOAD` header, empty or not.
+    fn load_headers(&self) -> impl Iterator<Item = Segment> + 'a {
         let Elf {
             data,
             phoff,
@@ -177,12 +185,11 @@ impl<'a> Elf<'a> {
         &self.data[seg.offset as usize..][..seg.filesz as usize]
     }
 
-    /// The page-aligned virtual range `[start, end)` covering every non-empty
-    /// loadable segment.
+    /// The page-aligned virtual range `[start, end)` covering every segment
+    /// [`Elf::segments`] yields.
     pub fn bounds(&self) -> (u64, u64) {
-        let nonempty = || self.segments().filter(|s| s.memsz > 0);
-        let start = nonempty().map(|s| s.vaddr).min().unwrap_or(0);
-        let end = nonempty().map(|s| s.vend()).max().unwrap_or(0);
+        let start = self.segments().map(|s| s.vaddr).min().unwrap_or(0);
+        let end = self.segments().map(|s| s.vend()).max().unwrap_or(0);
         // Rounding up cannot overflow: check_segments rejected segments that
         // end within the last page of the address space.
         (start & !(PAGE_SIZE - 1), end.next_multiple_of(PAGE_SIZE))
@@ -191,7 +198,7 @@ impl<'a> Elf<'a> {
     fn check_segments(&self) -> Result<(), ElfError> {
         let mut any = false;
         let mut entry_ok = false;
-        for (i, s) in self.segments().enumerate() {
+        for (i, s) in self.load_headers().enumerate() {
             any = true;
             let file_end = s
                 .offset
@@ -212,7 +219,7 @@ impl<'a> Elf<'a> {
             }
             // Overlap is judged on whole pages, because that is the unit the
             // loader maps with.
-            for t in self.segments().take(i) {
+            for t in self.load_headers().take(i) {
                 if pages_overlap(&s, &t) {
                     return Err(ElfError::OverlappingSegments);
                 }
@@ -501,7 +508,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_segments_do_not_widen_bounds() {
+    fn empty_segments_are_not_yielded() {
+        // An empty segment far below the image must not reach a loader, which
+        // would compute its offset from the image start.
         let b = build(
             K,
             &[
@@ -509,7 +518,25 @@ mod tests {
                 load(PF_R, 0x1000, 0, 0, 0),
             ],
         );
-        assert_eq!(Elf::parse(&b).unwrap().bounds(), (K, K + PAGE_SIZE));
+        let elf = Elf::parse(&b).unwrap();
+        assert_eq!(elf.bounds(), (K, K + PAGE_SIZE));
+        assert!(elf.segments().all(|s| s.memsz > 0));
+        assert_eq!(elf.segments().count(), 1);
+    }
+
+    #[test]
+    fn empty_segments_are_still_checked() {
+        let b = build(
+            K,
+            &[
+                load(PF_R | PF_X, 0x1000, K, 0x100, 0x100),
+                load(PF_R, 0x1000, 0, 0x10, 0),
+            ],
+        );
+        assert_eq!(
+            Elf::parse(&b).unwrap_err(),
+            ElfError::FileSizeExceedsMemSize
+        );
     }
 
     #[test]
