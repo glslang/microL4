@@ -12,7 +12,7 @@
 //!    [`Handoff`], and
 //! 6. switches to the new page tables and jumps to the kernel.
 //!
-//! docs/boot.md specifies the state the kernel is entered in.
+//! docs/abi.md, "Boot handoff", specifies the state the kernel is entered in.
 
 #![no_std]
 #![no_main]

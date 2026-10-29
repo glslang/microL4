@@ -13,8 +13,7 @@ guest on the owner's machine.
 - Keep `unsafe` inside `kernel/src/arch/`, each block with a `SAFETY:`
   comment. The kernel's `#![deny(unsafe_code)]` and
   `clippy::undocumented_unsafe_blocks` enforce this.
-- Record any decision that changes `docs/abi.md` (until M1, the handoff in
-  `docs/boot.md`) as a new ADR in `docs/adr/`.
+- Record any decision that changes `docs/abi.md` as a new ADR in `docs/adr/`.
 - Never tick a milestone without a fresh reviewer's sign-off.
 - Update `STATUS.md` before ending the session.
 
@@ -43,7 +42,7 @@ Plain `cargo test` and `cargo build` cover only the host crates (`core`,
 | `xtask/` | build, image, QEMU runner and scenario harness |
 | `tests/qemu/` | boot scenarios, one `*.scenario` file each |
 | `tools/` | `setup.sh`, and `hyperv/` scripts for the owner's host |
-| `docs/` | design notes (`boot.md`), ADRs in `adr/` |
+| `docs/` | `design.md` (kernel design), `abi.md` (the ABI every milestone codes against), `boot.md` (the loader), ADRs in `adr/` |
 
 ## Conventions
 
