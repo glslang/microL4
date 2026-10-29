@@ -61,8 +61,8 @@ Option 3.
   copies start unmapped, as in seL4. PML4 capabilities derive freely.
 - Every slot move of a mapped capability rewrites its back-reference. The
   capability core's `Kernel` trait has `moved(cap, old_slot, new_slot)`,
-  called after `CNode_Move`, `CNode_Mutate`, both halves of `CNode_Rotate`
-  and every Zombie swap.
+  called after `CNode_Move`, `CNode_Mutate`, both halves of `CNode_Rotate`,
+  the Rotate swap, every Zombie swap and `CNode_SaveCaller`.
 - Every use of a link checks it in both directions first, and panics on a
   mismatch: before writing through a capability's (table, index), the kernel
   checks that the table's back-reference names the capability's slot, and

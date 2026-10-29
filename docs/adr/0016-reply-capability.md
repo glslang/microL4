@@ -38,10 +38,10 @@ reports success (`src/object/cnode.c`).
 - The reply capability is used once, by `Reply`, by `ReplyRecv`, or by
   `Send`, `NBSend` or `Call` once saved. It cannot be copied, minted or sent
   by IPC; it can be moved.
-- It is deleted unused, while in the holder's `caller` slot, when its holder
-  receives on an endpoint; in any slot, when that slot is deleted; when the caller is suspended, restarted or deleted (by deleting
-  the one capability derived from the caller's master), and when the holder's
-  TCB is deleted. The caller then stays `BlockedOnReply` until it is itself
+- It is deleted unused: while in the holder's `caller` slot, when its holder
+  receives on an endpoint or the holder's TCB is deleted; in any slot, when
+  that slot is deleted, or when the caller is suspended, restarted or deleted
+  (by deleting the one capability derived from the caller's master). The caller then stays `BlockedOnReply` until it is itself
   suspended, restarted or deleted; the kernel never invents a reply.
 - `CNode_SaveCaller` exists, label `0x18`, and returns `IllegalOperation`
   when the caller slot is empty.

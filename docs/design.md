@@ -409,8 +409,8 @@ which the capability core applies in M2:
 - Moving a mapped frame or paging-structure capability rewrites the
   back-reference in its table to the new slot. The capability core's
   `Kernel` trait has `moved(cap, old_slot, new_slot)`, called after
-  `CNode_Move`, `CNode_Mutate`, both halves of `CNode_Rotate` and every
-  Zombie swap. M2 defines and calls the hook; M5 fills it in.
+  `CNode_Move`, `CNode_Mutate`, both halves of `CNode_Rotate`, the Rotate
+  swap, every Zombie swap and `CNode_SaveCaller`. M2 defines and calls the hook; M5 fills it in.
 
 ### Back-references instead of ASIDs
 
@@ -613,7 +613,7 @@ and dirty bits in, a table whose memory may be retyped. TCG hides both
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | Every frame mapping lies in `[USER_MIN, USER_TOP)`; no invocation writes a PML4 entry above 255 | `l4core::vspace` range checks before any walk; host tests at both bounds and around 2^47 | M5 |
-| L1, L2 and L3 hold after every operation | one `core` module writes all entries, back-references and mapping fields; `moved(cap, old_slot, new_slot)` runs after every Move, Mutate, both halves of Rotate and every Zombie swap; the M2 proptest covers nested CNode deletion with mapped capabilities in slot 0 and random preemption, and M5 adds mapping state to the model | M2, M5 |
+| L1, L2 and L3 hold after every operation | one `core` module writes all entries, back-references and mapping fields; `moved(cap, old_slot, new_slot)` runs after every Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; the M2 proptest covers nested CNode deletion with mapped capabilities in slot 0 and random preemption, and M5 adds mapping state to the model | M2, M5 |
 | Every use of a back-reference or mapping field first checks the link in both directions, and a mismatch panics instead of writing | `l4core::vspace` link checks before each write through a link; a host test breaks a link and expects the panic | M5 |
 | A present entry points at a live object of the right kind | frames and structures detach before they die; L1 to L3; proptest | M5 |
 | A paging structure is mapped at most once, only when empty, and only into a structure reachable from a PML4, so mappings form trees | derivation refuses table capabilities; the Map checks; proptest | M2, M5 |

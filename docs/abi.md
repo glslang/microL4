@@ -191,7 +191,8 @@ codes are seL4's:
 
 The detail words for each code are in [Error detail
 words](#error-detail-words). IPC returns no error codes except `InvalidCapability` from a `Call` on an
-endpoint capability without the rights it needs; what a
+empty slot or on an endpoint or notification capability without the rights
+it needs; what a
 thread sees when an IPC cannot complete is in [Errors, faults and silent
 drops](#errors-faults-and-silent-drops).
 
