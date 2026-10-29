@@ -1030,6 +1030,8 @@ failure is returned, and no slot changes unless every check passes:
    VSpace root or its derived copy would exceed `MAX_DERIVATION_DEPTH`.
 
 Every depth refusal is decided while decoding, before any slot is emptied.
+Each capability's type is checked before it is derived, so an untyped, with
+children or not, is `IllegalOperation` here, never seL4's `RevokeFirst`.
 
 #### `0x24` `TCB_SetPriority`
 
