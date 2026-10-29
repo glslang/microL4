@@ -1,0 +1,10 @@
+# Every unstable flag the build uses lives in this file.
+#
+# `cargo xtask` passes this file with `--config` and sets RUSTC_BOOTSTRAP=1
+# only when the prebuilt standard library for a target is missing, which
+# happens when `rustup target add` cannot reach static.rust-lang.org.
+# `tools/setup.sh` fetches the matching library source from GitHub instead.
+# See docs/adr/0001-toolchain.md.
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]

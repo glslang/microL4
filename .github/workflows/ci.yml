@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test and build the VHDX
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU, OVMF, image tools and Rust targets
+        run: tools/setup.sh
+      - name: Host tests and QEMU scenarios
+        run: cargo xtask test
+      - name: Upload scenario logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-logs
+          path: target/xtask/scenarios/*/serial.log
+          if-no-files-found: ignore
+      - name: Build the disk image
+        run: cargo xtask image
+      - name: Upload the VHDX for the Hyper-V check
+        uses: actions/upload-artifact@v4
+        with:
+          name: microl4-vhdx
+          path: target/xtask/image/disk.vhdx
+          if-no-files-found: error
+
+  lint:
+    name: rustfmt and clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust targets and components
+        run: |
+          rustup target add x86_64-unknown-none x86_64-unknown-uefi
+          rustup component add clippy rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo xtask clippy
+
+  miri:
+    name: Miri on core
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly with Miri
+        run: rustup toolchain install nightly --profile minimal --component miri
+      - run: cargo +nightly miri test --package l4core

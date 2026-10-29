@@ -1,0 +1,10 @@
+[package]
+name = "l4core"
+description = "no_std logic shared by the loader, the kernel and the host-side tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"

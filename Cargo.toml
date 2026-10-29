@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["core", "kernel", "loader", "xtask"]
+# Plain `cargo build` and `cargo test` only touch the host crates. The kernel
+# and the loader need their own targets, so build them through `cargo xtask`.
+default-members = ["core", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[profile.dev]
+# The kernel and loader run under TCG emulation; unoptimised code is painfully
+# slow there. Level 1 keeps debug assertions and readable backtraces.
+opt-level = 1
+
+[profile.release]
+debug = true
