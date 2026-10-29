@@ -13,7 +13,7 @@ Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 a
 ## Next
 - [ ] M1: fix what the fresh review reports, then tick M1
 - [ ] M2 · Capability core and model, from `docs/design.md` Kernel objects to Derivation tracking: the 32-byte slot, the depth-and-`low` derivation list (ADR 0012), copy, mint, move, mutate, rotate, delete, revoke, Zombies, untyped retype, the `moved` hook for paging back-references
-- [ ] M3 · Paging and interrupts. First, before any feature that needs them: xtask passes `-cpu max,la57=off` and scenarios gain a `qemu_args:` key; the loader allocates below 64 GiB (ADR 0006); `tools/hyperv/New-L4Vm.ps1` turns processor compatibility mode off; the boot summary prints the CPUID features the kernel requires, XCR0 and the XSAVE size, `IA32_APIC_BASE` and the Meltdown line
+- [ ] M3 · Paging and interrupts. First, before any feature that needs them: xtask passes `-cpu max,la57=off` and scenarios gain a `qemu_args:` key; the loader allocates below 64 GiB (ADR 0006); `tools/hyperv/New-L4Vm.ps1` turns processor compatibility mode off; the CPU feature check covers XSAVE too and prints one `CPU lacks` line naming every missing feature; the boot summary prints the CPUID features the kernel requires, `IA32_APIC_BASE` and the Meltdown line (XCR0 and the XSAVE size from M5)
 
 ## Open issues
 - QEMU's default CPU model (`qemu64`), which xtask uses today, lacks SMEP, SMAP and XSAVE (from memory). The kernel requires all three from M3 and M5 (ADRs 0004 and 0014), so M3 must change xtask first.
@@ -22,6 +22,7 @@ Current milestone: M1 · Design and ABI. `docs/design.md` and `docs/abi.md` v0 a
 - The firmware's IDT and stack sit in `USABLE` memory; M3 loads the kernel's own before M4 reuses any (`docs/design.md`, Boot).
 - No guard page under the boot stack; M3 puts one under the kernel stack and each IST stack.
 - Accepted risks, recorded for the M10 red team: Meltdown on a vulnerable host CPU (no skim window; ADR 0004); IPC queue-cancel loops are not preemptible, as in seL4 (`docs/design.md`, IPC); `vmbus` can name any guest page in a GPADL, and an MSI-capable driver can send any vector (ADR 0020, `docs/design.md`, Interrupts).
+- PLAN.md (exported from the plan doc) still shows the pre-M1 proposals where ADRs supersede them: M2's "an untyped with children cannot be retyped" (ADR 0010), "at most two levels" of CNodes (ADR 0011), the reply capability's place (ADR 0016), and IPC entirely in M6 (ADR 0023). `docs/design.md` and the ADRs win; re-export PLAN.md when the doc is next edited.
 - `rustup target add` worked again this session; the `build-std` fallback is kept (ADR 0001).
 
 ## Decisions this milestone
