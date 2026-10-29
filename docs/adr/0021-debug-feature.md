@@ -28,7 +28,9 @@ run with a pass or fail status.
   list's two link words live in the TCB's debug-only tail.
 - xtask builds with `debug` for scenarios, `run`, `gdb` and `image`. From M7
   `cargo xtask test` also builds without it, disassembles that kernel and
-  fails on any instruction immediate in `0x3F8` to `0x3FF`, and boots it in a
+  fails on any `in` or `out` outside the IOPort path in `io.rs`, any
+  immediate in `0x3F8` to `0x3FF` moved into `dx`, `edx` or `rdx`, and any
+  `serial` symbol, and boots it in a
   scenario whose output comes from the `uart` server.
 
 ## Consequences

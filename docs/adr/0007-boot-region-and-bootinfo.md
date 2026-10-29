@@ -41,10 +41,10 @@ root task's capabilities can reach:
   then 448 `UntypedDesc` entries. If more untyped or slots are needed, boot
   panics.
 - The root CNode's fixed slots keep seL4's numbers where the object exists
-  and hold null where it does not; on Hyper-V slot 12 holds the Hypervisor
-  capability and slots 13 and 14 the SynIC message and event-flag frames, all
-  three null if the firmware locked the hypercall MSR to a page outside
-  `.hvcall` ([ADR 0020](0020-hypervisor-capability.md)).
+  and hold null where it does not; on Hyper-V, from M9, slot 12 holds the
+  Hypervisor capability and slots 13 and 14 the SynIC message and event-flag
+  frames, all three null before M9, if an M9 privilege is missing, or if the
+  firmware locked the hypercall MSR to a page outside `.hvcall` ([ADR 0020](0020-hypervisor-capability.md)).
 - Untyped: RAM from `USABLE`, `LOADER` (except the kernel image),
   `ACPI_RECLAIMABLE` and the reclaimed `.rootimage`; device untyped from
   `RESERVED`, `MMIO` and gaps below `2^phys_addr_bits`, never in a write-back

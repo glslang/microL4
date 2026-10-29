@@ -1169,11 +1169,12 @@ becomes `Inactive` and no message is sent.
 | 3 | `number`: the exception vector |
 | 4 | `code`: the exception's error code, or 0 if it has none |
 
-Vectors 0, 1, 3, 6, 10 to 13, 16 and 19 arrive here. `int3` gives 3 with `ip`
+Vectors 0, 1, 3, 6, 10 to 13, 16 and 19 arrive here; 4, 5 and 7 would too,
+with code 0, but cannot occur here. `int3` gives 3 with `ip`
 after it (vector 3 is the only DPL-3 gate); `int n` for any other `n` gives 13
 with code `8n + 2`; TF single-step and `int1` give 1. Page faults
-are VMFaults. Vectors 17, 21, 29, 30 and the reserved vectors cannot occur;
-if one does, the kernel panics.
+are VMFaults. Vectors 9, 15, 17 and 20 to 31 cannot occur; if one does, the
+kernel panics.
 
 #### VMFault (5)
 
@@ -1433,8 +1434,8 @@ interface](design.md#hyper-v-interface), explains the behaviour.
   destination CSpace, plus the `index` and `depth` message registers; it is
   resolved and checked as the destination slot of a CNode invocation
   ([Capability lookup](#capability-lookup), [CNode
-  invocations](#cnode-invocations)), and fails with `FailedLookup` or
-  `DeleteFirst` as there.
+  invocations](#cnode-invocations)), and fails as there: `RangeError(1, 64)`
+  for a `depth` of 0 or above 64, then `FailedLookup` or `DeleteFirst`.
 - Checks run in this order, and the first failure is returned:
   1. the label is valid for this capability type (for `GetSint`, also that a
      usable SynIC exists), else `IllegalOperation`;
@@ -1444,7 +1445,8 @@ interface](design.md#hyper-v-interface), explains the behaviour.
   4. the capability's own limits: an IOPort's range, a restricted Hypervisor
      capability's connection and rights (`IllegalOperation`);
   5. resources: source, vector or port range free, else `RevokeFirst`;
-  6. the destination slot (`FailedLookup`, `DeleteFirst`).
+  6. the destination slot (`RangeError(1, 64)` for its `depth`, then
+     `FailedLookup`, `DeleteFirst`).
 - `InvalidArgument(n)` names message register `n`; `RangeError(min, max)` and
   `InvalidCapability(n)` carry the [detail words](#error-detail-words).
 - A success returns label `NoError` and `length` = the number of result
@@ -1457,7 +1459,7 @@ interface](design.md#hyper-v-interface), explains the behaviour.
 
 | Vector | Use |
 | --- | --- |
-| `0x00`-`0x1F` | CPU exceptions; only `#BP` (3) has DPL 3; 17, 21, 29, 30 and the reserved vectors panic from either ring; `#DB` on IST4 |
+| `0x00`-`0x1F` | CPU exceptions; only `#BP` (3) has DPL 3; 9, 15, 17 and 20 to 31 panic from either ring; `#DB` on IST4 |
 | `0x20`-`0x2F` | 8259 PIC, remapped and masked; spurious if delivered, EOI only when the vector's ISR bit is set |
 | `0x30`-`0xEF` | device vectors; IRQ number `irq` = vector - `0x30`, 0-191 |
 | `0xF0`-`0xFC` | reserved |
@@ -1477,10 +1479,10 @@ representation](design.md#capability-representation):
 | Capability | Fields | Copy | Mint | Children | Last capability deleted |
 | --- | --- | --- | --- | --- | --- |
 | IRQControl | none | no (derives to nothing) | no | IRQHandler, revocable | nothing |
-| IRQHandler | `irq`, 8 bits | yes | data ignored | none | notification unbound; source masked (an I/O APIC pin: mask bit only, vector and trigger kept); vector freed |
+| IRQHandler | `irq`, 8 bits | yes | data ignored | copies of the issued (original) handler | notification unbound; an I/O APIC pin or a SINT masked (a pin keeps its vector and trigger in its entry); vector freed |
 | IOPortControl | none | no (derives to nothing) | no | IOPort, revocable | nothing |
-| IOPort | `first`, `last`, 16 bits each | yes | data ignored | none | range freed |
-| Hypervisor | `restricted`, 1 bit; `connection`, 24 bits; `post`, `signal`, 1 bit each | yes (passes `derive`) | narrows and makes an original; see [Mint data word](#mint-data-word) | copies of a narrowed original | nothing |
+| IOPort | `first`, `last`, 16 bits each | yes | data ignored | copies of the issued (original) range | range freed |
+| Hypervisor | `restricted`, 1 bit; `connection`, 24 bits; `post`, `signal`, 1 bit each | yes (passes `derive`) | narrows and makes an original; see [Mint data word](#mint-data-word) | copies of an original: the boot capability or a narrowed one | nothing |
 
 Static kernel memory reserved at boot for interrupts, I/O ports and Hyper-V:
 the IRQ table and IRQ node (192 entries; the node is 192 slots of 32 bytes,
@@ -1516,7 +1518,7 @@ active low.
 | `RangeError(0, 15)` | `isa_irq` > 15 |
 | `InvalidArgument(0)` | the IRQ has no route: its GSI is another IRQ's override target, or no I/O APIC serves it |
 | `RevokeFirst` | the GSI already has a handler, no device vector is free, or the pin's Remote IRR stays set (retry later) |
-| `FailedLookup`, `DeleteFirst` | destination slot |
+| `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 #### `0x61` `IRQControl_GetIOAPIC`
 
@@ -1539,11 +1541,12 @@ Extra capability 0: destination root CNode. Result: MR0 `irq`.
 | `InvalidArgument(0)` | no I/O APIC serves `gsi` |
 | `RangeError(0, 1)` | `trigger` or `polarity` > 1 |
 | `RevokeFirst` | the GSI already has a handler, no device vector is free, or the pin's Remote IRR stays set (retry later) |
-| `FailedLookup`, `DeleteFirst` | destination slot |
+| `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 #### `0x62` `IRQControl_GetMSI` (M9)
 
-Reserves a vector for one MSI or MSI-X message.
+Reserves a vector for one MSI or MSI-X message. Before M9 this label returns
+`IllegalOperation`.
 
 | Register | Name | Meaning |
 | --- | --- | --- |
@@ -1561,7 +1564,7 @@ unchanged.
 | --- | --- |
 | `TruncatedMessage` | fewer than 2 registers, or no extra capability |
 | `RevokeFirst` | no device vector is free |
-| `FailedLookup`, `DeleteFirst` | destination slot |
+| `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 #### `0x63` `IRQControl_GetSint` (M9)
 
@@ -1577,11 +1580,11 @@ Extra capability 0: destination root CNode. Result: MR0 `irq`.
 
 | Error | When |
 | --- | --- |
-| `IllegalOperation` | no usable SynIC: initial slot 12 is null (not Hyper-V, an M9 privilege missing, or a hypercall MSR locked outside `.hvcall`) |
+| `IllegalOperation` | no usable SynIC: the kernel made no Hypervisor capability at boot (not Hyper-V, an M9 privilege missing, or a hypercall MSR locked outside `.hvcall`) |
 | `TruncatedMessage` | fewer than 3 registers, or no extra capability |
 | `RangeError(0, 15)` | `sint` > 15 |
 | `RevokeFirst` | the SINT already has a handler, or no device vector is free |
-| `FailedLookup`, `DeleteFirst` | destination slot |
+| `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 Labels `0x64`-`0x67` are reserved.
 
@@ -1596,7 +1599,8 @@ with the [notification semantics](#notification-semantics) of IPC. Masking:
 | I/O APIC, edge | `pending` set; masked if `pending` was already set | clears `pending`; unmasks if masked |
 | MSI, SINT | unchanged | does nothing |
 
-So between two `Ack`s an I/O APIC pin delivers at most two interrupts.
+So between two `Ack`s an I/O APIC pin delivers at most three interrupts: two,
+plus one the local APIC may already hold when the mask lands.
 A driver binds, Acks once, services its device once, then loops: wait,
 service, Ack.
 
@@ -1648,7 +1652,7 @@ Extra capability 0: destination root CNode. No result.
 | `InvalidArgument(1)` | `last_port` > `0xFFFF`, or `last_port` < `first_port` |
 | `InvalidArgument(0)` | the range holds a kernel-reserved port (checked once both bounds are valid) |
 | `RevokeFirst` | the range overlaps an issued range |
-| `FailedLookup`, `DeleteFirst` | destination slot |
+| `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 #### `0x71` `IOPort_In8`, `0x72` `IOPort_In16`, `0x73` `IOPort_In32`
 
@@ -1700,10 +1704,11 @@ caller retries).
 
 | Error | When |
 | --- | --- |
-| `TruncatedMessage` | fewer than 3 registers, or fewer than `3 + ceil(payload_size / 8)` once MR2 is valid |
+| `TruncatedMessage` | fewer than 3 registers |
 | `InvalidArgument(0)` | `connection` >= `2^24` |
 | `InvalidArgument(1)` | `message_type` is 0 or >= `2^31` |
 | `InvalidArgument(2)` | `payload_size` > 240 |
+| `TruncatedMessage` | fewer than `3 + ceil(payload_size / 8)` registers |
 | `IllegalOperation` | restricted capability without `post`, or another connection |
 
 #### `0x81` `Hypervisor_SignalEvent`
@@ -1881,7 +1886,7 @@ capability in slot 2 has guard 0 and guard size 52, so the root task's CPtr
 | 9 | `CAP_BOOTINFO_FRAME` | BootInfo's first frame | `seL4_CapBootInfoFrame` |
 | 10 | `CAP_INIT_IPC_BUFFER` | the root task's IPC buffer frame | `seL4_CapInitThreadIPCBuffer` |
 | 11 | | null (no domains) | `seL4_CapDomain` |
-| 12 | `CAP_HYPERVISOR` | the unrestricted Hypervisor capability on Hyper-V; null elsewhere, and null when the firmware locked the hypercall MSR to a page outside `.hvcall` | (`seL4_CapSMMUSIDControl`, Arm) |
+| 12 | `CAP_HYPERVISOR` | the unrestricted Hypervisor capability on Hyper-V from M9; null elsewhere, before M9, when an M9 privilege is missing, and when the firmware locked the hypercall MSR to a page outside `.hvcall` | (`seL4_CapSMMUSIDControl`, Arm) |
 | 13 | `CAP_SYNIC_MESSAGE_FRAME` | 4 KiB Frame for the SynIC message page (SIM), a boot-region RAM frame; null when slot 12 is null | (`seL4_CapSMMUCBControl`, Arm) |
 | 14 | `CAP_SYNIC_EVENT_FRAME` | 4 KiB Frame for the SynIC event-flag page (SIEF), likewise | (`seL4_CapInitThreadSC`, MCS) |
 | 15 | | null, reserved | (`seL4_CapSMC`, Arm) |
@@ -1924,7 +1929,7 @@ physical. Slot regions are `SlotRegion { start: u64, end: u64 }`: slots
 | 64 | `user_image_paging` | `SlotRegion` | paging structures |
 | 80 | `extra_bootinfo_frames` | `SlotRegion` | BootInfo frames after the first |
 | 96 | `untyped` | `SlotRegion` | every untyped |
-| 112 | `framebuffer_untyped` | `SlotRegion` | the leading part of `untyped` that covers the framebuffer exactly, page-rounded; empty if there is no framebuffer |
+| 112 | `framebuffer_untyped` | `SlotRegion` | the leading part of `untyped` that covers the framebuffer exactly, page-rounded; empty if there is no framebuffer, or if any 2 MiB page it touches is write-back in the direct map (a debug kernel warns) |
 | 128 | `user_image_start` | u64 | first byte of the first image page |
 | 136 | `user_image_end` | u64 | one past the last image page |
 | 144 | `framebuffer` | `Framebuffer` | 32 bytes, the handoff's [layout](#handoff-structure), physical `base`; all zero if there is none |
@@ -2020,7 +2025,8 @@ that builds it.
 | EFER.NXE | set if CPUID reports NX, otherwise clear and no NX bits are used |
 | CR0.WP | set by the loader, so ring 0 honours read-only pages |
 | CR4.LA57 | clear; the loader refuses to run under 5-level paging |
-| CR4.PGE, SMEP, SMAP, PAT, MTRRs | as the firmware left them; M3 sets them |
+| CR4.PGE, SMEP, SMAP, PAT | as the firmware left them; M3 sets them |
+| MTRRs | as the firmware left them; the kernel never changes them |
 | 8259 PIC, local APIC timer | as the firmware left them; M3 masks them before enabling interrupts |
 | Direction flag, SSE state, other registers | unspecified |
 | Physical placement | every loader allocation (the kernel image, its page tables, the handoff, the memory map) lies below 64 GiB, the end of the kernel's direct map; M3 panics otherwise. M0's loader used 512 GiB; M3 lowers it |
