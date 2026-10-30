@@ -646,3 +646,73 @@ fn swap_of_list_neighbours_in_both_orders() {
     assert_eq!(cdt::parent(&w.k, slot(ROOT, 11)), Some(slot(ROOT, 10)));
     assert_eq!(cdt::parent(&w.k, slot(ROOT, 10)), Some(slot(ROOT, 1)));
 }
+
+#[test]
+fn a_revoke_that_destroys_its_own_slot_leaves_a_zombie_the_user_can_finish() {
+    let mut w = World::new();
+    // A second RAM untyped, so C holds capabilities the revoke does not reach.
+    cdt::insert_root(
+        &mut w.k,
+        slot(ROOT, 2),
+        Cap::untyped(DEV, UT_BITS, false, 1 << UT_BITS),
+    );
+    w.retype(1, ObjectType::CNode, 3, World::root(), 10, 1);
+    let c = w.cap(slot(ROOT, 10));
+    w.retype(2, ObjectType::Endpoint, 0, c, 0, 2);
+    cnode::move_cap(&mut w.k, slot(ROOT, 1), slot(c.object(), 4)).unwrap();
+    // Revoking the untyped in C slot 4 destroys C, and with it that slot. A
+    // preemption after the slot is gone ends the restarted call at once
+    // (seL4's partial revoke); C's Zombie stays where C's capability was.
+    let n = w.until_done(0, |k| cnode::revoke(k, slot(c.object(), 4)));
+    assert_eq!(n, 4);
+    let zombie = Cap::zombie(c.object(), c.size_bits(), 4, false);
+    assert_eq!(w.cap(slot(ROOT, 10)), zombie);
+    assert_eq!(cdt::parent(&w.k, slot(ROOT, 10)), None);
+    assert!(w.cap(slot(c.object(), 0)).cap_type() == CapType::Endpoint);
+    w.check(ROOT, 64);
+    w.check(c.object(), 8);
+    // A Zombie cannot be copied or minted, but it can be moved.
+    let illegal = Err(SyscallError::IllegalOperation);
+    assert_eq!(
+        cnode::copy(&mut w.k, slot(ROOT, 10), slot(ROOT, 20), 0xF),
+        illegal
+    );
+    assert_eq!(
+        cnode::mint(&mut w.k, slot(ROOT, 10), slot(ROOT, 20), 0xF, 5),
+        illegal
+    );
+    w.k.events.clear();
+    cnode::mutate(&mut w.k, slot(ROOT, 10), slot(ROOT, 21), 0x1234).unwrap();
+    cnode::move_cap(&mut w.k, slot(ROOT, 21), slot(ROOT, 22)).unwrap();
+    assert_eq!(w.cap(slot(ROOT, 22)), zombie);
+    assert_eq!(
+        w.k.events,
+        [
+            Event::Moved {
+                cap: zombie,
+                from: slot(ROOT, 10),
+                to: slot(ROOT, 21)
+            },
+            Event::Moved {
+                cap: zombie,
+                from: slot(ROOT, 21),
+                to: slot(ROOT, 22)
+            },
+        ]
+    );
+    // Revoke finds no children; Delete resumes the clearing.
+    cnode::revoke(&mut w.k, slot(ROOT, 22)).unwrap();
+    assert_eq!(w.cap(slot(ROOT, 22)), zombie);
+    w.until_done(0, |k| cnode::delete(k, slot(ROOT, 22)));
+    assert!(w.cap(slot(ROOT, 22)).is_null());
+    for i in 0..8 {
+        assert!(w.cap(slot(c.object(), i)).is_null());
+    }
+    assert_eq!(
+        w.finalised_last(),
+        [ep(DEV + 32), ep(DEV)],
+        "C's endpoints, highest slot first"
+    );
+    assert!(!cdt::has_children(&w.k, slot(ROOT, 2)));
+    w.check(ROOT, 64);
+}

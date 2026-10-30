@@ -84,7 +84,7 @@ The kernel never blocks and has no kernel threads.
 | --- | --- | --- |
 | Kernel code runs with interrupts disabled, from entry to exit; only the idle thread's halt loop runs with `IF = 1` in ring 0 | `IA32_FMASK` clears IF; every IDT gate is an interrupt gate; no `sti` outside the idle loop (review, M10 brief 5) | M3, M5 |
 | Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; M10 brief 6 | M2, M4, M5, M6, M10 |
-| A system call restarted after a preemption point continues its work and never repeats a completed step | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random | M2, M4 |
+| A system call restarted after a preemption point continues its work and never repeats a completed step; the one exception is a revoke whose work destroyed its own slot, which stops ([Slot operations](#slot-operations)) | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random | M2, M4 |
 | The kernel allocates no memory after boot | the kernel links no allocator; every object comes from `Untyped_Retype` | M4 |
 | The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map; SMAP on (M3); no `stac` anywhere (CI grep over `kernel/`) | M3, M5 |
 | Every exception and interrupt entry clears RFLAGS.AC and DF before any Rust code runs | `clac` and `cld` in every entry stub ([Kernel entry and exit](#kernel-entry-and-exit)) | M3 |
@@ -1605,8 +1605,10 @@ revoke A: low(C) = 1, not > 1, so C is not A's.   revoke U: 1 > 0, C goes.
 Without `low`, `C` would fall into `A`'s run and `A`'s holder could delete
 it. A child goes right after its parent, before any ghosts, so it is the
 parent's first child; a sibling goes right after a plain copy, which never
-had children, so whatever follows is no deeper. Either way the full list
-stays a valid preorder.
+has children, so in the full list whatever follows it is no deeper. A
+deeper live slot may follow it in the live list, but that slot's `low`
+records the ghost between them. Either way the full list stays a valid
+preorder.
 
 ### Slot operations
 
@@ -1628,7 +1630,14 @@ after each; an interrupted call restarts, looks its slot up again and goes
 on. Revoke re-reads its slot every step, so it stops cleanly if it deletes
 the CNode holding its own slot; if it destroys the caller's TCB, the caller
 is suspended and a preempted revoke is never restarted (the partial-revoke
-cases of `cspace.tex`, "Deletion and Revocation").
+cases of `cspace.tex`, "Deletion and Revocation"). In the first case a
+preemption point inside that CNode's destruction, after the slot is gone,
+ends the revoke: the restarted call cannot look its slot up, or finds it
+empty, and the CNode's Zombie stays, partly cleared, where the CNode's
+last capability was. That is a slot the user can name. The Zombie can be
+moved, and Delete, or a revoke of its untyped, finishes the clearing
+([Deletion and finalisation](#deletion-and-finalisation)). A user avoids
+this, as in seL4, by not revoking from inside what the revoke destroys.
 
 Copy, Mint, IPC transfer and the TCB and IRQ-node installs go through
 `derive`, as seL4's `deriveCap`. It refuses Null, Zombie, Reply,
