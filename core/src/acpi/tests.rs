@@ -18,6 +18,9 @@ use super::*;
 
 const Q35: &str = include_str!("../../tests/acpi/q35.dump");
 const Q35_HPET_OFF: &str = include_str!("../../tests/acpi/q35-hpet-off.dump");
+/// The owner's Hyper-V Generation 2 VM, from the M3 Hyper-V check; the DSDT
+/// is left out of the dump.
+const HYPERV: &str = include_str!("../../tests/acpi/hyperv-gen2.dump");
 
 /// Each dump, parsed once per test process: decoding the hex is the slow
 /// part under Miri.
@@ -30,6 +33,11 @@ fn q35_hpet_off() -> DumpMemory {
     static M: OnceLock<DumpMemory> = OnceLock::new();
     M.get_or_init(|| DumpMemory::parse(Q35_HPET_OFF).unwrap())
         .clone()
+}
+
+fn hyperv() -> DumpMemory {
+    static M: OnceLock<DumpMemory> = OnceLock::new();
+    M.get_or_init(|| DumpMemory::parse(HYPERV).unwrap()).clone()
 }
 
 fn parse_dump(m: &DumpMemory) -> Result<Platform, AcpiError> {
@@ -371,6 +379,56 @@ fn q35_tables() {
 }
 
 #[test]
+fn hyperv_gen2_tables() {
+    let m = hyperv();
+    m.check().unwrap();
+    let p = parse_dump(&m).unwrap();
+    assert_eq!(p.revision, 2);
+    assert_eq!(p.root.signature, Signature::XSDT);
+    let tables: Vec<_> = p.tables.iter().map(|t| t.signature).collect();
+    assert_eq!(
+        tables,
+        [b"FACP", b"OEM0", b"WAET", b"APIC", b"SRAT", b"BGRT"].map(|s| Signature(*s))
+    );
+    // No PCAT_COMPAT, so the kernel leaves the 8259s alone; no HPET, so the
+    // timer calibrates against the reference counter; no MCFG.
+    assert_eq!(
+        (p.madt.lapic, p.madt.flags, p.madt.processors),
+        (0xFEE0_0000, 0, 1)
+    );
+    assert!(!p.madt.pcat_compat() && !p.madt.lapic_overridden);
+    assert_eq!(p.hpet, None);
+    assert_eq!(p.ecam.iter().count(), 0);
+    let ioapics: Vec<_> = p.ioapics.iter().copied().collect();
+    assert_eq!(
+        ioapics,
+        [IoApic {
+            id: 1,
+            address: 0xFEC0_0000,
+            gsi_base: 0
+        }]
+    );
+    // One override, the SCI; unlike q35, IRQ 0 stays on GSI 0.
+    let overrides: Vec<_> = p
+        .overrides
+        .iter()
+        .map(|o| (o.source, o.gsi, o.flags))
+        .collect();
+    assert_eq!(overrides, [(9, 9, HIGH_LEVEL)]);
+    assert_eq!(p.isa_route(4), Some(COM1));
+    assert_eq!(p.isa_route(0).map(|r| r.gsi), Some(0));
+    assert_eq!(p.isa_route(2).map(|r| r.gsi), Some(2));
+    assert!(p.isa_route(9).unwrap().level);
+    assert_eq!(warnings(&p), []);
+    // The firmware hands over with IA32_APIC_BASE 0xfee00900, as OVMF does.
+    let w = p.device_window(0xFEE0_0900);
+    assert_eq!(
+        w.pages,
+        [Some(0xFEE0_0000), Some(0xFEC0_0000), None, None, None, None]
+    );
+}
+
+#[test]
 fn q35_without_hpet() {
     let m = q35_hpet_off();
     m.check().unwrap();
@@ -470,7 +528,7 @@ fn expect_corrupt(name: &str, address: u64, p: Result<Platform, AcpiError>, clea
 
 #[test]
 fn corrupted_copies_of_each_dumped_table() {
-    for m in [q35(), q35_hpet_off()] {
+    for m in [q35(), q35_hpet_off(), hyperv()] {
         let clean = parse_dump(&m).unwrap();
         for t in m.tables() {
             // Bytes in the header, in the middle, and the last: each breaks
