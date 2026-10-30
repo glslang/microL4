@@ -1,0 +1,12 @@
+# With `acpidump` on the command line the loader prints every ACPI table it
+# can reach, for `cargo xtask acpidump` (core/tests/acpi/), then boots as
+# usual.
+cmdline: acpidump test=hello
+exit: success
+expect: loader: acpidump: rsdp
+expect: loader: acpidump: table
+expect: RSDP
+expect: loader: acpidump: data
+expect: loader: acpidump: end
+expect: microL4 kernel
+expect: TEST PASS

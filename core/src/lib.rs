@@ -16,6 +16,7 @@ extern crate std;
 #[cfg(any(test, feature = "testing"))]
 extern crate alloc;
 
+pub mod acpi;
 pub mod cap;
 pub mod cdt;
 pub mod cmdline;
@@ -27,6 +28,7 @@ pub mod error;
 pub mod handoff;
 pub mod kernel;
 pub mod slot;
+pub mod timer;
 pub mod trap;
 pub mod untyped;
 pub mod vspace;

@@ -2,6 +2,7 @@
 //! MSRs, descriptor tables and traps, the kernel's page tables, and stopping
 //! the machine.
 
+mod acpi;
 mod cell;
 mod cpu;
 mod entry;
@@ -40,9 +41,9 @@ global_asm!(
 pub fn init(boot: &'static BootState) {
     // Step 3: GDT, TSS, IDT, CR4.MCE, GS base, DR7.
     gdt::init();
-    // Step 4: the kernel's page tables, PAT, CR4 and CR3.
-    let mut window = l4core::window::DeviceWindow::default(); // replaced by acpi::init at merge
-    window.pages[0] = Some(cpu::read_msr(cpu::IA32_APIC_BASE) & 0x000F_FFFF_FFFF_F000); // replaced by acpi::init at merge
+    // Step 4: ACPI, read through the loader's direct map, then the
+    // kernel's page tables, PAT, CR4 and CR3.
+    let window = acpi::init(boot);
     paging::init(boot, &window);
 }
 

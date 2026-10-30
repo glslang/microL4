@@ -13,3 +13,8 @@ path = "src/lib.rs"
 # Fake memory and a recording `Kernel` for host tests (`l4core::testing`).
 # `model/` enables it; the kernel and the loader never do.
 testing = []
+
+[dev-dependencies]
+# Random bytes for the ACPI parser (`core/src/acpi/tests.rs`). `std` alone:
+# no forking, timeouts or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

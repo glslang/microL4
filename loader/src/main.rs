@@ -20,6 +20,7 @@
 
 #[macro_use]
 mod serial;
+mod acpidump;
 mod paging;
 mod uefi;
 mod x86;
@@ -28,6 +29,7 @@ use core::ffi::c_void;
 use core::fmt;
 use core::ptr;
 
+use l4core::cmdline;
 use l4core::elf::{Elf, ElfError, PAGE_SIZE};
 use l4core::handoff::{
     self, CMDLINE_MAX, Framebuffer, HANDOFF_MAGIC, HANDOFF_VERSION, Handoff, KERNEL_VIRT_BASE,
@@ -132,6 +134,11 @@ fn boot(image: Handle, st: &SystemTable) -> Result<Launch, Error> {
         kernel_file.len() >> 10,
         core::str::from_utf8(cmdline).unwrap_or("?")
     );
+    if rsdp != 0
+        && cmdline::value(core::str::from_utf8(cmdline).unwrap_or(""), "acpidump").is_some()
+    {
+        acpidump::dump(rsdp);
+    }
 
     let elf = Elf::parse(kernel_file).map_err(Error::Elf)?;
     let (kernel_phys, kernel_size) = load_kernel(bs, &elf)?;

@@ -67,6 +67,40 @@ TEST PASS
 The kernel halts after `TEST PASS` on Hyper-V, since there is no
 `isa-debug-exit` device; the script turns the VM off.
 
+## At the M3 check: dump the ACPI tables
+
+The kernel's ACPI parser is tested on the host against tables dumped from
+each platform (`core/tests/acpi/`); the Hyper-V dump has to come from your
+VM. With the word `acpidump` on the kernel command line, the loader prints
+every ACPI table to COM1 before it starts the kernel. The CI image boots
+with `test=hello` only, so build one on any Linux machine with the
+repository, WSL included, after `tools/setup.sh`:
+
+```sh
+cargo xtask image --cmdline "acpidump test=hello"
+```
+
+Copy `target/xtask/image/disk.vhdx` to the Windows host and boot it. The
+command line differs from the CI image's, so replace the default
+expectations; the dump takes a few seconds more over COM1:
+
+```powershell
+.\Test-L4Vhdx.ps1 -VhdxPath .\disk.vhdx -TimeoutSeconds 120 -LogPath acpidump.log `
+    -Expect 'acpidump: rsdp', 'acpidump: end', 'hello from microL4'
+```
+
+Attach `acpidump.log` to the PR, or commit it, and a session (or you)
+converts it:
+
+```sh
+cargo xtask acpidump --from-log acpidump.log --out core/tests/acpi/hyperv-gen2.dump
+```
+
+That checks the dump is whole, prints what the parser makes of it (the
+tables, the I/O APIC, each ISA route, the HPET, the ECAM ranges) and writes
+the file to commit. The log may have `\r\n` line ends and other lines
+between the dump lines.
+
 ## The pieces
 
 | Script | Does |
