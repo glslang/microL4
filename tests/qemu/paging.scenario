@@ -1,0 +1,23 @@
+# The kernel runs on its own page tables (docs/design.md, "The kernel half"):
+# CR3 holds the kernel PML4, CR4 has SMEP, SMAP and PGE, the live tables
+# walk as the design says, the direct map reaches .text and .bss, and the
+# local APIC answers through the UC device window.
+cmdline: test=paging
+exit: success
+expect: microL4 kernel
+expect: paging: IA32_PAT
+expect: now 0x0007040100070406
+expect: paging: kernel PML4 at
+expect: paging: direct map 4 GiB; 2 MiB pages: 128 WB, 1920 UC
+expect: paging: CR3
+expect: paging: ok   CR3 holds the kernel PML4
+expect: paging: ok   CR4.SMEP, SMAP and PGE are set
+expect: paging: ok   the lower half maps nothing
+expect: paging: ok   the five guard pages are unmapped
+expect: paging: ok   KERNEL_VIRT_BASE is RX, global and supervisor-only
+expect: paging: ok   the direct map's alias of .text is read-only and NX
+expect: paging: ok   a write through the direct map reaches .bss
+expect: paging: ok   the direct map's alias of .text reads the same bytes
+expect: paging: ok   the local APIC's window page is UC, RW and NX
+expect: paging: ok   the local APIC answers through the device window
+expect: TEST PASS

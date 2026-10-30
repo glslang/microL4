@@ -21,6 +21,7 @@ use crate::boot::BootState;
 
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
+pub use paging::{test_lowmem, test_paging};
 pub use trap::{Provoke, idle_self_test, print_stack_use, provoke};
 
 // The Hyper-V hypercall page (`docs/design.md`, "The kernel half"): one page
@@ -40,7 +41,9 @@ pub fn init(boot: &'static BootState) {
     // Step 3: GDT, TSS, IDT, CR4.MCE, GS base, DR7.
     gdt::init();
     // Step 4: the kernel's page tables, PAT, CR4 and CR3.
-    paging::init(boot);
+    let mut window = l4core::window::DeviceWindow::default(); // replaced by acpi::init at merge
+    window.pages[0] = Some(cpu::read_msr(cpu::IA32_APIC_BASE) & 0x000F_FFFF_FFFF_F000); // replaced by acpi::init at merge
+    paging::init(boot, &window);
 }
 
 /// QEMU's `isa-debug-exit` device, configured by `cargo xtask` at this port.

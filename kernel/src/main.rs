@@ -74,6 +74,8 @@ fn kmain(handoff_phys: u64) -> ! {
         Some("trap_cannot_occur") => arch::provoke(arch::Provoke::CannotOccur),
         Some("trap_irq_outside_idle") => arch::provoke(arch::Provoke::InterruptOutsideIdle),
         Some("idle_irq") => arch::idle_self_test(),
+        Some("paging") => arch::test_paging(boot),
+        Some("lowmem") => arch::test_lowmem(),
         Some(other) => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)

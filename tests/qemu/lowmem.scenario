@@ -1,0 +1,15 @@
+# The loader's 1:1 map is gone once the kernel loads its own tables: a
+# ring-0 read of virtual 0x200000, which the loader mapped 1:1 and which is
+# RAM, faults, and the fault report names that address in CR2.
+#
+# This needs the kernel's exception reporting. Without it the #PF finds the
+# firmware's IDT, which the kernel's tables no longer map, and QEMU reports a
+# triple fault as a shutdown, so the scenario fails.
+cmdline: test=lowmem
+exit: failure
+expect: microL4 kernel
+expect: paging: kernel PML4 at
+expect: lowmem: physical 0x200000 reads
+expect: lowmem: reading virtual 0x200000
+expect: KERNEL PANIC
+expect: 200000
