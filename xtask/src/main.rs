@@ -7,6 +7,7 @@ mod compile;
 mod image;
 mod qemu;
 mod scenario;
+mod source;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -21,8 +22,8 @@ commands:
   build             build the kernel and the loader
   image             build target/xtask/image/disk.img and disk.vhdx
   run               boot the image under OVMF, COM1 on stdio (Ctrl-A X quits)
-  test [names...]   host tests, then every QEMU scenario in tests/qemu/
-                    (or only the named ones)
+  test [names...]   host tests, kernel source checks, then every QEMU
+                    scenario in tests/qemu/ (or only the named ones)
   clippy            clippy with -D warnings on every crate and target
   gdb               boot under QEMU paused, with GDB attached
   acpidump [-- <qemu args>]
@@ -137,6 +138,7 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
 fn test(profile: compile::Profile, only: &[String]) -> Result<ExitCode> {
     // Host tests first: they are fast and catch most mistakes.
     run(Command::new(cargo()).arg("test").current_dir(root()))?;
+    source::check_kernel(&root().join("kernel"))?;
 
     let mut scenarios = scenario::load_dir(&root().join("tests/qemu"))?;
     if !only.is_empty() {

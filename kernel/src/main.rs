@@ -76,11 +76,27 @@ fn kmain(handoff_phys: u64) -> ! {
         Some("idle_irq") => arch::idle_self_test(),
         Some("paging") => arch::test_paging(boot),
         Some("lowmem") => arch::test_lowmem(),
+        Some("stack_overflow") => {
+            kprintln!("recursing until the kernel stack overflows");
+            let depth = overflow_stack(0);
+            panic!("the stack never overflowed (depth {depth})")
+        }
         Some(other) => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)
         }
     }
+}
+
+/// Recurses until the kernel stack runs into its guard page, for the
+/// `stack_overflow` scenario. Each frame holds 512 bytes the optimiser
+/// cannot drop, so the 64 KiB stack is gone after about 128 calls.
+fn overflow_stack(depth: u64) -> u64 {
+    let frame = core::hint::black_box([depth; 64]);
+    if depth == u64::MAX {
+        return 0;
+    }
+    overflow_stack(depth + 1) + frame[(depth % 64) as usize]
 }
 
 fn print_boot_info(boot: &BootState) {
