@@ -26,8 +26,8 @@ impl PhysRead for LoaderDirectMap {
         }
         // SAFETY: `init` runs before `paging::init`, on the loader's page
         // tables, which map all of `[0, phys_map_size)` at `PHYS_MAP_BASE`,
-        // holes included; `end` is `direct_map_end()`, at most
-        // `phys_map_size`, so the read cannot fault. The parser reads only
+        // holes included; `end` is `phys_map_size`, so the read cannot
+        // fault. The parser reads only
         // where the RSDP and the tables it validated point: the firmware's
         // ACPI memory, which nothing writes while the kernel runs with
         // interrupts off. A byte read through a raw pointer makes no Rust
@@ -45,8 +45,11 @@ static PLATFORM: StaticCell<Platform> = StaticCell::new();
 /// and the HPET's.
 pub fn init(boot: &'static BootState) -> DeviceWindow {
     let h = &boot.handoff;
+    // The whole loader direct map, not just the part the kernel's own will
+    // cover: firmware may put ACPI tables above 64 GiB, and nothing reads
+    // them after this parse (docs/design.md, "Tables and validation").
     let mem = LoaderDirectMap {
-        end: h.direct_map_end(),
+        end: h.phys_map_size,
     };
     let p = match acpi::parse(&mem, h.rsdp) {
         Ok(p) => PLATFORM.init(p),
