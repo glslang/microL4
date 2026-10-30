@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["core", "kernel", "loader", "xtask"]
+members = ["core", "kernel", "loader", "model", "xtask"]
 # Plain `cargo build` and `cargo test` only touch the host crates. The kernel
 # and the loader need their own targets, so build them through `cargo xtask`.
-default-members = ["core", "xtask"]
+default-members = ["core", "model", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
