@@ -578,7 +578,7 @@ fn coverage_report() {
     let mut tally: BTreeMap<String, u64> = BTreeMap::new();
     let (mut steps, mut preempted, mut zombie_moves, mut max_slots, mut max_depth) =
         (0u64, 0u64, 0u64, 0usize, 0u32);
-    let (mut abandoned, mut detached, mut tcb_deaths) = (0u64, 0u64, 0u64);
+    let (mut partial, mut detached, mut tcb_deaths) = (0u64, 0u64, 0u64);
     let n = cases().min(2000);
     for _ in 0..n {
         let (cfg, ops) = strategy.new_tree(&mut runner).unwrap().current();
@@ -606,7 +606,7 @@ fn coverage_report() {
             max_depth = max_depth.max(w.m.entries().values().map(|e| e.depth).max().unwrap_or(0));
         }
         steps += w.steps;
-        abandoned += w.abandoned;
+        partial += w.partial_revokes;
         detached +=
             w.m.entries()
                 .values()
@@ -618,7 +618,7 @@ fn coverage_report() {
     }
     println!(
         "{n} cases, {steps} steps, {preempted} preemptions, {zombie_moves} Zombie moves (nested deletions), \
-         {detached} detached containers left at the end, {tcb_deaths} TCBs finalised, {abandoned} partial revokes, \
+         {detached} detached containers left at the end, {tcb_deaths} TCBs finalised, {partial} partial revokes, \
          at most {max_slots} reachable slots, depth up to {max_depth}"
     );
     for (k, v) in tally {
