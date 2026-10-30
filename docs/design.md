@@ -124,9 +124,9 @@ how M3 checked it.
 | H7 | Effective R/W and U/S are the AND over the walk and XD the OR, so intermediate entries may grant everything and leaves restrict. | M5 |
 | H8 | PAT index = 4·PAT + 2·PCD + PWT; the PAT bit is bit 7 of a 4 KiB PTE and bit 12 of a 2 MiB PDE. Type encodings: UC `00h`, WC `01h`, WT `04h`, WB `06h`, UC- `07h`. A page mapped UC or WC must not also be mapped WB (SDM vol. 3, 11.12.4). | Checked in M3 against seL4's entry layouts (`structures.bf`) and `init_pat_msr`, and pinned by host tests in `l4core::vspace`; the aliasing rule is from memory |
 | H9 | `sysretq` with a non-canonical RCX raises #GP in ring 0 on Intel CPUs, after the kernel has restored the user's RSP. | M5 |
-| H10 | An MTRR type of UC with a PAT type of WB gives UC; a PAT type of WC gives WC whatever the MTRR. Fixed-range MTRRs make the legacy hole at `0xA0000` UC. | M3 |
-| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | M3 |
-| H12 | CPUID: leaf 1 EDX bit 13 PGE, bit 16 PAT; leaf `0x8000_0001` EDX bit 20 NX; leaf 7.0 EBX bit 7 SMEP, bit 20 SMAP; leaf 7.0 ECX bit 2 UMIP. | M3 |
+| H10 | An MTRR type of UC with a PAT type of WB gives UC; a PAT type of WC gives WC whatever the MTRR. Fixed-range MTRRs make the legacy hole at `0xA0000` UC. | M8, when the framebuffer is first mapped WC; M3 maps no page whose type depends on it |
+| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | M5, the first ring-3 code; M3 sets CR4.UMIP when CPUID reports it |
+| H12 | CPUID: leaf 1 EDX bit 13 PGE, bit 16 PAT; leaf `0x8000_0001` EDX bit 20 NX; leaf 7.0 EBX bit 7 SMEP, bit 20 SMAP; leaf 7.0 ECX bit 2 UMIP. | Checked in M3: `l4core::cpu` reads these bits, and the boots agree with H1 (`qemu64` lacks exactly SMEP, SMAP and XSAVE in `cpu_refuse`; `-cpu max,la57=off` has all seven in `hello`) |
 | H13 | The CPU may fill TLB and paging-structure-cache entries at any time, in any ring, from any present entry reachable from CR3, including for speculative accesses that never retire (SDM vol. 3, 4.10.2.3). So a flush must follow the entry write it covers, never precede it. | M5 |
 | H14 | CPUID leaf 7.0 EDX bit 29 says `IA32_ARCH_CAPABILITIES` (MSR `0x10A`) exists; its bit 0, `RDCL_NO`, says the CPU is not open to Meltdown (rogue data cache load). | the M3 Hyper-V check: TCG's `-cpu max` does not report the MSR, so QEMU boots print `unknown` |
 
@@ -983,8 +983,9 @@ seL4's `traps.S` has it and the M3 scenarios show: `trap_general_protection`,
 pushed. Vectors 17, 21, 29 and 30 also push one when raised as exceptions,
 but none can be raised here (CR0.AM clear, no CET, no SEV), so they take the
 no-error-code stub, which also reads an MSI injected on them correctly. They
-and the vectors with no use here (9, 15, 20, 22 to 28, 31; from memory, check
-in M3) panic from either ring. Every stub, IST ones included, runs
+and the vectors with no use here (9, 15, 20, 22 to 28, 31, from the SDM's
+vector table as remembered; `trap_cannot_occur` raises 21 and checks the
+report) panic from either ring. Every stub, IST ones included, runs
 `clac` and `cld` before any Rust code.
 
 The Rust handlers read CR2 first for #PF, then copy the frame into the current
