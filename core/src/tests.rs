@@ -946,9 +946,9 @@ fn a_revoke_restarted_by_looking_its_slot_up_again_is_cut_short() {
 /// undone" (`docs/design.md`, "Slot operations"), so its memory must be
 /// what the unpreempted revoke had at one of its preemption points, however
 /// many restarts succeeded before the one whose lookup failed. That is the
-/// exact check `World::finish_partial_revoke` could make instead of
-/// replaying; this shows it holds for the shapes above, under every
-/// schedule of up to three preemptions.
+/// exact check `World::finish_partial_revoke` makes, with the hook calls
+/// too; this shows it holds for the shapes above, under every schedule of
+/// up to three preemptions.
 #[test]
 fn a_revoke_cut_short_stops_where_the_unpreempted_revoke_passed() {
     let shapes = [(2, 3, 1, None), (2, 3, 2, Some(1)), (1, 1, 0, None)];

@@ -587,7 +587,7 @@ fn coverage_report() {
     let mut tally: BTreeMap<String, u64> = BTreeMap::new();
     let (mut steps, mut preempted, mut zombie_moves, mut max_slots, mut max_depth) =
         (0u64, 0u64, 0u64, 0usize, 0u32);
-    let (mut partial, mut cut_short, mut replayed) = (0u64, 0u64, 0u64);
+    let (mut partial, mut cut_short, mut cut_after_restart) = (0u64, 0u64, 0u64);
     let (mut detached, mut tcb_deaths) = (0u64, 0u64);
     let n = cases().min(2000);
     for _ in 0..n {
@@ -595,11 +595,16 @@ fn coverage_report() {
         let mut w = World::new(&cfg);
         w.tally = Some(BTreeMap::new());
         for (op, schedule) in &ops {
-            let before = w.steps;
+            let (before, cut_before) = (w.steps, w.cut_short);
             exec(&mut w, op, schedule).unwrap();
             if w.steps > before {
                 use l4core::testing::Event;
                 preempted += w.preemptions;
+                // A restart looked the slot up again before the one that
+                // failed.
+                if w.cut_short > cut_before && w.preemptions > 1 {
+                    cut_after_restart += 1;
+                }
                 for e in &w.last_events {
                     match e {
                         Event::Moved { cap, .. } if cap.cap_type() == CapType::Zombie => {
@@ -618,7 +623,6 @@ fn coverage_report() {
         steps += w.steps;
         partial += w.partial_revokes;
         cut_short += w.cut_short;
-        replayed += w.replayed;
         detached +=
             w.m.entries()
                 .values()
@@ -631,7 +635,8 @@ fn coverage_report() {
     println!(
         "{n} cases, {steps} steps, {preempted} preemptions, {zombie_moves} Zombie moves (nested deletions), \
          {detached} detached containers left at the end, {tcb_deaths} TCBs finalised, {partial} partial revokes \
-         ({cut_short} cut short, {replayed} of them run again), at most {max_slots} reachable slots, \
+         ({cut_short} cut short, {cut_after_restart} of them after a restart that went on), \
+         at most {max_slots} reachable slots, \
          depth up to {max_depth}"
     );
     for (k, v) in tally {
