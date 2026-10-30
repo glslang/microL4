@@ -1,0 +1,11 @@
+# A kernel stack overflow runs into the unmapped guard page below the stack.
+# The page fault cannot be pushed onto the dead stack, so the CPU raises a
+# double fault, which runs on IST1 and reports, instead of silently
+# corrupting memory (docs/design.md, "Kernel entry and exit", Invariants).
+cmdline: test=stack_overflow
+exit: failure
+expect: microL4 kernel
+expect: recursing until the kernel stack overflows
+expect: KERNEL PANIC at kernel/src/arch/x86_64/trap.rs:
+expect: DF double fault (vector 8) in ring 0
+expect: frame on IST1

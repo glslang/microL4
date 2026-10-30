@@ -1,0 +1,9 @@
+# `int 21` reaches #CP, which cannot occur here (no CET). Its stub pushes a
+# zero error code, as for an injected MSI, so the frame is read correctly:
+# CS is the kernel's and the frame is on the kernel stack.
+cmdline: test=trap_cannot_occur
+exit: failure
+expect: microL4 kernel
+expect: fatal trap:
+expect: CP control protection (vector 21) in ring 0: error 0x0, RIP 0xffffffff8
+expect: CS 0x8, frame on the kernel stack

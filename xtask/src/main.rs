@@ -2,10 +2,12 @@
 //!
 //! Run `cargo xtask help` for the commands.
 
+mod acpidump;
 mod compile;
 mod image;
 mod qemu;
 mod scenario;
+mod source;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -20,22 +22,31 @@ commands:
   build             build the kernel and the loader
   image             build target/xtask/image/disk.img and disk.vhdx
   run               boot the image under OVMF, COM1 on stdio (Ctrl-A X quits)
-  test [names...]   host tests, then every QEMU scenario in tests/qemu/
-                    (or only the named ones)
+  test [names...]   host tests, kernel source checks, then every QEMU
+                    scenario in tests/qemu/ (or only the named ones)
   clippy            clippy with -D warnings on every crate and target
   gdb               boot under QEMU paused, with GDB attached
+  acpidump [-- <qemu args>]
+                    boot QEMU with `acpidump test=hello` and write the ACPI
+                    tables the loader dumps (default
+                    target/xtask/acpidump/acpi.dump); with --from-log, read
+                    them from a COM1 log instead
   help              this text
 
 options:
   --release         use the release profile
   --cmdline <text>  kernel command line for image, run and gdb
                     (image defaults to test=hello, run and gdb to none)
+  --out <file>      where acpidump writes the dump
+  --from-log <file> the COM1 log acpidump reads instead of booting QEMU
 ";
 
 struct Options {
     command: String,
     release: bool,
     cmdline: Option<String>,
+    out: Option<PathBuf>,
+    from_log: Option<PathBuf>,
     rest: Vec<String>,
 }
 
@@ -45,12 +56,18 @@ fn parse_args() -> Result<Options> {
         command: args.next().unwrap_or_else(|| "help".into()),
         release: false,
         cmdline: None,
+        out: None,
+        from_log: None,
         rest: Vec::new(),
     };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--release" => opts.release = true,
             "--cmdline" => opts.cmdline = Some(args.next().ok_or("--cmdline needs a value")?),
+            "--out" => opts.out = Some(args.next().ok_or("--out needs a file")?.into()),
+            "--from-log" => {
+                opts.from_log = Some(args.next().ok_or("--from-log needs a file")?.into())
+            }
             "--" => opts.rest.extend(args.by_ref()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}").into()),
             _ => opts.rest.push(a),
@@ -103,6 +120,14 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
             return qemu::run_gdb(&disk, &art.kernel, &xtask_dir().join("gdb"));
         }
         "test" => return test(profile, &opts.rest),
+        "acpidump" => {
+            return acpidump::run(
+                profile,
+                opts.from_log.as_deref(),
+                opts.out.as_deref(),
+                &opts.rest,
+            );
+        }
         "clippy" => compile::clippy()?,
         "help" | "-h" | "--help" => print!("{USAGE}"),
         other => return Err(format!("unknown command {other:?}\n\n{USAGE}").into()),
@@ -113,6 +138,7 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
 fn test(profile: compile::Profile, only: &[String]) -> Result<ExitCode> {
     // Host tests first: they are fast and catch most mistakes.
     run(Command::new(cargo()).arg("test").current_dir(root()))?;
+    source::check_kernel(&root().join("kernel"))?;
 
     let mut scenarios = scenario::load_dir(&root().join("tests/qemu"))?;
     if !only.is_empty() {

@@ -84,7 +84,7 @@ The kernel never blocks and has no kernel threads.
 | --- | --- | --- |
 | Kernel code runs with interrupts disabled, from entry to exit; only the idle thread's halt loop runs with `IF = 1` in ring 0 | `IA32_FMASK` clears IF; every IDT gate is an interrupt gate; no `sti` outside the idle loop (review, M10 brief 5) | M3, M5 |
 | Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; M10 brief 6 | M2, M4, M5, M6, M10 |
-| A system call restarted after a preemption point continues its work and never repeats a completed step; the one exception is a revoke whose work destroyed its own slot, which stops ([Slot operations](#slot-operations)) | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random | M2, M4 |
+| A system call restarted after a preemption point continues its work and never repeats a completed step. Two exceptions, both as in seL4: a partial revoke, whose work destroyed a CNode on the lookup path that named its slot (a Delete can do this only through a path that runs through its own slot), so its restart fails the lookup and leaves the rest undone, with an outcome that depends on where preemption fell; and a Delete or Revoke that finalises the caller's own TCB, which is never restarted ([Slot operations](#slot-operations)) | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random, restarting Delete and Revoke by looking their slots up again, and requiring a revoke cut short to stop exactly where the unpreempted revoke passed one of its preemption points, in memory and in the hook calls made so far | M2, M4 |
 | The kernel allocates no memory after boot | the kernel links no allocator; every object comes from `Untyped_Retype` | M4 |
 | The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map; SMAP on (M3); no `stac` anywhere (CI grep over `kernel/`) | M3, M5 |
 | Every exception and interrupt entry clears RFLAGS.AC and DF before any Rust code runs | `clac` and `cld` in every entry stub ([Kernel entry and exit](#kernel-entry-and-exit)) | M3 |
@@ -108,26 +108,27 @@ to 511 of every address space. The kernel refuses to boot without NX, PGE,
 PAT, SMEP, SMAP and XSAVE, and turns UMIP on when the CPU has it
 ([ADR 0004](adr/0004-privilege-features.md)).
 
-Hardware facts this document relies on are listed once, here. Each is from memory
-of the Intel SDM or of QEMU and Hyper-V behaviour, not checked against a
-source in M1; the milestone named checks it.
+Hardware facts this document relies on are listed once, here. M1 wrote each
+from memory of the Intel SDM or of QEMU and Hyper-V behaviour, not checked
+against a source; the last column names the milestone that checks it, or says
+how M3 checked it.
 
-| Ref | Fact (from memory; check in the milestone named) | Check in |
+| Ref | Fact | Check |
 | --- | --- | --- |
-| H1 | QEMU's default TCG CPU model `qemu64`, which xtask uses today, has NX, PGE and PAT but not SMEP, SMAP, UMIP, PCID or 1 GiB pages. `-cpu max` under TCG has SMEP and SMAP, and LA57 unless `la57=off`. | M3 |
-| H2 | Hyper-V passes SMEP and SMAP through to a Generation 2 guest when the host CPU has them and processor compatibility mode is off. | M3 |
-| H3 | Exception and interrupt delivery clears TF, NT and RF (and IF for interrupt gates) but not AC or DF; `syscall` clears the RFLAGS bits set in `IA32_FMASK`. | M3 |
-| H4 | With CR4.PCIDE = 0, a CR3 write invalidates every non-global TLB entry and every paging-structure-cache entry. Clearing and setting CR4.PGE invalidates every entry, global ones included. | M3 |
+| H1 | QEMU's default TCG CPU model `qemu64`, which xtask used before M3, has NX, PGE and PAT but not SMEP, SMAP, XSAVE, UMIP, PCID or 1 GiB pages. `-cpu max` under TCG has SMEP, SMAP and UMIP, and LA57 unless `la57=off`. | Checked in M3: the `cpu_refuse` scenario boots `qemu64` and the kernel finds NX, PGE and PAT but not SMEP, SMAP or XSAVE; the `hello` boot log shows `-cpu max,la57=off` with SMEP, SMAP and UMIP. `qemu64`'s lack of UMIP, PCID and 1 GiB pages and `-cpu max`'s LA57 are from memory |
+| H2 | Hyper-V passes SMEP and SMAP through to a Generation 2 guest when the host CPU has them and processor compatibility mode is off. | Checked at the M3 Hyper-V check: the kernel booted past `check_cpu` |
+| H3 | Exception and interrupt delivery clears TF, NT and RF (and IF for interrupt gates) but not AC or DF; `syscall` clears the RFLAGS bits set in `IA32_FMASK`. | Checked in M3 for TF and IF only: the `trap_debug` handler, entered by a single step, runs to its report, and `idle_irq` finds IF = 0 in the interrupt path. Whether delivery leaves AC and DF set was not observed; every stub clears both regardless. `syscall`: M5 |
+| H4 | With CR4.PCIDE = 0, a CR3 write invalidates every non-global TLB entry and every paging-structure-cache entry. Clearing and setting CR4.PGE invalidates every entry, global ones included. | Checked in M3 only in part: after the CR3 load and the PGE toggle, `lowmem` faults on the loader's 1:1 map, but TCG flushes every translation on any CR3 write, so it cannot show that the toggle is needed. The rest is from memory |
 | H5 | `invlpg a` invalidates the TLB entries for the page holding `a`, whatever its size, and all paging-structure-cache entries. | M5 |
 | H6 | Changing an entry's P flag from 0 to 1 needs no invalidation: no TLB or paging-structure-cache entry is made from a not-present entry. Any other change to a present entry needs one. | M5 |
 | H7 | Effective R/W and U/S are the AND over the walk and XD the OR, so intermediate entries may grant everything and leaves restrict. | M5 |
-| H8 | PAT index = 4·PAT + 2·PCD + PWT; the PAT bit is bit 7 of a 4 KiB PTE and bit 12 of a 2 MiB PDE. Type encodings: UC `00h`, WC `01h`, WT `04h`, WB `06h`, UC- `07h`. A page mapped UC or WC must not also be mapped WB (SDM vol. 3, 11.12.4). | M3 |
+| H8 | PAT index = 4·PAT + 2·PCD + PWT; the PAT bit is bit 7 of a 4 KiB PTE and bit 12 of a 2 MiB PDE. Type encodings: UC `00h`, WC `01h`, WT `04h`, WB `06h`, UC- `07h`. A page mapped UC or WC must not also be mapped WB (SDM vol. 3, 11.12.4). | Checked in M3 against seL4's entry layouts (`structures.bf`) and `init_pat_msr`, and pinned by host tests in `l4core::vspace`; the aliasing rule is from memory |
 | H9 | `sysretq` with a non-canonical RCX raises #GP in ring 0 on Intel CPUs, after the kernel has restored the user's RSP. | M5 |
-| H10 | An MTRR type of UC with a PAT type of WB gives UC; a PAT type of WC gives WC whatever the MTRR. Fixed-range MTRRs make the legacy hole at `0xA0000` UC. | M3 |
-| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | M3 |
-| H12 | CPUID: leaf 1 EDX bit 13 PGE, bit 16 PAT; leaf `0x8000_0001` EDX bit 20 NX; leaf 7.0 EBX bit 7 SMEP, bit 20 SMAP; leaf 7.0 ECX bit 2 UMIP. | M3 |
+| H10 | An MTRR type of UC with a PAT type of WB gives UC; a PAT type of WC gives WC whatever the MTRR. Fixed-range MTRRs make the legacy hole at `0xA0000` UC. | M8, when the framebuffer is first mapped WC; M3 maps no page whose type depends on it |
+| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | M5, the first ring-3 code; M3 sets CR4.UMIP when CPUID reports it |
+| H12 | CPUID: leaf 1 EDX bit 13 PGE, bit 16 PAT; leaf `0x8000_0001` EDX bit 20 NX; leaf 7.0 EBX bit 7 SMEP, bit 20 SMAP; leaf 7.0 ECX bit 2 UMIP. | Checked in M3: `l4core::cpu` reads these bits, and the boots agree with H1 (`qemu64` lacks exactly SMEP, SMAP and XSAVE in `cpu_refuse`; `-cpu max,la57=off` has all seven in `hello`) |
 | H13 | The CPU may fill TLB and paging-structure-cache entries at any time, in any ring, from any present entry reachable from CR3, including for speculative accesses that never retire (SDM vol. 3, 4.10.2.3). So a flush must follow the entry write it covers, never precede it. | M5 |
-| H14 | CPUID leaf 7.0 EDX bit 29 says `IA32_ARCH_CAPABILITIES` (MSR `0x10A`) exists; its bit 0, `RDCL_NO`, says the CPU is not open to Meltdown (rogue data cache load). | M3 |
+| H14 | CPUID leaf 7.0 EDX bit 29 says `IA32_ARCH_CAPABILITIES` (MSR `0x10A`) exists; its bit 0, `RDCL_NO`, says the CPU is not open to Meltdown (rogue data cache load). | Checked in M3: TCG's `-cpu max` does not report the MSR, so QEMU boots print `unknown`; the owner's Hyper-V host reports it with `RDCL_NO` set, `cpu: meltdown: not vulnerable` |
 
 ### Rings and segments
 
@@ -184,12 +185,12 @@ M3 loads this GDT; M5, which adds system calls, writes `IA32_STAR` =
 state and panics with one line, `CPU lacks <features>`, naming every missing
 feature, which reaches COM1 as a `KERNEL PANIC` line. XSAVE, which M5 first
 uses, is checked from M3 with the rest. Hardening that is silently missing on one target is
-hardening the M10 red team never tested. QEMU's default model lacks SMEP and
-SMAP [H1], so from M3 xtask's `base_command()` passes `-cpu max,la57=off`,
-and a scenario key `qemu_args:` appends arguments, so a refusal test boots
-`-cpu qemu64`. `tools/hyperv/New-L4Vm.ps1` turns processor
-compatibility mode off, and the M3 Hyper-V check confirms SMEP and SMAP
-[H2]. The M3 boot summary prints the CPUID features the kernel requires and
+hardening the M10 red team never tested. QEMU's default model lacks SMEP,
+SMAP and XSAVE [H1], so from M3 xtask's `base_command()` passes
+`-cpu max,la57=off`, and a scenario key `qemu_args:` appends arguments, so the
+`cpu_refuse` scenario boots `-cpu qemu64`. `tools/hyperv/New-L4Vm.ps1` turns
+processor compatibility mode off, and the M3 Hyper-V check confirms SMEP and
+SMAP [H2]. The M3 boot summary prints the CPUID features the kernel requires and
 the Meltdown line below.
 
 ### The kernel half
@@ -238,22 +239,38 @@ the Meltdown line below.
   `HV_X64_MSR_HYPERCALL` at it ([Hypercalls](#hypercalls-m9)).
 - **Guard pages.** The kernel stack and the four IST stacks each have
   an unmapped 4 KiB page below them: the linker script reserves the holes
-  and the M3 table builder skips them. An overflow takes a page fault and
-  then a double fault on IST1; an overflow of IST1 itself ends in a triple
-  fault. This closes the STATUS.md open issue.
+  and the M3 table builder skips them, both at `KERNEL_VIRT_BASE` and in the
+  direct map's 4 KiB alias of the image. An overflow takes a page fault and
+  then a double fault on IST1 (the `stack_overflow` and `nmi_stack`
+  scenarios). An overflow of IST1 itself does not end in a triple fault:
+  the page fault in IST1's guard page becomes another double fault, whose
+  delivery reloads RSP from the TSS, the top of IST1, so the handler runs
+  again over the first one's frames (the `df_stack` scenario). The second
+  panic finds the first under way and exits without a report, so the first
+  report may be cut short; nothing runs on. This closes the STATUS.md open
+  issue.
 - **From what memory.** The kernel's tables are static, in `.bss`: the
   kernel PML4; the direct-map PDPT, 64 page directories (256 KiB, enough for
   64 GiB of 2 MiB pages) and 9 page tables for the image's alias; the image
   PDPT, PD and 8 page tables; the device window's PD and page table: 87
-  pages, 348 KiB. Nothing comes from the memory map, so M4 reserves no pages
-  for them beyond the image.
+  pages, 348 KiB, more than half of the 600 KiB debug image at the end of M3.
+  Nothing comes from the memory map, so M4 reserves no pages for them beyond
+  the image; the builder refuses tables outside the image's data. Every
+  kernel entry has Accessed preset, and every writable kernel leaf Dirty, as
+  Linux presets them, so the CPU never writes the kernel's tables and the
+  kernel reads them after boot as plain shared data.
 - **Bounds.** The direct map covers at most 64 GiB: the loader allocates below
   64 GiB, M3 panics if the kernel image, the handoff or its memory map ends
   above the direct map, and RAM above it becomes no untyped
   ([ADR 0006](adr/0006-direct-map-bound.md)). The image, `.rootimage`
   included, is at most `KERNEL_IMAGE_MAX` = 16 MiB: `kernel/linker.ld` asserts
   it, and from M5 xtask strips `root` before embedding it and checks the
-  kernel against the limit.
+  kernel against the limit. M3 also panics if a 2 MiB page the image touches
+  overlaps no RAM-like region, since the direct map would map the image UC,
+  and unless `.text` (with `.hvcall`), `.rodata` and `.data` (with `.bss` and
+  the stacks) tile `[KERNEL_VIRT_BASE, KERNEL_VIRT_BASE + kernel_size)` in
+  that order with no gap: `l4core::vspace::KernelLayout` names those three
+  ranges, so M5's `.rootimage` must add its own.
 - **Sharing.** Kernel PML4 entries 256 and 511 point at the kernel's PDPTs
   with U/S = 0. Retyping a PML4 copies entries 256 to 511 from the kernel
   PML4, as seL4's `copyGlobalMappings` copies its kernel slots (511 only, or
@@ -283,7 +300,10 @@ index 0, whose type does not change):
 `IA32_PAT` (MSR `0x277`) = `0x0007_0401_0007_0406` [H8]. Entries 0 to 4 are
 what seL4 writes (`init_pat_msr`, `src/arch/x86/kernel/vspace.c`); seL4
 leaves entries 5 to 7 as it finds them, and microL4 writes the power-on
-values there (from memory; check in M3), so the whole MSR is fixed.
+values there, so the whole MSR is fixed. QEMU reads
+`0x0007_0406_0007_0406` before the write, whose entries 5 to 7 match (the
+`paging` scenario's boot log prints the value found; a host test in
+`l4core::vspace` pins it).
 
 M3 boot sequence, in this order:
 
@@ -292,17 +312,16 @@ M3 boot sequence, in this order:
 2. Load the kernel's GDT, TSS and IDT
    ([Descriptor tables and MSRs](#descriptor-tables-and-msrs),
    [Vector map](#vector-map)).
-3. Program `IA32_PAT`.
-4. Find the kernel device pages: the local APIC from `IA32_APIC_BASE`, the
+3. Find the kernel device pages: the local APIC from `IA32_APIC_BASE`, the
    I/O APICs from the MADT and the HPET from its table, read by the ACPI
    parser ([ACPI and the timer](#acpi-and-the-timer)) through the loader's
    direct map. No device
    register is touched yet.
+4. Check EFER.NXE and CR0.WP, then program `IA32_PAT`.
 5. Build the tables in `.bss` from the handoff's `kernel_phys_base`,
    `kernel_size`, memory map and `phys_map_size` and the device pages, with
    the type of each direct-map page computed by `core`.
-6. Set CR4.SMEP, CR4.SMAP, CR4.PGE, and CR4.UMIP if present; check EFER.NXE
-   and CR0.WP.
+6. Set CR4.SMEP, CR4.SMAP, CR4.PGE, and CR4.UMIP if present.
 7. Load CR3 with the kernel PML4, then clear and set CR4.PGE, which drops
    every translation the firmware or loader left, global ones included [H4].
 
@@ -315,14 +334,15 @@ cache load a ring-3 task can read all RAM through the direct map. There is no
 counterpart of seL4's skim window. M3 reads `RDCL_NO` when the MSR exists
 [H14] and prints `cpu: meltdown: vulnerable`, `cpu: meltdown: not
 vulnerable` or `cpu: meltdown: unknown`; the Hyper-V check records the line
-in `STATUS.md`, and M10 lists the risk.
+in `STATUS.md`, and M10 lists the risk. TCG's `-cpu max` does not report
+`IA32_ARCH_CAPABILITIES`, so QEMU boots print `unknown`.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | User code runs only in ring 3 and in 64-bit mode | the GDT has no DPL-3 32-bit code descriptor and there is no LDT; user CS and SS are fixed selectors, never taken from user registers | M3, M5 |
-| The kernel never runs without NX, PGE, PAT, SMEP, SMAP and XSAVE | `arch::cpu::check_features` before any other M3 step; the `cpu_refuse` scenario boots `qemu_args: -cpu qemu64` and expects one `CPU lacks` line naming SMEP, SMAP and XSAVE | M3 |
+| The kernel never runs without NX, PGE, PAT, SMEP, SMAP and XSAVE | `arch::check_cpu` before any other M3 step; the `cpu_refuse` scenario boots `qemu_args: -cpu qemu64` and expects one `CPU lacks` line naming SMEP, SMAP and XSAVE | M3 |
 | CR0.WP, EFER.NXE, CR4.SMEP, CR4.SMAP and CR4.PGE are set before the first user instruction and never cleared | M3 init; the boot summary prints CR0, CR4 and EFER and a scenario matches the line | M3 |
 | Every boot states its Meltdown exposure | M3 prints `cpu: meltdown: vulnerable`, `not vulnerable` or `unknown` from `RDCL_NO`; a scenario matches the line; the Hyper-V check records it in `STATUS.md`; M10 lists the accepted risk | M3, M10 |
 | Kernel code always runs with RFLAGS.AC = 0 and DF = 0 | `IA32_FMASK` includes AC and DF; `clac` and `cld` at every exception and interrupt entry; review of `arch` entry code | M3, M5 |
@@ -348,7 +368,7 @@ in `STATUS.md`, and M10 lists the risk.
 | One PML4 slot, 511, holds the physical-memory window, the kernel ELF and the device window (`include/plat/pc99/plat/64/plat_mode/machine/hardware.h`) | slot 256 holds the direct map, slot 511 the image | the constants in [Kernel execution model](#kernel-execution-model) |
 | The kernel window maps `[0, PADDR_TOP)`, 510 GiB, all write-back, with 1 GiB pages under `CONFIG_HUGE_PAGE` (`map_kernel_window`) | 2 MiB pages, WB only where RAM is and no kernel device page lies, UC elsewhere, at most 64 GiB; the loader allocates below 64 GiB | no write-back mapping of device memory; `qemu64` may lack 1 GiB pages [H1]; the tables fit in 348 KiB of `.bss` |
 | Kernel devices get their own uncached window at `KDEV_BASE` = `0xffffffffc0000000`: the local APIC, then the I/O APICs, then IOMMUs (`map_kernel_window_devices`, `src/arch/x86/kernel/vspace.c`; `hardware.h`) | the same idea at `KERNEL_DEVICE_BASE` = `0xFFFF_FFFF_FFE0_0000`: the local APIC, four I/O APIC pages, the HPET; no IOMMU | the last 2 MiB need one page table; the HPET calibrates the timer on QEMU ([The timer](#the-timer)) |
-| Skim window against Meltdown, on by default on x86_64 (`KernelSkimWindow` in `src/arch/x86/config.cmake`; `map_skim_window`): user address spaces map only a small kernel window, and kernel mappings are then not global (`KERNEL_IS_GLOBAL`) | none; M3 prints whether the CPU is vulnerable | accepted risk in v0: a skim window needs separate kernel and user tables and non-global kernel pages; instead every boot says whether its CPU is exposed (TCG is not; from memory, check in M3) |
+| Skim window against Meltdown, on by default on x86_64 (`KernelSkimWindow` in `src/arch/x86/config.cmake`; `map_skim_window`): user address spaces map only a small kernel window, and kernel mappings are then not global (`KERNEL_IS_GLOBAL`) | none; M3 prints whether the CPU is vulnerable | accepted risk in v0: a skim window needs separate kernel and user tables and non-global kernel pages; instead every boot says whether its CPU is exposed (TCG's `-cpu max` does not report `IA32_ARCH_CAPABILITIES`, so QEMU boots say `unknown`; the owner's Hyper-V host says `not vulnerable`) |
 | GDT: TSS at index 3, user code and data at 5 and 6, FS and GS descriptors (`include/arch/x86/arch/64/mode/object/structures.h`); `IA32_STAR[63:48]` = `SEL_CS_3` = `0x2B` (`init_syscall_msrs`), so `sysretq` loads CS `0x3B`, the FS descriptor's slot, while `iretq` uses `0x2B` | user data 3, user code 4, TSS 5, no FS or GS descriptor; `IA32_STAR` = `0x0013_0008_0000_0000` | `sysretq` selector arithmetic lands on matching descriptors; FS and GS bases go through MSRs ([FS and GS base](#fs-and-gs-base)) |
 | UMIP not used (no mention in `src/` or `include/`) | on when present | free; protects nothing secret here |
 
@@ -598,7 +618,10 @@ and dirty bits in, a table whose memory may be retyped. TCG hides both
   `apply(Flush)`, which holds the only `invlpg` and the only CR3 reload;
   `set_vm_root`, the only other CR3 write after boot (thread switch and PML4
   finalisation); the M3 table builder, the PAT and
-  CR4 setup. `cpu.rs` checks the features.
+  CR4 setup. It reads the linker script's section bounds with `lea`, not as
+  addresses of `extern` statics: the compiler assumes distinct statics have
+  distinct addresses and folds `&__kernel_end == &__data_end` to false.
+  `cpu.rs` checks the features.
 
 | Part | Milestone |
 | --- | --- |
@@ -667,9 +690,9 @@ loaded from an ELF image embedded in the kernel, in ring 3 (M5).
 | --- | --- | --- |
 | 1 | M0 | `_start` zeroes BSS, switches to the kernel stack and calls `rust_entry`, which sets up COM1; from M7 only in debug kernels ([Debug](#debug)) |
 | 2 | M3 | CPU feature check: refuse to boot if a required feature is missing ([CPU features](#cpu-features)). `Handoff::validate`; panic if the kernel image, the handoff or its memory map ends above the kernel's direct map, `min(phys_map_size, 64 GiB)`, which the loader's 64 GiB allocation bound prevents ([ADR 0006](adr/0006-direct-map-bound.md)); then the handoff and its memory map (at most 256 regions, else panic) are copied into the static `BootState` (the kernel's own `.bss`; no CPU or firmware state changes before the feature check). No code reads `LOADER` memory after this, except the kernel image |
-| 3 | M3 | GDT, TSS, IDT, `IA32_PAT` ([Privilege levels](#privilege-levels)) and CR4.MCE; `IA32_GS_BASE` = the per-CPU area; DR7 = `0x400`, its reset value, no breakpoint enabled. The firmware's GDT, IDT and stack are now dead |
-| 4 | M3 | ACPI is parsed through the loader's direct map: the kernel device pages (the local APIC, at most four I/O APICs, the HPET), the ISA overrides and the ECAM ranges ([ACPI and the timer](#acpi-and-the-timer)). Then the kernel's page tables are built in `.bss`, with the kernel device window at `KERNEL_DEVICE_BASE`, and replace the loader's in the order [The kernel half](#the-kernel-half) gives (CR4.SMEP, SMAP, PGE and UMIP, then CR3); the 1:1 map is gone |
-| 5 | M3 | The local APIC, the PIC and the I/O APICs are set up; the local APIC timer and the TSC are calibrated in one window, giving `tsc_hz`; Hyper-V overlay pages the firmware left enabled are switched off ([ACPI and the timer](#acpi-and-the-timer), [Firmware leftovers](#firmware-leftovers-m3)). The kernel device pages, the MSI window and a locked Hyper-V hypercall page go into `BootPlan.kernel_reserved`. Only now are `USABLE`, `LOADER` and `ACPI_RECLAIMABLE` pages free |
+| 3 | M3 | GDT, TSS, IDT ([Privilege levels](#privilege-levels)) and CR4.MCE; `IA32_GS_BASE` = the per-CPU area; DR7 = `0x400`, its reset value, no breakpoint enabled. The firmware's GDT, IDT and stack are now dead |
+| 4 | M3 | ACPI is parsed through the loader's direct map: the kernel device pages (the local APIC, at most four I/O APICs, the HPET), the ISA overrides and the ECAM ranges ([ACPI and the timer](#acpi-and-the-timer)). Then the kernel's page tables are built in `.bss`, with the kernel device window at `KERNEL_DEVICE_BASE`, and replace the loader's in the order [The kernel half](#the-kernel-half) gives (EFER.NXE and CR0.WP checked, `IA32_PAT`, the tables, CR4.SMEP, SMAP, PGE and UMIP, then CR3); the 1:1 map is gone |
+| 5 | M3 | Hyper-V's leftovers go first, since a synthetic timer the firmware left armed can interrupt, and the time-unhalted timer can raise an NMI ([Firmware leftovers](#firmware-leftovers-m3)); M3 records a hypercall page the firmware locked. Then the local APIC, with LINT0 masked before the PIC is reprogrammed, the PIC, the I/O APICs and the HPET are set up, and the local APIC timer and the TSC are calibrated in the same windows, giving `tsc_hz` ([Local APIC, PIC and I/O APIC (M3)](#local-apic-pic-and-io-apic-m3), [The timer](#the-timer)). The kernel device pages, the MSI window and a locked Hyper-V hypercall page go into `BootPlan.kernel_reserved`. Only now are `USABLE`, `LOADER` and `ACPI_RECLAIMABLE` pages free |
 | 6 | M4 | `l4core::boot::plan` sizes the boot region; the kernel allocates and zeroes it |
 | 7 | M4 | The root CNode is made in the boot region and the fixed capabilities written |
 | 8 | M5 | The root ELF is copied from `.rootimage` into image frames; its VSpace, IPC buffer and TCB are built. `.rootimage` is unmapped from the kernel window, ending with a CR4.PGE toggle ([The kernel half](#the-kernel-half)) |
@@ -714,8 +737,9 @@ IDT and per-CPU area; the kernel's page tables, including the device window
 ([The kernel half](#the-kernel-half)); `BootState`; the idle thread,
 scheduler and interrupt tables ([Scheduling](#scheduling),
 [The IRQ table](#the-irq-table)). The fatal handlers format their panic
-report on their 8 KiB IST stack; M3 measures the panic path's depth against
-it.
+report on their 8 KiB IST stack. The `double_fault` scenario paints IST1
+first and prints how much of it the report used: 1,872 bytes in the dev
+profile and 1,904 in release at the end of M3, so 8 KiB is enough.
 
 Everything sized at run time comes from one boot region, chosen like seL4's
 rootserver region (`init_freemem`, `src/kernel/boot.c`): the top of the
@@ -812,9 +836,11 @@ MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
 
 | Part | Where | Built in |
 | --- | --- | --- |
+| Handoff copy into `BootState` (step 2) | `kernel/src/boot.rs`, reading through `arch::read_handoff` and `arch::read_memory_map` | M3 |
+| Steps 3 to 5 | `arch::init` (`arch/x86_64/mod.rs`) over `l4core::{trap, acpi, vspace, window, hyperv, apic, hpet, calibration, timer}` | M3 |
 | BootInfo, `SlotRegion`, `UntypedDesc`, slot constants | `l4core::bootinfo`, compile-time asserts | M4 |
 | Boot plan, untyped computation, slot plan, root layout and ELF checks | `l4core::boot`, host tests and proptest | M4, M5 |
-| Handoff copy, boot region allocation, writing BootInfo and image frames | `arch` gives `core` `&mut` views of the boot region's frames through the direct map, each with a `SAFETY:` comment that boot code owns them exclusively | M4, M5 |
+| Boot region allocation, writing BootInfo and image frames | `arch` gives `core` `&mut` views of the boot region's frames through the direct map, each with a `SAFETY:` comment that boot code owns them exclusively | M4, M5 |
 | `.rootimage` section, unmap and flush | `kernel/linker.ld`, `arch` | M5 |
 
 ### Invariants
@@ -875,7 +901,11 @@ kernel code `0x08`, kernel data `0x10`, user data `0x18` (selector `0x1B`),
 order: kernel data right after kernel code, then user data, then 64-bit user
 code. `STAR[63:48]` names index 2 with RPL 3, `0x13`, which is right whether
 or not `sysretq` forces RPL 3. The selectors are loaded with fixed hidden
-attributes, not read from the GDT; the GDT entries matter for `iretq`.
+attributes, not read from the GDT; the GDT entries matter for `iretq`. The
+GDT's limit is `0x37`, its seven entries less one byte, not the size of the
+16-byte-aligned static that holds them, whose padding would make selector
+`0x38` look valid: a selector past the TSS descriptor raises #GP, as the
+`trap_general_protection` scenario shows.
 
 | Register | Value | Why |
 | --- | --- | --- |
@@ -898,9 +928,10 @@ vectors 32 to 255.
 
 ### The per-CPU area and `swapgs`
 
-`PerCpu` is a `#[repr(C)]` static: `self` (offset 0), `kernel_stack_top` (8),
-`user_rsp` (16). `swapgs` runs once per entry from ring 3 and once per exit to
-it, so GS points at `PerCpu` in ring 0 and at the user's GS base in ring 3.
+`PerCpu` is a `#[repr(C)]` static in `arch/x86_64/gdt.rs`, set up in M3:
+`this`, its own address (offset 0), `kernel_stack_top` (8), `user_rsp` (16).
+`swapgs` runs once per entry from ring 3 and once per exit to it, so GS
+points at `PerCpu` in ring 0 and at the user's GS base in ring 3.
 Only the stubs use GS; Rust uses the static. seL4's uniprocessor build has no
 `swapgs` (`MAYBE_SWAPGS`, `src/arch/x86/64/traps.S`); microL4 keeps it, as
 PLAN.md asks, which readies the stubs for multi-core
@@ -929,24 +960,37 @@ syscall_entry:                 ; IF DF AC TF NT = 0 by IA32_FMASK; RSP is the us
     mov  rdi, rsp
     call syscall_from_user                     ; Rust, never returns
 
-vector_N:                      ; non-IST gate; RSP0 if from ring 3
+trap_vector_N:                 ; every vector; RSP0 from ring 3 unless IST
     push 0 (if the CPU pushed no error code), N
     clac
     cld
+    jmp  trap_fatal_entry (NMI, #DF, #MC) or trap_common_entry (the rest)
+
+trap_common_entry:
     test byte [rsp + 24], 3    ; saved CS
-    jz   trap_from_kernel
+    jz   1f
     swapgs
+1:  push rax ... r15
+    mov  rdi, rsp
+    call trap_from_kernel or trap_from_user, by the saved CS
+
+trap_fatal_entry:              ; IST1, IST2 or IST3; no swapgs from either ring
     push rax ... r15
     mov  rdi, rsp
-    call trap_from_user
+    call trap_fatal
 ```
 
-The CPU pushes an error code for vectors 8 and 10 to 14 (from memory; check
-in M3). Vectors 17, 21, 29 and 30 also push one when raised as exceptions,
+Each stub pushes the vector, runs `clac` and `cld` and jumps to one of the
+two shared entries, so the saved-CS test and `swapgs` live in one place, not
+in 256 stubs. The CPU pushes an error code for vectors 8 and 10 to 14, as
+seL4's `traps.S` has it and the M3 scenarios show: `trap_general_protection`,
+`page_fault` and `double_fault` read their error codes from the frames QEMU
+pushed. Vectors 17, 21, 29 and 30 also push one when raised as exceptions,
 but none can be raised here (CR0.AM clear, no CET, no SEV), so they take the
 no-error-code stub, which also reads an MSI injected on them correctly. They
-and the vectors with no use here (9, 15, 20, 22 to 28, 31; from memory, check
-in M3) panic from either ring. Every stub, IST ones included, runs
+and the vectors with no use here (9, 15, 20, 22 to 28, 31, from the SDM's
+vector table as remembered; `trap_cannot_occur` raises 21 and checks the
+report) panic from either ring. Every stub, IST ones included, runs
 `clac` and `cld` before any Rust code.
 
 The Rust handlers read CR2 first for #PF, then copy the frame into the current
@@ -1022,7 +1066,7 @@ canonical RIP and RSP and masked RFLAGS, `iretq` cannot fault in ring 0 either
 
 | Vector | Stack | From ring 3 | From ring 0 |
 | --- | --- | --- | --- |
-| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults)) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there; from memory, check in M5), `iretq` at once; otherwise panic |
+| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults); QEMU 8.2's TCG raises #UD for `int1` in ring 0, so M10 brief 5 rechecks `int1` from ring 3) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there; from memory, check in M5), `iretq` at once; otherwise panic |
 | 2, NMI | IST2 | panic | panic |
 | 8, #DF | IST1 | panic | panic |
 | 18, #MC | IST3 | panic | panic |
@@ -1030,14 +1074,18 @@ canonical RIP and RSP and masked RFLAGS, `iretq` cannot fault in ring 0 either
 
 These handlers never read GS and never use the interrupted RSP, so an NMI or
 #DB at the first instruction of `syscall_entry`, while RSP is still the
-user's, is safe. The kernel sends no NMIs, so one means a hardware error, a
+user's, is safe. The kernel sends no NMIs outside the `nmi_stack` test hook,
+so one means a hardware error, a
 host operator, or a bus-master device whose driver programmed an NMI (or a
 vector-18) MSI, which is as strong as DMA
 ([MSI (M9) and the trust model](#msi-m9-and-the-trust-model)); as it is
 fatal, no handler returns from IST2 and a nested NMI cannot overwrite a live
 frame. Separate ISTs keep an NMI inside a #MC
 handler off its stack. CR4.MCE is set so a machine check reaches the panic
-report instead of shutting down (from memory; check in M3). DR7 keeps its
+report instead of shutting down (from memory: TCG cannot raise a real machine
+check, and the `trap_machine_check` scenario enters the handler with
+`int 18`). OVMF already sets it (CR4 is `0x668` at handover, read under GDB
+in M3); the kernel sets it regardless. DR7 keeps its
 reset value `0x400`, no breakpoint enabled ([Invocations](#invocations)), so the
 single-step case is the only ring-0 #DB.
 
@@ -1075,8 +1123,9 @@ reaches a preemption point leaves the thread `Restart`, so it re-executes
 
 | Part | Where | Built in |
 | --- | --- | --- |
-| GDT, TSS, IDT, IST stacks, ring-0 exception decode, NMI, #DF, #MC handlers, idle loop and its interrupt path | `arch/x86_64/{gdt,idt,trap}.rs` | M3 |
-| Syscall MSRs, `syscall_entry`, user trap entry, `exit_sysret`, `exit_iret`, `PerCpu` | `arch/x86_64/{entry,percpu}.rs` | M5 |
+| GDT, TSS, IDT, IST stacks, `PerCpu`, the stubs and their two shared entries, ring-0 exception decode, NMI, #DF, #MC handlers, idle loop and its interrupt path | `arch/x86_64/{gdt,idt,trap,irq}.rs` | M3 |
+| Descriptor encodings, the vector map, error-code and fatal-vector masks for the stubs, the trap frame and the fatal report | `l4core::trap`, host tests | M3 |
+| Syscall MSRs, `syscall_entry`, user trap entry, `exit_sysret`, `exit_iret` | `arch/x86_64/entry.rs` | M5 |
 | `Syscall::from_number`, `exit_frame` | `l4core::abi`, `l4core::entry`; host tests at `2^47 - 1`, `2^47`, `2^64 - 2^47`, and proptest over all `u64` | M5 |
 
 ### Invariants
@@ -1093,7 +1142,7 @@ reaches a preemption point leaves the thread `Restart`, so it re-executes
 | GS points at `PerCpu` whenever a ring-0 path outside the IST handlers and the two windows reads it | `swapgs` exactly once per ring-3 entry and exit, keyed on saved CS; review; M10 brief 5 | M5 |
 | `sysenter`, compatibility-mode `syscall` and far transfers cannot enter ring 0 | `IA32_SYSENTER_CS` = 0; no 32-bit code descriptor; `IA32_CSTAR` stub | M5 |
 | A ring-0 interrupt is accepted only from `idle_loop`; every other ring-0 exception panics with a decoded report | `trap_from_kernel` RIP check; M3 page-fault scenario | M3 |
-| An overflow of the kernel stack or of the NMI, #MC or #DB IST stack ends in a #DF report, and an overflow of the #DF stack in a triple fault, never in silent corruption | a guard page below each of the five stacks, reserved by the linker script and skipped by the M3 table builder; #DF on IST1; M3 scenarios overflow the kernel stack and, from a `test=` hook, the NMI stack after a self-NMI | M3 |
+| An overflow of the kernel stack or of the NMI, #MC or #DB IST stack ends in a #DF report, and an overflow of the #DF stack in a second #DF over the first, which stops the machine with the first report possibly cut short; never in silent corruption | a guard page below each of the five stacks, reserved by the linker script and skipped by the M3 table builder; #DF on IST1; the panic path's re-entry guard; M3 scenarios overflow the #DF stack (`df_stack`), the kernel stack (`stack_overflow`) and, from a `test=` hook, the NMI stack after an NMI the kernel sends itself through the ICR (`nmi_stack`), naming its own APIC ID, since the self shorthand is valid only for fixed delivery | M3 |
 | The kernel stack holds no state across entries | every entry starts at RSP0 or the stack top; exits rebuild the frame from the TCB | M5 |
 | An unknown or, without `debug`, a debug system call number reaches no handler and raises `UnknownSyscall` | `Syscall::from_number`; host tests for both builds | M5 |
 | A preempted system call restarts with the caller's arguments | `fault_ip`, `Restart` ([Register frame and restart](#register-frame-and-restart)); M5 self-test | M5 |
@@ -1276,17 +1325,28 @@ Rust:
 2. A deletion a user asked for (`CNode_Delete`, or revoke deleting a
    descendant) clears the container from the highest slot down, one
    capability per step, storing the count in the Zombie and passing a
-   preemption point after each; a restarted call resumes.
+   preemption point after each step, where seL4's `finaliseSlot` has one; a
+   restarted call finds the Zombie in its slot and resumes.
 3. A nested deletion, of the last capability to another container `D`, does
    not recurse: `D`'s Zombie is swapped into `D`'s slot 0 and `D`'s old
    slot-0 capability is deleted instead. The swap carries both derivation
-   nodes and calls `moved`; a preemption point may follow it. A nested
+   nodes and calls `moved`; a preemption point follows it. A nested
    deletion that meets a Zombie already in its own container's slot 0 stops
    (seL4 `capCyclicZombie`). `D` stays, unreachable, until a revoke of its
    untyped reaches the Zombie (`cspace.tex`, "Deletion and Revocation",
    footnote).
+   - **The cycle stop.** If `D`'s slot 0 is the slot being deleted, because
+     each container holds the other's last capability, the step leaves
+     `D`'s Zombie there, and the deletion ends without emptying the slot,
+     before it checks whether `D` has anything left to clear. `D` stays
+     detached in its slot 0, as any nested deletion leaves a container,
+     even with one slot left. No lookup names that slot, so only a revoke
+     gets here, and the revoke's own slot stays reachable. seL4 goes on to
+     clear `D`, which a restarted revoke would not find again, so there the
+     outcome depends on where the interrupt falls; here it does not.
 4. The slot empties when the count reaches 0, or 1 with the Zombie in the
-   container's own slot 0.
+   container's own slot 0, except after the cycle stop of step 3, where it
+   keeps `D`'s Zombie.
 
 Nesting is at most two calls deep. A Zombie cannot be invoked
 (`InvalidCapability`) or derived (`IllegalOperation`); it can be moved, and
@@ -1334,6 +1394,7 @@ IRQHandlers, IOPorts and the IRQ node; M9 for Hypervisor capabilities.
 | No Hypervisor capability | Tag 15 | Hyper-V SynIC and hypercalls (PLAN.md, Hyper-V interface) |
 | Odd tags mark architecture capabilities (`isArchCap`) | Flat 5-bit tags | One architecture |
 | TCB slots in the order CTable, VTable, Reply, Caller, Buffer (`tcb_cnode_index`, `include/object/structures.h`) | CSpace root, VSpace root, IPC buffer, `reply`, `caller` | The [TCB layout](#tcb-layout); only the Zombie's clearing order (highest slot first) depends on it |
+| When a cycle of containers leaves `D`'s Zombie in the slot being deleted, the same deletion goes on to clear `D`, and empties the slot at once if `D` has one slot left (`finaliseSlot`, `reduceZombie`, `src/object/cnode.c`) | The deletion ends there, before checking whether the Zombie is removable; `D`'s Zombie stays, detached, in `D`'s slot 0 until a deletion reaches it (step 3, the cycle stop). Otherwise deletion and revoke are seL4's, preemption points and partial revokes included | No lookup names that slot, so only a revoke gets there, and its own slot stays reachable. A restarted revoke looks for work only among the revoked capability's descendants, which `D`'s Zombie need not be, so a preemption point while clearing `D`, or before emptying the slot, would make the outcome depend on where the interrupt fell |
 
 ## Memory and retype
 
@@ -1626,20 +1687,38 @@ Rotate is kept: it swaps two capabilities without a spare slot, and `core/`
 needs the swap for Zombies anyway. Mutate is kept: it is the only way to set
 the guard of an original CNode capability without making a child. Revoke and
 delete are sequences of single-capability steps with a preemption point
-after each; an interrupted call restarts, looks its slot up again and goes
-on. Revoke re-reads its slot every step, so it stops cleanly if it deletes
-the CNode holding its own slot; if it destroys the caller's TCB, the caller
-is suspended and a preempted revoke is never restarted (the partial-revoke
-cases of `cspace.tex`, "Deletion and Revocation"). In the first case the
-revoked capability is deleted with that CNode, its descendants not yet
-deleted pass to its parent and survive, and the revoke ends. If a
-preemption point falls inside that CNode's destruction after the slot is
-gone, the restarted call cannot look its slot up, or finds it empty, so
-the CNode's Zombie also stays, partly cleared, where the CNode's last
-capability was: a slot the user can name. The Zombie can be moved, and
-Delete, or a revoke of its untyped, finishes the clearing ([Deletion and
-finalisation](#deletion-and-finalisation)). A user avoids both, as in
-seL4, by not revoking from inside what the revoke destroys.
+after each, where seL4 has them; an interrupted call restarts, looks its
+slot up again and goes on ([System-call dispatch](#system-call-dispatch)).
+Revoke re-reads its slot every step, so it stops cleanly if it deletes the
+CNode holding its own slot. As in seL4 (`cspace.tex`, "Deletion and
+Revocation"), a call can end part way in two cases:
+
+- **Its work destroys a CNode on the lookup path that named its slot.** For
+  a revoke this is the partial revoke, and any CNode on the path can go,
+  the one holding its slot included. A Delete destroys only the CNode whose
+  last capability its slot holds and the CNodes whose last capabilities lie
+  in those, which a path reaches only through the deleted slot, so only a
+  path that runs through that slot itself can be destroyed. Unpreempted,
+  the call goes on as seL4's does: a revoke finishes the deletion that took
+  the revoked capability with it, then stops, and the revoked capability's
+  descendants not yet deleted pass to its parent and survive. Preempted
+  once the path is destroyed, the restarted call fails its lookup and
+  returns that failure, with the rest of the work undone, so the outcome
+  depends on where the interrupt fell.
+- **Its work finalises the caller's own TCB.** The caller is suspended, so a
+  preempted call is never restarted.
+
+What a call cut short leaves is safe. Every slot keeps the derivation-list
+invariants, every capability naming memory inside an untyped is still that
+untyped's descendant, so no reset reuses memory a capability names, and the
+work left can be finished. A Delete finishes a Zombie left in a slot the
+user can name, such as the slot where the destroyed CNode's last capability
+was ([Deletion and finalisation](#deletion-and-finalisation)); a Delete cut
+short leaves only that. A revoke of an ancestor untyped finishes the rest:
+a Zombie in its own CNode's slot 0, or capabilities left in a CNode no
+lookup reaches, the revoked capability among them. Under a boot untyped,
+which has no parent, that region stays dead. A user avoids all this, as in
+seL4, by not naming a slot through a path the call destroys.
 
 Copy, Mint, IPC transfer and the TCB and IRQ-node installs go through
 `derive`, as seL4's `deriveCap`. It refuses Null, Zombie, Reply,
@@ -1682,14 +1761,14 @@ IRQ-node install. M9: Hypervisor narrowing.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Revoke deletes exactly the capabilities derived, directly or not, from the slot, unless it destroys the CNode holding that slot and stops ([Slot operations](#slot-operations)) | `low`-run walk; proptest against `model/`'s transitive parent map | M2 |
+| Revoke deletes exactly the capabilities derived, directly or not, from the slot, unless it is a partial revoke ([Slot operations](#slot-operations)) | `low`-run walk; proptest against `model/`'s transitive parent map | M2 |
 | Deleting a capability changes no survivor's ancestry except that its children pass to its nearest surviving ancestor | `low` update in unlink; proptest | M2 |
 | Rights never grow, a badge is set once, only Mint sets a badge, and a Hypervisor Mint never widens | `derive`, Mint and Mutate rules; proptest; badge scenario (M6); `core::hyperv` host tests; red-team brief 1 | M2, M6, M9, M10 |
 | A PDPT, PageDirectory or PageTable capability is never derived, and a derived Frame capability is never mapped | `derive`; proptest; red-team brief 4 | M2, M5, M10 |
 | A plain copy never has children, so holding one gives no power over other copies | the `original` rule; proptest | M2 |
 | All capabilities to one object are adjacent, so `is_final` is exact | insertion next to the source; proptest compares `is_final` with `model/` | M2 |
 | The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step; debug asserts | M2, M4 |
-| No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless the revoke destroys the CNode holding its own slot and stops ([Slot operations](#slot-operations)) | single-step revoke with restart; red-team brief 2 | M2, M5, M6, M10 |
+| No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless it is a partial revoke ([Slot operations](#slot-operations)) | single-step revoke with restart; red-team brief 2 | M2, M5, M6, M10 |
 | `depth` never exceeds 4095 and never wraps, so no capability leaves its ancestors' runs | one child-insert function in `l4core::cdt` checks the limit; proptest drives a chain to 4095 by copy and delete; red-team brief 1 | M2, M10 |
 | Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5) and `IRQHandler_SetNotification` (M7); IPC transfer skips the capability (M6); tests at depth 4095 per path | M4 to M7 |
 
@@ -2074,7 +2153,7 @@ CPUID.(EAX=0xD, ECX=0).EBX, the area size for the enabled features: it
 panics if that exceeds the TCB's 1024-byte reserve (for x87 and SSE it is
 576). From M5 the boot summary also prints XCR0 and the size, for the
 Hyper-V check. QEMU's default TCG model, `qemu64`, lacks XSAVE
-(from memory), so from M3 xtask's `base_command()` passes
+[H1], so from M3 xtask's `base_command()` passes
 `-cpu max,la57=off`, and a scenario `cpu_refuse` uses the `qemu_args:` key to
 boot `-cpu qemu64` and expect the kernel's one refusal line, which names XSAVE
 among the missing features. The Hyper-V VM runs with processor
@@ -2794,8 +2873,10 @@ on their IST stacks ([NMI, double fault, machine check and
 debug](#nmi-double-fault-machine-check-and-debug)). `#BP` (3) has DPL 3, so
 `int3` is UserException 3 with `rip` after it; every other gate has DPL 0, so
 `int n` from ring 3 is a `#GP` fault and cannot enter a device or timer
-handler. `int1` raises `#DB` without a DPL check (from memory; check in M10
-brief 5): from ring 3 it is UserException 1; a ring-0 `#DB` returns only when
+handler. `int1` raises `#DB` without a DPL check (from memory; M10 brief 5
+checks it from ring 3, since QEMU 8.2's TCG raises `#UD` for `int1` in ring 0,
+and the `trap_debug` scenario single-steps instead): from ring 3 it is
+UserException 1; a ring-0 `#DB` returns only when
 the saved RIP is exactly `syscall_entry`, and any other panics. Vectors 9, 15,
 17 (`#AC`, CR0.AM = 0) and 20 to 31 (`#VE` not enabled, `#CP` without CET, 29
 and 30 SEV only, the rest reserved) cannot occur; only an injected MSI reaches them, and the
@@ -2806,7 +2887,8 @@ IF = 1, in ring 3 or the idle loop ([Idle thread](#idle-thread)). A preemption
 point polls the LAPIC IRR words for `0x30`-`0xFE`, masking off `0x20`-`0x2F`
 in the word they share with `0x30`-`0x3F`, as seL4's
 `apic_is_interrupt_pending` does (`src/arch/x86/kernel/xapic.c`); it never
-opens an `sti` window.
+opens an `sti` window. M3 provides the poll as `arch::apic::interrupt_pending`,
+and the `ticks` scenario checks that it sees the timer with IF = 0.
 
 ### Local APIC, PIC and I/O APIC (M3)
 
@@ -2817,34 +2899,50 @@ kernel device window at `KERNEL_DEVICE_BASE`
 that hold these devices are mapped uncached as well, and M4 makes no RAM
 untyped from them.
 
-With IF = 0: if the MADT flag `PCAT_COMPAT` is set, remap the PIC to
-`0x20`/`0x28` and mask all lines. If `IA32_APIC_BASE` shows x2APIC mode, leave
-it through the disabled state, since the SDM forbids x2APIC to xAPIC directly
-(from memory; check in M3); the M3 boot summary prints `IA32_APIC_BASE`.
-Mask the LVT timer (the firmware may have armed it), LINT0, LINT1, and the
-thermal, performance and CMCI LVTs if present; TPR = 0; SVR = enabled, vector
-`0xFF`, EOI-broadcast suppression off (level-triggered pins need it); LVT
-error = `0xFE`. Mask every I/O APIC redirection entry. Then calibrate and
-start the timer. xAPIC because every x86-64 CPU and both platforms offer it
-and OVMF hands over in xAPIC mode with one vCPU (from memory; the boot summary
-shows it), so one path runs on every boot even though QEMU's `-cpu max`
-also offers x2APIC (from memory). Lost: only the speed of the MSR access
-Hyper-V recommends (TLFS CPUID `0x4000_0004` EAX bits 3 and 8).
+With IF = 0, after Hyper-V's leftovers are off ([Firmware
+leftovers](#firmware-leftovers-m3)): if `IA32_APIC_BASE` shows x2APIC mode,
+leave it through the disabled state, since the SDM makes a direct x2APIC to
+xAPIC write raise #GP ("x2APIC State Transitions"; an `l4core::apic` host
+test checks the order of writes); the boot summary prints `IA32_APIC_BASE` as
+found. Refuse a local APIC that is not integrated (version `0x10`-`0x1F`), as
+seL4's `apic_init` does. Mask every LVT the version register counts: the timer
+(the firmware may have armed it), LINT0, LINT1 and error, and the
+performance, thermal and CMCI LVTs from a maximum LVT index of 4, 5 and 6, as
+Linux's `clear_local_APIC` decides; TPR = 0; SVR = enabled, vector `0xFF`,
+EOI-broadcast suppression off (level-triggered pins need it). Write EOI until
+no ISR bit is set, at most 256 times, since a vector the firmware left in
+service would hold back every vector of its priority class and below; read
+and clear ESR; LVT error = `0xFE`, unmasked. Only then, with LINT0 masked, if
+the MADT flag `PCAT_COMPAT` is set, remap the PIC to `0x20`/`0x28` and mask
+all lines: its first initialisation word clears the masks until the last
+write sets them again. Mask every I/O APIC redirection entry, keeping its
+vector. Then set up the HPET, calibrate and start the timer. xAPIC because
+every x86-64 CPU and both platforms offer it, so one path runs on every boot.
+OVMF hands over in xAPIC mode with one vCPU (`IA32_APIC_BASE` `0xfee00900`:
+enabled, the boot processor; the `hello` scenario), and TCG's `-cpu max` does
+not offer x2APIC, even with `x2apic=on`, so the x2APIC path never runs on
+QEMU; only its host test covers it. On QEMU the local APIC reports version
+`0x50014` with six LVT entries, and the I/O APIC version `0x20` with 24 pins
+(the `hello` scenario). Lost: only the speed of the MSR access Hyper-V
+recommends (TLFS CPUID `0x4000_0004` EAX bits 3 and 8).
 
 The MADT gives up to four I/O APICs (ID, base, GSI base); the pin count is the
-version register's MRE + 1. On issue the kernel first writes the pin's entry
-masked and edge-triggered, keeping its old vector, and reads back Remote IRR.
-If it is set, the kernel writes the old vector to the I/O APIC's EOI register
-(version `0x20` or later; from memory, check in M7) and reads again; if it is
+version register's MRE + 1, at most 120, since the 8-bit register select
+reaches redirection entries 0 to 119 only. On issue the kernel first writes
+the pin's entry masked and edge-triggered, keeping its old vector, and reads
+back Remote IRR. If it is set, the kernel writes the old vector to the I/O APIC's EOI register
+(version `0x20` or later: QEMU's is `0x20`, but Hyper-V's is `0x11` and has none; see [Open questions](#open-questions)) and reads again; if it is
 still set, the issue fails with `RevokeFirst` and the pin stays masked. Only
 then does it write the final entry: vector, fixed delivery, physical
 destination the boot CPU, the requested trigger and polarity, unmasked.
 ISA IRQ `n` goes to GSI `n`, edge, active high, unless an override (bus 0,
-source `n`) gives the GSI and flags ("conforms to bus" means the ISA default).
+source `n`) gives the GSI and flags ("conforms to bus", and a reserved
+polarity or trigger value, mean the ISA default).
 An ISA IRQ whose GSI is another IRQ's override target has no route (IRQ 2 on
-q35, where IRQ 0 goes to GSI 2; from memory). COM1 is ISA IRQ 4 on GSI 4,
-edge, active high, on both platforms (from memory; the M3 host tests on the
-dumped MADTs check it).
+q35, where IRQ 0 goes to GSI 2). COM1 is ISA IRQ 4 on GSI 4, edge, active
+high. On q35 the `acpi` scenario and the host tests on its dumped MADT show
+both, and IRQs 5, 9, 10 and 11 level-triggered, active high; Hyper-V's COM1
+route is checked at the M3 Hyper-V check.
 
 ### The IRQ table
 
@@ -2959,9 +3057,13 @@ recorded for M10 brief 7.
 issue, bind, Ack, Clear, delete and deliver transitions, and message decoding.
 It returns hardware actions (`MaskRte`, `UnmaskRte`, `CheckRemoteIrr`,
 `ProgramRte`, `ProgramSint`, `MaskSint`, `Eoi`) and touches no hardware; host
-tests and a proptest against a set-based model cover it.
-`kernel/src/arch/x86_64/` (`idt.rs`, `lapic.rs`, `ioapic.rs`, `pic.rs`, from
-M3) executes the actions through the device window.
+tests and a proptest against a set-based model cover it. From M3,
+`l4core::apic` holds the local APIC, I/O APIC and PIC registers, the values
+the kernel writes at boot and the EOI rule, and `l4core::acpi` the ISA
+routes (`Platform::isa_route`).
+`kernel/src/arch/x86_64/` (`idt.rs`, `apic.rs`, `ioapic.rs`, `pic.rs`, and
+`irq.rs` for the interrupt path, from M3) executes the actions through the
+device window.
 
 ### Invariants
 
@@ -3066,8 +3168,11 @@ message decoding, with host tests and a proptest against a set model;
 
 The kernel alone parses ACPI, once at boot (M3), from the RSDP the loader
 passes: the XSDT (the RSDT only for revision 0), the MADT, the HPET table and
-the MCFG. The parser is in `core/`, host-tested on tables dumped from both
-platforms; user space gets the few facts it needs in BootInfo's
+the MCFG. The parser is in `core/`, host-tested on tables dumped from QEMU's
+q35, and from the owner's Hyper-V Generation 2 VM at the M3 Hyper-V check
+(`core/tests/acpi/hyperv-gen2.dump`, without its 123 KB DSDT, which the
+parser never reads); user space gets
+the few facts it needs in BootInfo's
 `InterruptInfo`, never the tables, and `ACPI_RECLAIMABLE` memory becomes RAM
 untyped after parsing. The local APIC timer runs periodically at 100 Hz,
 calibrated against the Hyper-V reference counter if present, else the HPET;
@@ -3078,9 +3183,9 @@ with neither, the kernel panics. The same windows measure the TSC.
 | Table | The kernel takes | If absent or invalid |
 | --- | --- | --- |
 | RSDP, XSDT (RSDT) | table addresses | panic: no MADT |
-| MADT | LAPIC address, `PCAT_COMPAT`, I/O APICs, interrupt source overrides | panic |
-| HPET | MMIO base (system-memory address space only) | no HPET, as on Hyper-V (from memory) |
-| MCFG | ECAM ranges for M9 | no PCI for user space, as on Hyper-V |
+| MADT | LAPIC address (the header's, or the first Local APIC Address Override's), `PCAT_COMPAT`, I/O APICs, interrupt source overrides | panic |
+| HPET | MMIO base (system-memory address space only) | no HPET, as on q35 with `hpet=off` and on Hyper-V (checked at the M3 Hyper-V check); also when the base is 0 or the 1 KiB register block crosses a page |
+| MCFG | ECAM ranges for M9 | no PCI for user space, as on Hyper-V; also when the entry area is not a whole number of 16-byte entries |
 
 The FADT and AML are not read: no ACPI shutdown and no PCI INTx routing
 (`_PRT`), so PCI drivers use MSI, as virtio-net can.
@@ -3091,23 +3196,43 @@ The FADT and AML are not read: no ACPI shutdown and no PCI INTx routing
 - Other tables: header read first; `length` from the table's minimum to 1 MiB;
   `[address, address + length)` inside the direct map without overflow;
   expected signature; byte sum 0. A failing table counts as absent, with a
-  warning. The XSDT entry area is a multiple of 8 bytes (RSDT: 4).
+  warning. The XSDT entry area is a multiple of 8 bytes (RSDT: 4). A root
+  entry that is 0, or whose header cannot be read, is skipped with a warning.
 - MADT entries from offset 44: a length below 2 or an entry past the end
   rejects the MADT (seL4 does not check; a zero length loops forever); a known
   type below its minimum length is skipped, as seL4's `acpi_madt_valid` does.
-- Fixed capacity. More than four I/O APICs or more than one HPET table is a
-  panic, since a device page left out would become device untyped; past 16
-  overrides or 4 ECAM ranges, entries are dropped with a warning. Bounds-checked byte reads only, never a cast of
-  table memory. Layouts follow ACPI 6.x (from memory; the M3 host tests check
-  them).
+  An I/O APIC at address 0 and an override for a bus other than ISA (0) are
+  skipped with a warning; an override with a reserved polarity or trigger
+  value is kept, with the ISA default in that field and a warning. The device
+  window takes the local APIC's page from `IA32_APIC_BASE`, and the boot log
+  warns if the MADT's address differs.
+- Duplicates. Two MADTs or two HPET tables at different addresses are a panic,
+  since either could be the right one; a table the root lists twice at the
+  same address is skipped with a warning, and a second MCFG at another
+  address is ignored with a warning.
+- Fixed capacity. More than four I/O APICs is a panic, since a device page
+  left out would become device untyped; past 16 overrides or 4 ECAM ranges,
+  entries are dropped with a warning, and the boot log's table list holds
+  the first 32 tables, though a MADT, HPET table or MCFG past them is still
+  read. Bounds-checked byte
+  reads only, never a cast of table memory. Layouts follow ACPI 6.5; host
+  tests check them against the q35 dumps, and against Hyper-V's after the M3
+  Hyper-V check.
 
 `l4core::acpi::parse(mem: &impl PhysRead, rsdp: u64)` returns a fixed-size
 `Platform`; the kernel's `PhysRead` in `arch/` copies from the direct map below
 `phys_map_size`, so `core/` needs no `unsafe`. It runs once at boot; nothing
 reads ACPI memory afterwards, which is what lets M4 make it untyped.
-Host tests use tables the loader dumps in debug builds on both platforms
-(`core/tests/acpi/`), hand-made edge cases and a random-bytes proptest, all
-under Miri.
+With the word `acpidump` on the command line, the loader, in any build,
+prints every ACPI table it can reach to COM1 before it loads the kernel
+(`docs/boot.md`, [Command line](boot.md#command-line)); `cargo xtask
+acpidump` turns that log into a dump in `core/tests/acpi/`. Host tests use
+those dumps (q35 with and without its HPET; Hyper-V's from the M3 Hyper-V
+check), hand-made edge cases and a random-bytes proptest, all under Miri. The
+q35 dumps show an ACPI 2.0 RSDP (revision 2) with an XSDT, one processor,
+the local APIC at `0xfee00000`, one I/O APIC at `0xfec00000` with GSI base 0,
+the HPET at `0xfed00000`, and one ECAM range at `0xe0000000` for buses 0 to
+255; `hpet=off` removes the HPET table.
 
 ### What user space gets, and kernel devices
 
@@ -3131,26 +3256,47 @@ configuration space.
 - Calibration (M3): count LAPIC ticks (one-shot, masked, from `0xFFFF_FFFF`)
   and TSC ticks over 20 ms of the reference, three times, and take each
   median; the TSC rate goes into BootInfo's `tsc_hz` for M6's IPC timings.
+  Each window opens at a reference edge, and each reference read is
+  bracketed by a LAPIC and a TSC read, whose midpoints stand for the moment
+  of the reference read; reading the three in sequence gave rates 200 to
+  450 ppm high under TCG. QEMU's APIC clock calibrates to within about 30 ppm
+  of 1 GHz (the `hello` and `ticks` boot logs).
   The Hyper-V reference counter (MSR `0x4000_0020`, 100 ns units; TLFS
   `timers.md`, FreeBSD `include/hyperv.h`) goes first, since Hyper-V has no
-  HPET (from memory) and QEMU without `hv-*` flags never reports `Hv#1`.
+  HPET (checked at the M3 Hyper-V check). TCG ignores the `hv-*` flags and
+  never reports `Hv#1`, so the reference-counter path runs only on Hyper-V.
   HPET: period in femtoseconds in `GCAP_ID[63:32]`, valid if
-  `0 < period <= 10^8`; counter at `0xF0`; enable is bit 0 of `0x10` (from
-  memory; check in M3). M3 first clears any comparator interrupt enable, FSB
-  delivery and legacy-replacement mode the firmware left on; only the main
-  counter is used. Under TCG the LAPIC timer and the HPET follow QEMU's
-  virtual clock, so calibration holds however slowly TCG runs; the TSC follows
-  the host clock, so `tsc_hz` there shows trends only (both from memory).
-- Neither reference: panic `no timer reference`, proven by a scenario with
-  `qemu_args: -machine q35,hpet=off`. Both platforms have one, a guessed
-  rate would silently skew every timeslice, and a PIT fallback would never run
-  in a test. Lost: other HPET-less machines, a non-goal. A frequency outside
-  1 MHz-10 GHz also panics.
+  `0 < period <= 10^8`; counter at `0xF0`; enable is bit 0 of `0x10`, which
+  OVMF leaves clear (the `hello` scenario's `hpet:` lines). M3 first turns
+  off legacy-replacement mode and each comparator's interrupt enable and FSB
+  delivery, and clears any interrupt status the firmware left; then it
+  starts the counter and checks that it moves. Only the main counter is used.
+  `NUM_TIM_CAP` can claim 32 comparators, but only 24 have registers inside
+  the 1 KiB block, and the kernel touches no more. Under TCG the LAPIC timer
+  and the HPET follow QEMU's virtual clock, so calibration holds however
+  slowly TCG runs; the TSC follows the host clock, so `tsc_hz` there shows
+  trends only (both from memory).
+- Neither reference: panic `no timer reference`, proven by the
+  `no_timer_reference` scenario (`qemu_args: -machine hpet=off`). Both
+  platforms have one, a guessed rate would silently skew every timeslice, and
+  a PIT fallback would never run in a test. Lost: other HPET-less machines,
+  a non-goal. A frequency outside 1 MHz-10 GHz also panics.
 - No TSC-deadline mode: it needs the TSC rate to be exact and pays off only for
   one-shot programming, which classic scheduling does not use. Lost: tickless
   idle and the precise one-shots of MCS (a stretch goal).
+- The `ticks` scenario times ten ticks against the reference and needs
+  100 ms within 1%. It dates each tick by the timer's reload: the reference
+  read in the handler, less the countdown's progress since the reload at the
+  calibrated rate. Handler-to-handler times include the host's delay in
+  delivering each interrupt, often hundreds of microseconds under TCG, and
+  measured 0.47% short of 100 ms under load, half the allowance. A wrong
+  calibration still shows in full, since it sets the reload interval itself;
+  the scenario prints the handler time beside it.
 - `core/src/timer.rs` (M3): the 128-bit arithmetic, bounds and median, with
-  host tests such as QEMU's 1 GHz APIC clock (from memory) giving 10,000,000.
+  host tests such as QEMU's 1 GHz APIC clock giving 10,000,000.
+  `core/src/calibration.rs` reads one window and dates a tick by its reload,
+  and `core/src/hpet.rs` holds the HPET's registers and its clean-up; both
+  are host-tested.
 
 ### Invariants
 
@@ -3161,14 +3307,14 @@ configuration space.
 | The kernel reads ACPI memory only during boot, before M4 makes it untyped | one `parse` call at boot into `Platform`; no `PhysRead` after boot | M3, M4 |
 | The kernel reaches the LAPIC, I/O APICs and HPET only through the uncached device window | `arch` device accessors take window offsets only; M3 table builder | M3 |
 | The LAPIC page, the MSI window, the I/O APIC pages and the HPET page never become device untyped, and no RAM untyped comes from a 2 MiB page holding one | boot reservation list, BootInfo self-test | M4 |
-| The kernel never schedules on an uncalibrated or implausible timer | calibration bounds; panic without a reference; `hpet=off` scenario | M3 |
-| The timer ticks at 100 Hz within 1% on both platforms | ten-tick scenario timed against the reference; Hyper-V check | M3 |
+| The kernel never schedules on an uncalibrated or implausible timer | calibration bounds; panic without a reference; `no_timer_reference` scenario | M3 |
+| The timer ticks at 100 Hz within 1% on both platforms | `ticks` scenario timed against the reference, each tick dated by its reload; Hyper-V check | M3 |
 
 ### Compared with seL4
 
 | seL4 | microL4 | Reason |
 | --- | --- | --- |
-| Walks the RSDT; checks only the RSDP and RSDT checksums (`acpi_validate_rsdp`, `src/plat/pc99/machine/acpi.c`) | XSDT first; every table's checksum, length and bounds | Both platforms are ACPI 2.0+ (from memory); checks are cheap and host-tested |
+| Walks the RSDT; checks only the RSDP and RSDT checksums (`acpi_validate_rsdp`, `src/plat/pc99/machine/acpi.c`) | XSDT first; every table's checksum, length and bounds | q35 is ACPI 2.0+ (revision 2 RSDP with an XSDT, host tests on its dump), and Hyper-V's revision is checked at the M3 Hyper-V check; checks are cheap and host-tested |
 | Trusts MADT entry lengths (`acpi_madt_scan`) | A malformed entry rejects the MADT | A zero length would loop forever |
 | Gives user space the RSDP (`src/arch/x86/kernel/boot.c`) | Gives the ECAM ranges, I/O APIC GSI ranges and ISA routes in `InterruptInfo`; `GetISA` applies overrides | User space never reads ACPI, whose memory becomes untyped |
 | Reads the FADT for the physical-APIC-mode flag and the DMAR for IOMMUs (`acpi_fadt_scan`, `acpi_dmar_scan`) | Reads neither | One core needs no logical IDs; no IOMMU support |
@@ -3194,7 +3340,10 @@ says to base compatibility on that interface signature, not the vendor string
 (`feature-discovery.md`). The vendor is printed and still decides whether
 `isa-debug-exit` exists. Leaf `0x4000_0003` gives the privileges
 (`hv_partition_privilege_mask.md`): `AccessPartitionReferenceCounter` (EAX 1)
-for M3's calibration; `AccessSynicRegs` (EAX 2), `AccessHypercallMsrs` (EAX 5),
+for M3's calibration; `AccessFrequencyRegs` (EAX 11) together with EDX bit 8
+for the TSC and APIC frequency MSRs (`0x4000_0022`, `0x4000_0023`), which M3
+prints beside its calibration (Linux and FreeBSD also require both bits
+before reading them); `AccessSynicRegs` (EAX 2), `AccessHypercallMsrs` (EAX 5),
 `AccessVpIndex` (EAX 6), `PostMessages` (EBX 4) and `SignalEvents` (EBX 5) for
 M9. The kernel touches a synthetic MSR only if its privilege bit is set, so no
 request can make it fault on one. The Hypervisor capability exists only if all
@@ -3206,19 +3355,26 @@ slots 12, 13 and 14 are null, no SynIC is set up, `GetSint` returns
 
 The Generation 2 firmware boots from VMBus storage, so it uses the SynIC (from
 memory), and it may leave overlay pages enabled over memory the kernel will
-hand out. Before M4 reuses `USABLE` memory, the kernel masks SINT0-15, clears
-SCONTROL, and clears the enable bit of SIMP, SIEFP, the reference TSC page
-(`0x4000_0021`), the VP assist page (`0x4000_0073`), the synthetic timers
-(`0x4000_00B0`, `B2`, `B4`, `B6`), the synthetic time-unhalted timer
-(`0x4000_0114`, which can deliver an NMI) and the hypercall page
-(`0x4000_0001`), each only with its privilege (reference TSC page
-`AccessPartitionReferenceTsc`, EAX 9; synthetic timers
-`AccessSyntheticTimerRegs`, EAX 3, the time-unhalted timer also CPUID
-`0x4000_0003` EDX bit 23; hypercall page `AccessHypercallMsrs`; for the VP
-assist page `AccessIntrCtrlRegs`, from memory; check in M3). If the firmware
+hand out. Before M4 reuses `USABLE` memory, and before the local APIC is set
+up, the kernel turns these off, each only with its privilege. First the
+interrupt sources: the enable bit of the synthetic timers (`0x4000_00B0`,
+`B2`, `B4`, `B6`; `AccessSyntheticTimerRegs`, EAX 3) and of the synthetic
+time-unhalted timer (`0x4000_0114`, which can deliver an NMI; also CPUID
+`0x4000_0003` EDX bit 23), whose enable bit is bit 8, above its vector, not
+bit 0 as for every other register here (TLFS `timers.md`). Then it masks
+SINT0-15 and clears the enable bit of SCONTROL, SIMP and SIEFP
+(`AccessSynicRegs`), of the reference TSC page (`0x4000_0021`,
+`AccessPartitionReferenceTsc`, EAX 9), of the VP assist page (`0x4000_0073`)
+and of the hypercall page (`0x4000_0001`, `AccessHypercallMsrs`). The TLFS
+names no privilege for the VP assist page; the kernel requires
+`AccessIntrCtrlRegs` (EAX 4), as KVM's Hyper-V emulation does
+(`hv_check_msr_access`, from memory). If the firmware
 Locked the hypercall MSR, M3 records the page, M4 never makes it untyped and
 the boot region avoids it; unless it is `.hvcall`, there is no
-Hypervisor capability. M3 prints what it found.
+Hypervisor capability. M3 prints what it found. TCG ignores the `hv-*`
+flags, so none of this runs on QEMU. The M3 Hyper-V check ran it: the
+firmware had left only SCONTROL on, and the hypercall MSR was neither enabled
+nor locked.
 
 ### Hypercalls (M9)
 
@@ -3304,9 +3460,10 @@ than the shared monitor pages; `vmbus` refuses older versions.
 | `vmbus` corrupting its SIM or SIEF page | Affects only VMBus delivery to `vmbus` | M9 |
 | A hostile hypervisor | Out of scope (PLAN.md, M10 brief 8) | n/a |
 
-`core/src/hyperv.rs` holds CPUID and privilege decoding (M3), and from M9 the
-MSR values, hypercall input value, `PostMessage` block encoder, capability
-data word, permission check and message decoding; `vmbus`'s mock-host tests
+`core/src/hyperv.rs` holds CPUID and privilege decoding and the table of
+firmware leftovers, each with its MSR, enable bit and privilege (M3), and
+from M9 the MSR values, hypercall input value, `PostMessage` block encoder,
+capability data word, permission check and message decoding; `vmbus`'s mock-host tests
 reuse the encoders. `arch/x86_64/hyperv.rs` does `rdmsr`, `wrmsr`, the
 overlay reset and the hypercall `call`.
 
@@ -3355,11 +3512,16 @@ format_args!(...); }`, which type-checks its arguments and emits nothing, and
 a panic only exits with failure.
 
 The boot summary, which scenarios match line by line, grows by milestone: M0's
-lines (image, memory map, framebuffer, RSDP, hypervisor, command line); from
-M3 the CPUID features the kernel requires, `IA32_APIC_BASE`, CR0, CR4 and EFER, and `cpu: meltdown: vulnerable`,
-`not vulnerable` or `unknown`, the MADT flags and ACPI table list, the
-Hyper-V overlay MSRs found and, when Hyper-V allows it, the APIC frequency
-MSR; from M4 the BootInfo summary (untyped
+lines (image, memory map, framebuffer, hypervisor, command line); from
+M3 the CPUID features the kernel checks; the ACPI summary (the RSDP and its
+revision, the table list, the MADT flags, I/O APICs and overrides, COM1's
+route, the HPET and the ECAM ranges), which replaces M0's own RSDP line;
+`IA32_PAT` as found and as written, and the kernel's tables; the Hyper-V
+interface and the overlay MSRs found; `IA32_APIC_BASE` at handover and the
+local APIC, PIC, I/O APIC and HPET as set up; the calibration windows and
+rates and, when Hyper-V allows it, the APIC and TSC frequency MSRs beside
+them; then CR0, CR4 and EFER, `IA32_APIC_BASE`, and `cpu: meltdown:
+vulnerable`, `not vulnerable` or `unknown`; from M4 the BootInfo summary (untyped
 count, RAM and device bytes, the slot regions); from M5 XCR0 and the XSAVE
 size.
 
@@ -3417,19 +3579,20 @@ IOPortControl.
 ## Open questions
 
 Each question has a default that this note and `docs/abi.md` already assume,
-and the milestone that must confirm or change it. Changing a default that
-touches the ABI needs an ADR. Sorted by milestone.
+and the milestone that must confirm or change it. A question a milestone has
+answered stays in the table with its answer in the last column. Changing a
+default that touches the ABI needs an ADR. Sorted by milestone.
 
-| Question | Why it matters | Answer in | Default |
+| Question | Why it matters | Answer in | Default, or answer |
 | --- | --- | --- | --- |
 | Should nested CNodes found while destroying a CNode be cleared, rather than left unreachable until their untyped is revoked? | seL4's behaviour keeps the objects their slots name alive, which can leak memory when a process tree is not torn down leaves first | M2 | Keep seL4's behaviour; `root` tears down CSpaces leaves first or revokes the covering untyped |
-| Does the owner's Hyper-V VM report SMEP, SMAP and XSAVE? | Without them the kernel refuses to boot ([Privilege levels](#privilege-levels)) | M3, first Hyper-V check | Yes on any host CPU from about 2015 with processor compatibility mode off, which `tools/hyperv/New-L4Vm.ps1` will set (from memory); the M3 boot summary prints the required CPUID features |
-| Does Hyper-V's Generation 2 firmware, or OVMF under `-cpu max`, hand over in x2APIC mode? | The kernel is xAPIC-only and leaves x2APIC through the disabled state; that path otherwise never runs in a test | M3 | The boot summary prints `IA32_APIC_BASE` on both platforms; if either hands over in x2APIC, that boot exercises the path |
-| Does Generation 2 Hyper-V set `PCAT_COMPAT`, and does it have an 8259 PIC, a PIT and an HPET? | Decides whether the PIC is touched, and confirms the reference counter is the only timer reference there | M3 | Mask the PIC only if `PCAT_COMPAT` is set; expect no HPET on Hyper-V; the M3 Hyper-V check prints the MADT flags and table list |
-| Does the Generation 2 firmware leave the hypercall page, SIMP, SIEFP, reference TSC page, VP assist page or synthetic timers enabled, or the hypercall MSR locked, at `ExitBootServices`? | An overlay left on over `USABLE` memory corrupts whatever M4 retypes there; a locked hypercall MSR removes the Hypervisor capability | M3 | Disable each one before M4 reuses memory; keep a locked hypercall page out of every untyped and the boot region; print the values found |
-| Should the timer read `HV_X64_MSR_APIC_FREQUENCY` instead of calibrating, when Hyper-V allows it? | It gives the exact rate with no measurement | M3 | Calibrate against the reference counter, as PLAN.md says, and print the frequency MSR as a cross-check when allowed |
-| How long are the calibration windows, and how close must the rate be? | Too short a window gives a wrong rate; too long slows every boot | M3 | Three 20 ms windows, median, for the local APIC timer and the TSC; the ten-tick scenario requires 1% |
-| Is 8 KiB enough for a fatal handler's panic report on its IST stack? | An overflow of an IST stack ends in a triple fault with no report | M3 | Yes; measure the panic path's depth, and fall back to a fixed-format writer without `core::fmt` if not |
+| Does the owner's Hyper-V VM report SMEP, SMAP and XSAVE? | Without them the kernel refuses to boot ([Privilege levels](#privilege-levels)) | M3, first Hyper-V check (answered) | Answered at the M3 Hyper-V check (2026-10-30): yes, with processor compatibility mode off. The kernel passed `check_cpu` and booted to `TEST PASS` |
+| Does Hyper-V's Generation 2 firmware, or OVMF under `-cpu max`, hand over in x2APIC mode? | The kernel is xAPIC-only and leaves x2APIC through the disabled state; that path otherwise never runs in a test | M3 (answered) | No on both. OVMF hands over in xAPIC mode, `IA32_APIC_BASE` `0xfee00900` (the `hello` scenario), and TCG's `-cpu max` does not offer x2APIC even with `x2apic=on`. Hyper-V's firmware also hands over in xAPIC mode (`0xfee00900`), though its CPUID offers x2APIC (the M3 Hyper-V check). So the x2APIC exit path has run on neither platform; only the `l4core::apic` host test covers it |
+| Does Generation 2 Hyper-V set `PCAT_COMPAT`, and does it have an 8259 PIC, a PIT and an HPET? | Decides whether the PIC is touched, and confirms the reference counter is the only timer reference there | M3 Hyper-V check (answered) | Answered at the M3 Hyper-V check: the MADT flags are 0, so the kernel leaves the 8259s alone, and there is no HPET table, so the timer calibrates against the reference counter. Whether a PIT exists was not checked; nothing uses one. The tables are FACP, OEM0, WAET, APIC, SRAT and BGRT: no MCFG, so no ECAM |
+| Does the Generation 2 firmware leave the hypercall page, SIMP, SIEFP, reference TSC page, VP assist page or synthetic timers enabled, or the hypercall MSR locked, at `ExitBootServices`? | An overlay left on over `USABLE` memory corrupts whatever M4 retypes there; a locked hypercall MSR removes the Hypervisor capability | M3 Hyper-V check (answered) | Answered at the M3 Hyper-V check: only SCONTROL was left enabled (`0x1`), and the kernel turned it off. The hypercall page, SIMP, SIEFP, the reference TSC page, the VP assist page, the four synthetic timers and the time-unhalted timer were all off, and no SINT was unmasked. The hypercall MSR read `0x0`: neither enabled nor locked |
+| Should the timer read `HV_X64_MSR_APIC_FREQUENCY` instead of calibrating, when Hyper-V allows it? | It gives the exact rate with no measurement | M3 Hyper-V check (answered) | Keep calibrating against the reference counter, as PLAN.md says, and print the MSR as a cross-check. At the M3 Hyper-V check the calibrated LAPIC rate, 200,001,000 Hz, was 5 ppm from the MSR's 200,000,000 Hz, and the TSC 57 ppm from its MSR, so the two agree well inside the 1% the timer needs |
+| How long are the calibration windows, and how close must the rate be? | Too short a window gives a wrong rate; too long slows every boot | M3 (answered) | Answered in M3: three 20 ms windows, median, for the local APIC timer and the TSC, with each reference read bracketed by a LAPIC and a TSC read; QEMU's 1 GHz APIC clock calibrates to within about 30 ppm. The `ticks` scenario requires 1% over ten ticks, each dated by the timer's reload ([The timer](#the-timer)) |
+| Is 8 KiB enough for a fatal handler's panic report on its IST stack? | An overflow of the #DF stack ends in a second #DF over the first, with the report cut short | M3 (answered) | Answered in M3: yes. The `double_fault` scenario's #DF report used 1,872 bytes of IST1's 8,192 in the dev profile and 1,904 in release, so no fixed-format writer is needed ([Static kernel memory and the boot region](#static-kernel-memory-and-the-boot-region)) |
 | Is 4 KiB the right chunk for clearing an untyped between preemption points? | seL4 clears 256 bytes per preemption point; 4 KiB under TCG may take tens of microseconds | M4 | 4 KiB with an IRR read after each chunk; measure the longest non-preemptible stretch on QEMU and Hyper-V, and add a work-unit counter like seL4's only if the reads dominate |
 | Are boot-created objects (root CNode, TCB, VSpace, BootInfo) covered by an untyped? | If they are, revoking that untyped destroys the root task; if not, their memory is never reclaimed | M4 | As seL4: they come from the boot region, outside every untyped, and their capabilities are derivation roots |
 | Are 448 untyped descriptors enough? | Boot panics if not | M4, from the recorded QEMU and Hyper-V memory maps | Yes, by several times on both targets; if not, BootInfo grows to four pages as version 2 |
@@ -3449,7 +3612,7 @@ touches the ABI needs an ADR. Sorted by milestone.
 | How does a server tell "nothing pending" from a message or signal with badge 0? | `NBRecv` returns badge 0 both for nothing and for unbadged senders | M6, `libsys` | `root` gives every client and signaller of a polled object a non-zero badge |
 | What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 | Reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint; a saved reply capability vanishes when its client is suspended or deleted |
 | Are the IMCR ports `0x22` and `0x23` real on q35 and Hyper-V? | They are kept from user space on the assumption that they can route PIC interrupts around the local APIC | M7 | Keep them reserved; reserving an absent port costs nothing |
-| What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives | M7 | Accept: both platforms' I/O APICs are version `0x20` or later (from memory; check in M7) |
+| What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Open. QEMU's I/O APIC is version `0x20`, but Hyper-V's is `0x11` (the M3 Hyper-V check), which has no EOI register. M7 must clear a stale Remote IRR there another way, such as switching the pin to edge-triggered and back while masked, as Linux does for older I/O APICs (from memory; check in M7) |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
 | Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 | Yes; raise the radix to 13 if not |
 | Must `vmbus` send VMBus `UNLOAD` before `INITIATE_CONTACT` because the firmware left a connection open? | Contact fails or channels are stale if the host still sees the firmware's session | M9 | Yes, as other guests do after kexec; confirm against FreeBSD's `vmbus.c` |

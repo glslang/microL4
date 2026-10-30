@@ -5,9 +5,14 @@
 //! that also notes which pages were written) and a [`Model`] of the same boot
 //! state. [`World::apply`] runs one [`Action`] on both: the model atomically,
 //! the kernel with preemption injected and the operation restarted until it
-//! completes, checking the invariants at every preemption point. It then
-//! compares everything visible and checks the invariants again. Any
-//! difference comes back as an `Err` describing it.
+//! completes, checking the invariants at every preemption point. A restart
+//! of Delete or Revoke first looks its slot up again, as the kernel's does.
+//! It then compares everything visible and checks the invariants again. Any
+//! difference comes back as an `Err` describing it. The one exception is a
+//! revoke whose restart cannot look its slot up again, which may leave the
+//! kernel where the atomic model never is; `World::finish_partial_revoke`
+//! checks that it stopped where the same revoke run without preemption
+//! passed, and goes on from that run's end.
 //!
 //! The boot state:
 //!
@@ -80,6 +85,9 @@ const PAGE: u64 = 1 << PAGE_BITS;
 ///   the paging code will keep it (ADR 0005). `moved` must name the slot the
 ///   capability was in, and `finalise` must find it still in its slot, before
 ///   the slot empties; the harness checks the rest at every preemption point.
+///
+/// While a revoke runs it also logs every word it overwrites, so that
+/// [`World::finish_partial_revoke`] can rebuild the world from before it.
 #[derive(Clone, Debug)]
 pub struct Tracked {
     pub k: TestKernel,
@@ -87,9 +95,21 @@ pub struct Tracked {
     backrefs: BTreeMap<(u64, u64), SlotAddr>,
     /// Hook calls that broke the back-reference rules.
     violations: Vec<String>,
+    /// If set, each word written and what it held before, in order.
+    undo: Option<Vec<(u64, u64)>>,
 }
 
 impl Tracked {
+    /// Before every write: logs the words `len` bytes from `paddr` hold, if
+    /// the undo log is on, and marks their pages.
+    fn writing(&mut self, paddr: u64, len: u64) {
+        if let Some(log) = &mut self.undo {
+            let mem = &self.k.mem;
+            log.extend((paddr..paddr + len).step_by(8).map(|a| (a, mem.read(a))));
+        }
+        self.mark(paddr, len);
+    }
+
     fn mark(&mut self, paddr: u64, len: u64) {
         if len == 0 {
             return;
@@ -124,7 +144,7 @@ impl SlotMemory for Tracked {
     }
 
     fn store(&mut self, at: SlotAddr, slot: Slot) {
-        self.mark(at.get(), SLOT_SIZE);
+        self.writing(at.get(), SLOT_SIZE);
         self.k.store(at, slot)
     }
 }
@@ -161,19 +181,70 @@ impl Kernel for Tracked {
     }
 
     fn zero(&mut self, paddr: u64, len: u64) {
-        self.mark(paddr, len);
+        self.writing(paddr, len);
         self.k.zero(paddr, len)
     }
 
     fn init_object(&mut self, cap: Cap) {
         if let Some(off) = TestKernel::dirt_offset(&cap) {
-            self.mark(cap.object() + off, 8);
+            self.writing(cap.object() + off, 8);
         }
         self.k.init_object(cap)
     }
 
     fn preempt(&mut self) -> Result<(), Preempted> {
         self.k.preempt()
+    }
+}
+
+/// A [`Tracked`] kernel that never preempts, for the run a revoke cut short
+/// is checked against (see [`World::finish_partial_revoke`]). At each
+/// preemption point it notes how many hook calls had been made and whether
+/// the kernel's memory and back-references then equalled `target`'s, rather
+/// than keep megabytes of memory per point.
+struct Unpreempted<'a> {
+    k: &'a mut Tracked,
+    target: &'a Tracked,
+    /// For each preemption point passed, in order: the hook calls made so
+    /// far, and whether the state equalled `target`'s.
+    points: Vec<(usize, bool)>,
+}
+
+impl SlotMemory for Unpreempted<'_> {
+    fn load(&self, at: SlotAddr) -> Slot {
+        self.k.load(at)
+    }
+
+    fn store(&mut self, at: SlotAddr, slot: Slot) {
+        self.k.store(at, slot)
+    }
+}
+
+impl Kernel for Unpreempted<'_> {
+    fn finalise(&mut self, cap: Cap, last: bool) -> Option<Cap> {
+        self.k.finalise(cap, last)
+    }
+
+    fn after_delete(&mut self, cleanup: Cap) {
+        self.k.after_delete(cleanup)
+    }
+
+    fn moved(&mut self, cap: Cap, from: SlotAddr, to: SlotAddr) {
+        self.k.moved(cap, from, to)
+    }
+
+    fn zero(&mut self, paddr: u64, len: u64) {
+        self.k.zero(paddr, len)
+    }
+
+    fn init_object(&mut self, cap: Cap) {
+        self.k.init_object(cap)
+    }
+
+    fn preempt(&mut self) -> Result<(), Preempted> {
+        let same = self.k.k.mem == self.target.k.mem && self.k.backrefs == self.target.backrefs;
+        self.points.push((self.k.k.events.len(), same));
+        Ok(())
     }
 }
 
@@ -290,11 +361,34 @@ pub struct World {
     pub last_events: Vec<Event>,
     /// Actions applied.
     pub steps: u64,
-    /// Partial revokes finished with a Delete (see `finish_abandoned`).
-    pub abandoned: u64,
+    /// Revokes whose work destroyed their slot's lookup path: seL4's partial
+    /// revokes (`docs/design.md`, "Slot operations").
+    pub partial_revokes: u64,
+    /// Of those, the ones a restart could not look up again, so the kernel
+    /// left them unfinished (see [`World::finish_partial_revoke`]).
+    pub cut_short: u64,
+    /// What the last revoke cut short left and returned.
+    pub last_partial: Option<PartialRevoke>,
     /// If set, counts each action kind with its result, for coverage
     /// reports.
     pub tally: Option<BTreeMap<String, u64>>,
+}
+
+/// A revoke cut short: preempted after its work destroyed its slot's lookup
+/// path, so the restarted call failed its lookup and returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartialRevoke {
+    /// What the restarted call returned.
+    pub error: SyscallError,
+    /// The preemption points of the unpreempted revoke, counted from 0, at
+    /// which its state and hook calls were what this one left: several when
+    /// the steps between them changed nothing.
+    pub stops: Vec<u64>,
+    /// How many preemption points the unpreempted revoke passed.
+    pub points: u64,
+    /// Each Zombie it left where the model's end state holds something else,
+    /// with its slot, in slot order.
+    pub zombies: Vec<(SlotAddr, Cap)>,
 }
 
 /// An action's kind and the gist of its result, for [`World::tally`].
@@ -383,6 +477,7 @@ impl World {
             dirty: BTreeSet::new(),
             backrefs: BTreeMap::new(),
             violations: Vec::new(),
+            undo: None,
         };
         // Boot leaves untyped memory full of garbage.
         let mut x = cfg.seed | 1;
@@ -467,7 +562,9 @@ impl World {
             preemptions: 0,
             last_events: Vec::new(),
             steps: 0,
-            abandoned: 0,
+            partial_revokes: 0,
+            cut_short: 0,
+            last_partial: None,
             tally: None,
         };
         for page in (MEM_BASE >> PAGE_BITS)..(MEM_END >> PAGE_BITS) {
@@ -540,6 +637,20 @@ impl World {
         out
     }
 
+    /// Plants, in both, what a revoke cut short can leave in the kernel and
+    /// the atomic model never has: the last capability to a CNode, in `at`,
+    /// turned in place into the CNode's Zombie with `slots_left` slots left
+    /// to clear ([`Model::leave_zombie`]). For scenarios that start from such
+    /// a leftover; their next action must move that Zombie into its own
+    /// CNode's slot 0 or delete it, or `check_model` objects.
+    pub fn leave_zombie(&mut self, at: SlotAddr, slots_left: u64) {
+        self.m.leave_zombie(at, slots_left);
+        let mut s = self.k.load(at);
+        s.cap = self.m.cap(at);
+        self.k.store(at, s);
+        self.refresh_nz();
+    }
+
     /// Every container slot range to compare: live CNodes and TCBs, and the
     /// holder.
     fn containers(&self) -> BTreeSet<(SlotAddr, u64)> {
@@ -596,6 +707,13 @@ impl World {
             Action::Revoke { slot } => self.m.cap(slot),
             _ => Cap::NULL,
         };
+        let named = self.named_slot(action).map_err(ctx)?;
+        // A revoke may be cut short, and then rebuilt from before (see
+        // `finish_partial_revoke`).
+        let saved = matches!(action, Action::Revoke { .. }).then(|| {
+            self.k.undo = Some(Vec::new());
+            (self.k.backrefs.clone(), self.k.violations.clone())
+        });
 
         // The model, atomically.
         let expected = self.run_model(action);
@@ -607,6 +725,7 @@ impl World {
         self.k.k.events.clear();
         self.k.k.preempt_in = schedule.first().map(|&n| n as u64);
         self.preemptions = 0;
+        let mut lost = None;
         let got = loop {
             match self.run_impl(action) {
                 Ok(outcome) => break outcome,
@@ -620,6 +739,12 @@ impl World {
                     self.k
                         .check_backrefs()
                         .map_err(|e| ctx(format!("at preemption {}: {e}", self.preemptions)))?;
+                    // The restart looks the slot up again; a failure ends
+                    // the call, which returns it.
+                    if let Some(e) = self.lookup_again(action, named).map_err(ctx)? {
+                        lost = Some(e);
+                        break Outcome::Done(Err(e));
+                    }
                     self.k.k.preempt_in =
                         schedule.get(self.preemptions as usize).map(|&n| n as u64);
                 }
@@ -629,13 +754,21 @@ impl World {
         self.refresh_nz();
         let mut containers = pre_containers;
         containers.extend(self.containers());
-        self.finish_abandoned(action, revoked, &containers)
-            .map_err(ctx)?;
-
-        ensure(got == expected, || {
-            format!("kernel returned {got:?}, model {expected:?}")
-        })
-        .map_err(ctx)?;
+        if let Action::Revoke { .. } = *action
+            && (lost.is_some() || self.lookup_again(action, named) != Ok(None))
+        {
+            self.partial_revokes += 1;
+        }
+        match (lost, saved, *action) {
+            (Some(error), Some(saved), Action::Revoke { slot }) => self
+                .finish_partial_revoke(slot, error, expected, &containers, &pre_keys, saved)
+                .map_err(ctx)?,
+            _ => ensure(got == expected, || {
+                format!("kernel returned {got:?}, model {expected:?}")
+            })
+            .map_err(ctx)?,
+        }
+        self.k.undo = None;
         if let Some(t) = &mut self.tally {
             *t.entry(tally_key(action, &got)).or_default() += 1;
         }
@@ -657,45 +790,197 @@ impl World {
         Ok(got)
     }
 
-    /// A Revoke that destroys the CNode holding its own slot stops when it
-    /// next reads that slot, which is then empty or holds a Zombie swapped
-    /// in by a nested deletion (`docs/design.md`, "Slot operations"). If a
-    /// preemption point fell inside that destruction after the slot changed,
-    /// the restarted call (which in the kernel could not even look the slot
-    /// up again) stops, and the destroyed CNode's Zombie stays half-cleared
-    /// where its last capability was: seL4's partial revoke (`cspace.tex`,
-    /// "Deletion and Revocation"). The model's revoke is atomic and finished
-    /// that deletion, so finish it here as the user would, with Delete.
-    /// Nothing else may leave a Zombie outside its own container's slot 0.
-    fn finish_abandoned(
-        &mut self,
+    /// The `CPtr` and depth that name the slot of a Delete or Revoke from the
+    /// root, as a user's call names it: the first path [`World::paths`]
+    /// finds. A Revoke must have one; a Delete without one, of a slot the
+    /// scenario reaches some other way, restarts by its address.
+    fn named_slot(&self, action: &Action) -> Result<Option<(u64, u64)>, String> {
+        let (Action::Delete { slot } | Action::Revoke { slot }) = *action else {
+            return Ok(None);
+        };
+        let path = self
+            .paths(self.root)
+            .get(&slot)
+            .copied()
+            .flatten()
+            .map(|(cptr, depth)| (cptr, u64::from(depth)));
+        ensure(
+            path.is_some() || matches!(action, Action::Delete { .. }),
+            || format!("no CPtr names the revoked slot {slot:?}"),
+        )?;
+        Ok(path)
+    }
+
+    /// Looks the slot of a preempted Delete or Revoke up again, through the
+    /// path that named it, as the kernel does when it restarts the call
+    /// (`docs/design.md`, "System-call dispatch"). `Some` with the lookup's
+    /// error if a revoke's work destroyed the path; a Delete's never does.
+    fn lookup_again(
+        &self,
         action: &Action,
-        revoked: Cap,
-        containers: &BTreeSet<(SlotAddr, u64)>,
-    ) -> Result<(), String> {
-        loop {
-            let pending = all_slots(containers).into_iter().find(|&at| {
-                let cap = self.impl_slot(at).cap;
-                cap.cap_type() == CapType::Zombie && cap.object() != at.get()
-            });
-            let Some(at) = pending else { return Ok(()) };
-            let partial_revoke = match *action {
-                Action::Revoke { slot } => {
-                    self.preemptions > 0 && self.k.load(slot).cap.header != revoked.header
-                }
-                _ => false,
-            };
-            ensure(partial_revoke, || {
-                format!(
-                    "slot {at:?} holds an unfinished Zombie {:?}",
-                    self.k.load(at).cap
-                )
-            })?;
-            self.abandoned += 1;
-            cnode::delete(&mut self.k, at)
-                .map_err(|_| "preempted with preemption off".to_string())?;
-            self.refresh_nz();
+        named: Option<(u64, u64)>,
+    ) -> Result<Option<SyscallError>, String> {
+        let (Action::Delete { slot } | Action::Revoke { slot }) = *action else {
+            return Ok(None);
+        };
+        let Some((cptr, depth)) = named else {
+            return Ok(None);
+        };
+        match cspace::lookup_slot(&self.k, self.root, cptr, depth, false) {
+            Ok(at) if at == slot => Ok(None),
+            Ok(at) => Err(format!("the restart looked up {at:?}, not {slot:?}")),
+            Err(e) if matches!(action, Action::Revoke { .. }) => Ok(Some(e)),
+            Err(e) => Err(format!("a restarted Delete failed its lookup: {e:?}")),
         }
+    }
+
+    /// A revoke cut short: preempted after its work destroyed a CNode on its
+    /// slot's lookup path, so the restart failed its lookup and the call
+    /// returned that error, with work left undone (seL4's partial revoke;
+    /// `docs/design.md`, "Slot operations"). This is the one place where the
+    /// kernel may end where the atomic model does not. It must have stopped
+    /// exactly where the same revoke, run without preemption, passed one of
+    /// its preemption points, however many restarts went on before the one
+    /// whose lookup failed (`l4core`'s test
+    /// `a_revoke_cut_short_stops_where_the_unpreempted_revoke_passed`). So:
+    ///
+    /// 1. **Safe:** what it left passes `check_impl`'s list and liveness
+    ///    invariants, the back-references are exact, and `check_covered`
+    ///    finds no capability that could outlive its object.
+    /// 2. **Where the unpreempted revoke passed:** the harness rebuilds the
+    ///    world from before the call through the undo log, runs the revoke on
+    ///    it without preemption, and finds a preemption point of that run
+    ///    where the memory and back-references equalled what the revoke cut
+    ///    short left, and the hook calls made so far were, in order, the ones
+    ///    the revoke cut short made.
+    ///
+    /// The unpreempted run must return what the model did, and later steps
+    /// go on from where it ended, which `apply` compares with the model as
+    /// after every other step.
+    fn finish_partial_revoke(
+        &mut self,
+        slot: SlotAddr,
+        error: SyscallError,
+        expected: Outcome,
+        containers: &BTreeSet<(SlotAddr, u64)>,
+        live: &BTreeSet<(CapType, u64, u32)>,
+        saved: (BTreeMap<(u64, u64), SlotAddr>, Vec<String>),
+    ) -> Result<(), String> {
+        self.cut_short += 1;
+        let left = format!("the revoke cut short with {error:?}");
+        self.refresh_nz();
+        self.check_impl(containers, live)
+            .and_then(|()| self.k.check_backrefs())
+            .and_then(|()| self.check_covered(containers))
+            .map_err(|e| format!("{left}: {e}"))?;
+        let zombies: Vec<(SlotAddr, Cap)> = all_slots(containers)
+            .into_iter()
+            .map(|at| (at, self.impl_slot(at).cap))
+            .filter(|&(at, cap)| cap.cap_type() == CapType::Zombie && self.m.cap(at) != cap)
+            .collect();
+
+        let undo = self.k.undo.take().unwrap_or_default();
+        let mut whole = self.k.clone();
+        for (paddr, old) in undo.into_iter().rev() {
+            whole.k.mem.write(paddr, old);
+            whole.mark(paddr, 8);
+        }
+        (whole.backrefs, whole.violations) = saved;
+        whole.k.events.clear();
+        let mut run = Unpreempted {
+            k: &mut whole,
+            target: &self.k,
+            points: Vec::new(),
+        };
+        cnode::revoke(&mut run, slot).map_err(|_| "preempted with preemption off")?;
+        let points = run.points;
+        let again = Outcome::Done(Ok(()));
+        ensure(again == expected, || {
+            format!("run unpreempted, the kernel returned {again:?}, model {expected:?}")
+        })?;
+
+        let (hooks, all) = (&self.k.k.events, &whole.k.events);
+        let same: Vec<usize> = (0..points.len()).filter(|&i| points[i].1).collect();
+        let Some(&first) = same.first() else {
+            return Err(format!(
+                "{left} left memory or back-references that the unpreempted revoke had at none \
+                 of its {} preemption points",
+                points.len()
+            ));
+        };
+        let stops: Vec<u64> = same
+            .into_iter()
+            .filter(|&i| all[..points[i].0] == hooks[..])
+            .map(|i| i as u64)
+            .collect();
+        ensure(!stops.is_empty(), || {
+            format!(
+                "{left} left the state the unpreempted revoke had at its preemption point \
+                 {first}, but its hook calls differ:\n  cut short   {hooks:?}\n  unpreempted {:?}",
+                &all[..points[first].0]
+            )
+        })?;
+        self.k = whole;
+        self.refresh_nz();
+        self.last_partial = Some(PartialRevoke {
+            error,
+            stops,
+            points: points.len() as u64,
+            zombies,
+        });
+        Ok(())
+    }
+
+    /// No capability can outlive its object: every capability naming memory
+    /// inside an untyped is that untyped's descendant, so the untyped, which
+    /// is reset only when it has none, cannot hand out memory a capability
+    /// still names (`docs/design.md`, "Deletion and finalisation",
+    /// Invariants). Exempt are reply capabilities, which name a TCB but are
+    /// derivation roots, and the untyped capabilities whose memory contains
+    /// the untyped's: its ancestors, and the one it was copied from.
+    fn check_covered(&self, containers: &BTreeSet<(SlotAddr, u64)>) -> Result<(), String> {
+        let held: Vec<(SlotAddr, Slot)> = all_slots(containers)
+            .into_iter()
+            .map(|at| (at, self.impl_slot(at)))
+            .filter(|(_, s)| !s.cap.is_null())
+            .collect();
+        for &(at, ut) in &held {
+            if ut.cap.cap_type() != CapType::Untyped {
+                continue;
+            }
+            let (base, end) = (
+                ut.cap.object(),
+                ut.cap.object() + (1u64 << ut.cap.size_bits()),
+            );
+            let mut descendants = BTreeSet::new();
+            let mut next = ut.node.next();
+            while let Some(n) = next {
+                let node = self.k.load(n).node;
+                if node.low() <= ut.node.depth() {
+                    break;
+                }
+                descendants.insert(n);
+                next = node.next();
+            }
+            for &(t, s) in &held {
+                let Some((_, from, bits)) = named_object(&s.cap) else {
+                    continue;
+                };
+                let to = from + (1u64 << bits);
+                let inside = base <= from && to <= end;
+                let covers = s.cap.cap_type() == CapType::Untyped && from <= base && end <= to;
+                if t == at || s.cap.cap_type() == CapType::Reply || !inside || covers {
+                    continue;
+                }
+                ensure(descendants.contains(&t), || {
+                    format!(
+                        "{:?} in {t:?} names memory of {:?} in {at:?} but is not its descendant",
+                        s.cap, ut.cap
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn run_model(&mut self, action: &Action) -> Outcome {
@@ -1063,7 +1348,10 @@ impl World {
         let objs = self.m.objects();
         let live = self.m.referenced();
 
-        // Each capability names its object.
+        // Each capability names its object. Every Zombie lies in its own
+        // container's slot 0: an atomic deletion either empties its slot or
+        // leaves a container detached there, and only a revoke cut short
+        // leaves one elsewhere, in the kernel.
         for (at, e) in self.m.entries() {
             let key = named_object(&e.cap);
             let obj = e
@@ -1072,6 +1360,10 @@ impl World {
             ensure(key == obj, || {
                 format!("model slot {at:?} holds {:?} but names {obj:?}", e.cap)
             })?;
+            ensure(
+                e.cap.cap_type() != CapType::Zombie || e.cap.object() == at.get(),
+                || format!("model slot {at:?} holds {:?}", e.cap),
+            )?;
         }
 
         // Disjoint, aligned, inside the untyped they came from.
@@ -1230,6 +1522,41 @@ mod tests {
     }
 
     #[test]
+    fn notices_a_capability_outside_its_untyped() {
+        let mut w = World::new(&Config::default());
+        retype_endpoint(&mut w, 10);
+        let containers = w.containers();
+        w.check_covered(&containers).unwrap();
+        // An endpoint in the big untyped's memory that is not its descendant.
+        let ep = Cap::new(
+            CapType::Endpoint,
+            BIG_UNTYPED + 0x100,
+            5,
+            Rights::ALL,
+            false,
+            0,
+        );
+        cdt::insert_root(&mut w.k, root_slot(20), ep);
+        w.refresh_nz();
+        let e = w.check_covered(&containers).unwrap_err();
+        assert!(e.contains("not its descendant"), "{e}");
+    }
+
+    #[test]
+    fn a_revoke_needs_a_cptr_that_names_its_slot() {
+        let mut w = World::new(&Config::default());
+        let e = w
+            .apply(
+                &Action::Revoke {
+                    slot: slot_at(HOLDER, 0),
+                },
+                &[],
+            )
+            .unwrap_err();
+        assert!(e.contains("no CPtr names"), "{e}");
+    }
+
+    #[test]
     fn notices_dirt_above_a_watermark() {
         let mut w = World::new(&Config::default());
         retype_endpoint(&mut w, 10);
@@ -1262,6 +1589,72 @@ mod tests {
         w.k.store(root_slot(11), s);
         w.k.store(root_slot(10), Slot::EMPTY);
         assert!(w.k.check_backrefs().unwrap_err().contains("back-reference"));
+    }
+
+    /// The shape of the scenario
+    /// `partial_revoke_of_an_untyped_inside_a_cnode_made_from_it`: the small
+    /// untyped in slot 4 of a CNode C made from it, which also made two
+    /// endpoints, with C's only capability in root slot 10. Revokes the
+    /// untyped, preempted at its first point, and hands what `tamper` makes
+    /// of that to `finish_partial_revoke`.
+    fn cut_short_revoke(tamper: impl FnOnce(&mut Tracked)) -> (World, Result<(), String>) {
+        let mut w = World::new(&Config::default());
+        let small = root_slot(boot::SMALL_UNTYPED);
+        for (object_type, size_bits, node_offset, num_objects) in [(4, 3, 10, 1), (2, 0, 11, 2)] {
+            let args = RetypeArgs {
+                object_type,
+                size_bits,
+                node_offset,
+                num_objects,
+            };
+            let a = Action::Retype {
+                untyped: small,
+                dest: w.root,
+                args,
+            };
+            w.apply(&a, &[]).unwrap();
+        }
+        let slot = cnode_slot(w.m.cap(root_slot(10)), 4);
+        let moved = Action::Move {
+            src: small,
+            dst: slot,
+        };
+        w.apply(&moved, &[]).unwrap();
+
+        let (mut containers, live) = (w.containers(), w.live_keys());
+        let expected = w.run_model(&Action::Revoke { slot });
+        containers.extend(w.containers());
+        let saved = (w.k.backrefs.clone(), w.k.violations.clone());
+        w.k.undo = Some(Vec::new());
+        w.k.k.preempt_in = Some(0);
+        assert_eq!(cnode::revoke(&mut w.k, slot), Err(Preempted));
+        tamper(&mut w.k);
+        let error = SyscallError::IllegalOperation;
+        let r = w.finish_partial_revoke(slot, error, expected, &containers, &live, saved);
+        (w, r)
+    }
+
+    #[test]
+    fn a_revoke_cut_short_is_where_the_unpreempted_one_passed() {
+        let (w, r) = cut_short_revoke(|_| {});
+        r.unwrap();
+        assert_eq!(w.last_partial.unwrap().stops, [0]);
+    }
+
+    #[test]
+    fn notices_a_revoke_cut_short_where_the_unpreempted_one_never_was() {
+        // A stray write outside every container, which no invariant covers.
+        let stray = SlotAddr::new(BIG_UNTYPED).unwrap();
+        let (_, r) = cut_short_revoke(|k| k.store(stray, Slot::EMPTY));
+        let e = r.unwrap_err();
+        assert!(e.contains("had at none"), "{e}");
+    }
+
+    #[test]
+    fn notices_a_revoke_cut_short_with_a_hook_call_too_many() {
+        let (_, r) = cut_short_revoke(|k| k.k.events.push(Event::AfterDelete(Cap::NULL)));
+        let e = r.unwrap_err();
+        assert!(e.contains("hook calls differ"), "{e}");
     }
 
     #[test]

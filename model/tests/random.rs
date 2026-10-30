@@ -185,7 +185,8 @@ fn pick(w: &World, reach: &[SlotAddr], sel: Sel) -> SlotAddr {
 
 /// Runs one generated operation: resolves it into actions and applies each.
 fn exec(w: &mut World, op: &Op, schedule: &[u8]) -> Result<(), String> {
-    let reach = w.reachable();
+    let paths = w.paths(w.root);
+    let reach: Vec<SlotAddr> = paths.keys().copied().collect();
     let p = |sel| pick(w, &reach, sel);
     let action = match *op {
         Op::Copy { src, dst, rights } => Action::Copy {
@@ -231,7 +232,15 @@ fn exec(w: &mut World, op: &Op, schedule: &[u8]) -> Result<(), String> {
             }
         }
         Op::Delete { slot } => Action::Delete { slot: p(slot) },
-        Op::Revoke { slot } => Action::Revoke { slot: p(slot) },
+        // The kernel restarts a revoke by looking its slot up again, so it
+        // needs a CPtr that names the slot.
+        Op::Revoke { slot } => {
+            let slot = p(slot);
+            if paths[&slot].is_none() {
+                return Ok(());
+            }
+            Action::Revoke { slot }
+        }
         Op::Retype {
             untyped,
             dest,
@@ -578,18 +587,24 @@ fn coverage_report() {
     let mut tally: BTreeMap<String, u64> = BTreeMap::new();
     let (mut steps, mut preempted, mut zombie_moves, mut max_slots, mut max_depth) =
         (0u64, 0u64, 0u64, 0usize, 0u32);
-    let (mut abandoned, mut detached, mut tcb_deaths) = (0u64, 0u64, 0u64);
+    let (mut partial, mut cut_short, mut cut_after_restart) = (0u64, 0u64, 0u64);
+    let (mut detached, mut tcb_deaths) = (0u64, 0u64);
     let n = cases().min(2000);
     for _ in 0..n {
         let (cfg, ops) = strategy.new_tree(&mut runner).unwrap().current();
         let mut w = World::new(&cfg);
         w.tally = Some(BTreeMap::new());
         for (op, schedule) in &ops {
-            let before = w.steps;
+            let (before, cut_before) = (w.steps, w.cut_short);
             exec(&mut w, op, schedule).unwrap();
             if w.steps > before {
                 use l4core::testing::Event;
                 preempted += w.preemptions;
+                // A restart looked the slot up again before the one that
+                // failed.
+                if w.cut_short > cut_before && w.preemptions > 1 {
+                    cut_after_restart += 1;
+                }
                 for e in &w.last_events {
                     match e {
                         Event::Moved { cap, .. } if cap.cap_type() == CapType::Zombie => {
@@ -606,7 +621,8 @@ fn coverage_report() {
             max_depth = max_depth.max(w.m.entries().values().map(|e| e.depth).max().unwrap_or(0));
         }
         steps += w.steps;
-        abandoned += w.abandoned;
+        partial += w.partial_revokes;
+        cut_short += w.cut_short;
         detached +=
             w.m.entries()
                 .values()
@@ -618,8 +634,10 @@ fn coverage_report() {
     }
     println!(
         "{n} cases, {steps} steps, {preempted} preemptions, {zombie_moves} Zombie moves (nested deletions), \
-         {detached} detached containers left at the end, {tcb_deaths} TCBs finalised, {abandoned} partial revokes, \
-         at most {max_slots} reachable slots, depth up to {max_depth}"
+         {detached} detached containers left at the end, {tcb_deaths} TCBs finalised, {partial} partial revokes \
+         ({cut_short} cut short, {cut_after_restart} of them after a restart that went on), \
+         at most {max_slots} reachable slots, \
+         depth up to {max_depth}"
     );
     for (k, v) in tally {
         println!("{v:>8}  {k}");

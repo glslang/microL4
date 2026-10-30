@@ -20,6 +20,7 @@
 
 #[macro_use]
 mod serial;
+mod acpidump;
 mod paging;
 mod uefi;
 mod x86;
@@ -28,6 +29,7 @@ use core::ffi::c_void;
 use core::fmt;
 use core::ptr;
 
+use l4core::cmdline;
 use l4core::elf::{Elf, ElfError, PAGE_SIZE};
 use l4core::handoff::{
     self, CMDLINE_MAX, Framebuffer, HANDOFF_MAGIC, HANDOFF_VERSION, Handoff, KERNEL_VIRT_BASE,
@@ -42,6 +44,10 @@ use uefi::{BootServices, FileProtocol, Guid, Handle, Status, SystemTable};
 const MIN_PHYS_MAP: u64 = 4 << 30;
 /// ...and at most one PML4 slot, which keeps it clear of the kernel image.
 const MAX_PHYS_MAP: u64 = 512 << 30;
+/// Every allocation lies below the end of the kernel's own direct map, so
+/// the kernel image, the page tables, the handoff and the memory map stay
+/// reachable after the kernel replaces these tables (ADR 0006).
+const ALLOC_MAX: u64 = handoff::DIRECT_MAP_MAX;
 /// Spare memory-map descriptors to allow for allocations made between
 /// sizing the map and reading it for the last time.
 const MAP_SLACK_DESCRIPTORS: usize = 32;
@@ -128,6 +134,11 @@ fn boot(image: Handle, st: &SystemTable) -> Result<Launch, Error> {
         kernel_file.len() >> 10,
         core::str::from_utf8(cmdline).unwrap_or("?")
     );
+    if rsdp != 0
+        && cmdline::value(core::str::from_utf8(cmdline).unwrap_or(""), "acpidump").is_some()
+    {
+        acpidump::dump(rsdp);
+    }
 
     let elf = Elf::parse(kernel_file).map_err(Error::Elf)?;
     let (kernel_phys, kernel_size) = load_kernel(bs, &elf)?;
@@ -198,12 +209,12 @@ fn boot(image: Handle, st: &SystemTable) -> Result<Launch, Error> {
 }
 
 /// Allocates `pages` zeroed 4 KiB pages of LoaderData and returns the
-/// physical address of the first. The pages lie below [`MAX_PHYS_MAP`], so
-/// the direct map always covers them: they come from RAM, which raises
-/// `phys_map_size` up to that limit.
+/// physical address of the first. The pages lie below [`ALLOC_MAX`], so both
+/// this direct map and the kernel's always cover them: they come from RAM,
+/// which raises `phys_map_size` at least that far.
 fn alloc_pages(bs: &BootServices, pages: usize) -> Result<u64, Error> {
     // For AllocateMaxAddress, the highest address the allocation may use.
-    let mut addr = MAX_PHYS_MAP - 1;
+    let mut addr = ALLOC_MAX - 1;
     // SAFETY: a plain AllocatePages call with a valid in/out pointer.
     unsafe {
         (bs.allocate_pages)(

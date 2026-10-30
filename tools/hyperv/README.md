@@ -24,13 +24,21 @@ Actions page or with the GitHub CLI:
 gh run download --repo glslang/microL4 --name microl4-vhdx --dir microl4-vhdx <run-id>
 ```
 
-Then create the VM. It is a Generation 2 VM named `l4` with 512 MB, Secure
-Boot off, COM1 on `\\.\pipe\l4-com1`, and no automatic checkpoints. Pass
-`-SwitchName ''` if you have no `Default Switch`; networking is not needed
-until M9.
+Then create the VM. It is a Generation 2 VM named `l4` with 512 MB, one vCPU
+with processor compatibility mode off, Secure Boot off, COM1 on
+`\\.\pipe\l4-com1`, and no automatic checkpoints. Pass `-SwitchName ''` if
+you have no `Default Switch`; networking is not needed until M9.
 
 ```powershell
 .\New-L4Vm.ps1 -VhdxPath .\microl4-vhdx\disk.vhdx
+```
+
+From M3 the kernel refuses to boot without SMEP, SMAP and XSAVE, which
+processor compatibility mode hides. A VM created before M3 needs it turned off
+once, with the VM off:
+
+```powershell
+Set-VMProcessor -VMName l4 -Count 1 -CompatibilityForMigrationEnabled $false
 ```
 
 ## Each check: boot a new VHDX
@@ -58,6 +66,48 @@ TEST PASS
 
 The kernel halts after `TEST PASS` on Hyper-V, since there is no
 `isa-debug-exit` device; the script turns the VM off.
+
+## At the M3 check
+
+CI builds a second image for this check, the `microl4-vhdx-m3-check`
+artifact. It boots `acpidump test=ticks`: the loader prints every ACPI table
+to COM1, the kernel prints its boot summary, then it times ten ticks of the
+100 Hz timer against the Hyper-V reference counter. The dump takes a few
+seconds over COM1, so allow two minutes:
+
+```powershell
+.\Test-L4Vhdx.ps1 -VhdxPath .\microl4-vhdx-m3-check\disk.vhdx -TimeoutSeconds 120 `
+    -LogPath m3-check.log -Expect 'acpidump: rsdp', 'acpidump: end', `
+    'cpu: features NX PGE PAT SMEP SMAP XSAVE', 'cpu: hypervisor Hyper-V', `
+    'hyperv: ', 'timer: calibrating against the Hyper-V reference counter', `
+    'timer: periodic at 100 Hz', 'cpu: meltdown:', `
+    'ticks: within 100000 us within 1%'
+```
+
+Paste `m3-check.log` into the PR. These lines are what the check is for:
+
+| Line | What it shows |
+| --- | --- |
+| `cpu: features ...` | SMEP, SMAP and XSAVE are passed through; without them the boot stops at `CPU lacks` |
+| `cpu: meltdown: ...` | recorded in `STATUS.md` |
+| `apic: IA32_APIC_BASE ... at handover` | whether the firmware left x2APIC on; QEMU never does, so that path first runs here |
+| `hyperv: ...` | the TLFS interface and privileges, each firmware overlay found and switched off, the hypercall MSR and whether it is locked, the frequency MSRs |
+| `acpi: ...` | the tables, the I/O APIC, COM1's route (GSI 4, edge, active high expected) and no HPET |
+| `pic: ...`, `ioapic: ...` | the 8259 and every I/O APIC pin masked |
+| `timer: ...` | the calibration against the reference counter, and its agreement with the frequency MSRs |
+| `ticks: ...` | ten ticks within 1% of 100 ms |
+
+A session (or you) then turns the ACPI part of the log into the Hyper-V
+test tables:
+
+```sh
+cargo xtask acpidump --from-log m3-check.log --out core/tests/acpi/hyperv-gen2.dump
+```
+
+That checks the dump is whole, prints what the parser makes of it (the
+tables, the I/O APIC, each ISA route, the HPET, the ECAM ranges) and writes
+the file to commit, with a host test that reads it. The log may have `\r\n`
+line ends and other lines between the dump lines.
 
 ## The pieces
 

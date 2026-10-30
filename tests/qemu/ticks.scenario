@@ -1,0 +1,19 @@
+# The local APIC timer runs periodically at 100 Hz (docs/design.md, "The
+# timer"). With interrupts still off, the preemption point's IRR poll sees
+# the timer pending; then the kernel idles. The first tick, which may have
+# waited in the IRR, is skipped; the next ten are timed against the
+# calibration reference (the HPET on QEMU) and must take 100 ms within 1%.
+# Each tick is dated by the timer's reload, the reference reading less the
+# countdown's progress since, so the host's delay in delivering the
+# interrupt (often hundreds of microseconds under TCG) does not count; the
+# handler-to-handler time is printed too.
+cmdline: test=ticks
+exit: success
+expect: microL4 kernel
+expect: timer: calibrating against the HPET at 100000000 Hz
+expect: timer: periodic at 100 Hz: divide by 1, vector 0xfd
+expect: ticks: with interrupts off the IRR poll sees an interrupt pending; the timer's: yes
+expect: ticks: idling; timing 10 ticks
+expect: ticks: 10 ticks: the timer reloaded over
+expect: ticks: within 100000 us within 1%
+expect: TEST PASS

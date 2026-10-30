@@ -1,12 +1,30 @@
-# The kernel boots on QEMU, reports what the loader handed over, and says
-# hello. The CI-built VHDX runs the same command line on Hyper-V.
+# The kernel boots on QEMU, reports what the loader handed over, the
+# interrupt controllers, the HPET and the timer it calibrated, and the CPU
+# state it set up, and says hello. The CI-built VHDX runs the same command
+# line on Hyper-V.
 cmdline: test=hello
 exit: success
 expect: loader: microL4 loader
 expect: entering kernel
 expect: microL4 kernel
+expect: cpu: features NX PGE PAT SMEP SMAP XSAVE
 expect: memory:
 expect: cpu: hypervisor QEMU
 expect: cmdline: "test=hello"
+expect: hyperv: no TLFS interface: highest leaf 0x40000001, below 0x40000005
+expect: apic: IA32_APIC_BASE 0xfee00900 at handover: xAPIC
+expect: apic: xAPIC ID 0, version 0x50014, 6 LVT entries, all masked; TPR 0, SVR 0x1ff, LVT error 0xfe
+expect: apic: ESR 0x0 (no error)
+expect: pic: remapped to 0x20 and 0x28, every line masked: masks 0xff 0xff
+expect: ioapic: 0: ID 0, version 0x20, 24 pins for GSI 0-23, all masked
+expect: ioapic: COM1's GSI 4 is I/O APIC 0 pin 4
+expect: hpet: period 10000000 fs, 3 comparators, 64-bit counter
+expect: hpet: legacy replacement and comparator interrupts off, main counter on: 100000000 Hz
+expect: timer: calibrating against the HPET at 100000000 Hz
+expect: timer: LAPIC timer
+expect: timer: periodic at 100 Hz: divide by 1, vector 0xfd
+expect: cpu: CR0 0x80010033 CR4 0x300ee8 EFER 0xd00
+expect: cpu: IA32_APIC_BASE
+expect: cpu: meltdown:
 expect: hello from microL4
 expect: TEST PASS
