@@ -396,9 +396,17 @@ fn copy_delete_chain_to_max_derivation_depth() {
 }
 
 /// Checks that a revoke run with `schedule` was a partial revoke, cut short
-/// if `schedule` preempts it: it returned its restart's failed lookup, and
-/// deleting the Zombies it left, which were `zombies`, finished its work.
-fn cut_short(w: &World, r: Result<(), SyscallError>, schedule: &[u8], zombies: &[(SlotAddr, Cap)]) {
+/// if `schedule` preempts it: it returned its restart's failed lookup,
+/// stopped where the unpreempted revoke passed its preemption point `stop`,
+/// and left the Zombies `zombies` where the model's end state holds
+/// something else.
+fn cut_short(
+    w: &World,
+    r: Result<(), SyscallError>,
+    schedule: &[u8],
+    stop: u64,
+    zombies: &[(SlotAddr, Cap)],
+) {
     assert_eq!(w.partial_revokes, 1, "{schedule:?}");
     if schedule.is_empty() {
         assert_eq!(r, Ok(()));
@@ -411,18 +419,20 @@ fn cut_short(w: &World, r: Result<(), SyscallError>, schedule: &[u8], zombies: &
     );
     let p = w.last_partial.as_ref().expect("cut short");
     assert_eq!(p.error, r.unwrap_err());
+    assert!(p.stops.contains(&stop), "{schedule:?}: {p:?}");
     assert_eq!(p.zombies, zombies, "{schedule:?}");
-    assert!(p.finished_by_delete, "{schedule:?}");
 }
 
 /// An untyped moved into a CNode C made from it, then revoked through C's
 /// only capability: the revoke deletes the two endpoints, then C's
 /// capability, whose clearing deletes the untyped's own slot. That is
 /// seL4's partial revoke (`docs/design.md`, "Slot operations").
-/// Unpreempted, it destroys C. Preempted once C's capability is a Zombie, its
-/// restart cannot look the slot up through it, so the call returns that
-/// failure and leaves C's Zombie half-cleared where its capability was, a
-/// slot the user can name; a Delete of it finishes the work.
+/// Unpreempted, it destroys C. Preempted at every point, its first two
+/// restarts look the slot up again and go on; once C's capability is a
+/// Zombie, the restart cannot look the slot up through it, so the call
+/// returns that failure and leaves C's Zombie half-cleared where its
+/// capability was, a slot the user can name: where the unpreempted revoke
+/// passed its third preemption point.
 #[test]
 fn partial_revoke_of_an_untyped_inside_a_cnode_made_from_it() {
     for schedule in [&[][..], &EVERY_POINT[..]] {
@@ -448,7 +458,7 @@ fn partial_revoke_of_an_untyped_inside_a_cnode_made_from_it() {
             schedule,
         );
         let zombie = Cap::zombie(c.object(), c.size_bits(), 7, false);
-        cut_short(&w, r, schedule, &[(root_slot(10), zombie)]);
+        cut_short(&w, r, schedule, 2, &[(root_slot(10), zombie)]);
         for slot in [10, 11, 12] {
             assert!(w.m.cap(root_slot(slot)).is_null());
         }
@@ -517,8 +527,9 @@ fn cnodes_holding_each_others_only_capabilities() {
 /// D's Zombie into the revoked slot and the untyped being revoked into C's
 /// slot 1, where it is deleted. Unpreempted, the revoke goes on to destroy
 /// C and leaves D detached. Preempted after C's first step, its restart
-/// cannot look the slot up through C's Zombie and returns, and a Delete of
-/// that Zombie finishes the work.
+/// cannot look the slot up through C's Zombie and returns, leaving that
+/// Zombie in C's last capability's slot, where the unpreempted revoke
+/// passed its first preemption point.
 #[test]
 fn revoke_whose_slot_receives_a_zombie() {
     for schedule in [&[][..], &EVERY_POINT[..]] {
@@ -551,7 +562,7 @@ fn revoke_whose_slot_receives_a_zombie() {
             schedule,
         );
         let zombie = Cap::zombie(c.object(), c.size_bits(), 3, false);
-        cut_short(&w, r, schedule, &[(root_slot(11), zombie)]);
+        cut_short(&w, r, schedule, 0, &[(root_slot(11), zombie)]);
         assert!(is_zombie_for(w.m.cap(cnode_slot(d, 0)), d));
         assert!(w.m.cap(root_slot(11)).is_null());
         assert!((0..4).all(|i| w.m.cap(cnode_slot(c, i)).is_null()));
@@ -688,12 +699,12 @@ fn revoke_through_a_cycle_leaves_a_removable_zombie_alone() {
 ///   nested deletion swaps C's Zombie into U's slot and deletes U; C stays
 ///   detached in its slot 0, under no untyped, a dead region.
 ///
-/// Preempted anywhere after its first step, its restart fails to look the
-/// slot up and the call returns that failure. Mostly what it leaves is C's
-/// Zombie, part-cleared, in C's slot 0, and deleting it finishes the work.
-/// Two preemption points leave work that no Delete of a Zombie finishes as
-/// the uninterrupted call does, so the harness runs the revoke again
-/// without preemption:
+/// Preempted at any of its points, all after its first step, its restart
+/// fails to look the slot up and the call returns that failure, leaving
+/// what the unpreempted revoke had at that point. Mostly that is C's
+/// Zombie, part-cleared, in C's slot 0, and deleting it would finish the
+/// work. At two points no Delete of a Zombie would finish it as the
+/// uninterrupted call does:
 ///
 /// - right after the first step: no Zombie yet, and U and C's last
 ///   capability stay in C, which no lookup reaches;
@@ -747,17 +758,28 @@ fn revoke_that_destroys_its_own_slot_is_a_partial_revoke() {
                 schedule,
             );
             assert_eq!(w.partial_revokes, 1, "{what}");
+            let points = if u == 0 { 4 } else { 8 };
             if w.cut_short == 0 {
                 // Past the revoke's last preemption point.
-                let points = if u == 0 { 4 } else { 8 };
                 assert_eq!(r, Ok(()), "{what}");
                 assert!(schedule.first().is_none_or(|&p| p >= points), "{what}");
             } else {
                 let p = w.last_partial.as_ref().unwrap();
                 assert_eq!(r, Err(p.error), "{what}");
-                let again = schedule[0] == 0 || (u == 0 && schedule[0] == 1);
-                assert_eq!(p.finished_by_delete, !again, "{what}: {p:?}");
-                assert_eq!(w.replayed, u64::from(again), "{what}");
+                // The first restart already fails.
+                assert!(p.stops.contains(&u64::from(schedule[0])), "{what}: {p:?}");
+                assert_eq!(p.points, u64::from(points), "{what}");
+                assert!(
+                    p.zombies
+                        .iter()
+                        .all(|&(at, z)| at == cnode_slot(c, 0) && is_zombie_for(z, c)),
+                    "{what}: {p:?}"
+                );
+                // The two points listed above: no Zombie differs from the
+                // model's.
+                if schedule[0] == 0 || (u == 0 && schedule[0] == 1) {
+                    assert!(p.zombies.is_empty(), "{what}: {p:?}");
+                }
             }
             assert!(w.m.cap(root_slot(10)).is_null(), "{what}");
             assert!(w.m.cap(big()).is_null(), "{what}");
