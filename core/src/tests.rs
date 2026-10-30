@@ -988,11 +988,19 @@ fn a_revoke_cut_short_stops_where_the_unpreempted_revoke_passed() {
             passed.push(w.k.mem.clone());
         }
         let n = passed.len() as u64 + 1;
+        // Every schedule of up to three preemptions natively; under Miri,
+        // which is slow, one preemption, or one restart and then a second.
         let mut schedules: Vec<Vec<u64>> = Vec::new();
         for a in 0..n {
             schedules.push(vec![a]);
             for b in 0..n {
+                if cfg!(miri) && a != 0 {
+                    continue;
+                }
                 schedules.push(vec![a, b]);
+                if cfg!(miri) {
+                    continue;
+                }
                 for c in 0..n {
                     schedules.push(vec![a, b, c]);
                 }
