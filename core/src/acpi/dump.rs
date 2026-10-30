@@ -295,8 +295,7 @@ pub fn decode_hex(hex: &str, out: &mut [u8; BYTES_PER_LINE]) -> Option<usize> {
     if digits.is_empty() || !digits.len().is_multiple_of(2) || digits.len() / 2 > BYTES_PER_LINE {
         return None;
     }
-    for (pair, b) in digits.chunks_exact(2).zip(out.iter_mut()) {
-        let [hi, lo] = [*pair.first()?, *pair.get(1)?];
+    for (&[hi, lo], b) in digits.as_chunks::<2>().0.iter().zip(out.iter_mut()) {
         *b = nibble(hi)? << 4 | nibble(lo)?;
     }
     Some(digits.len() / 2)
