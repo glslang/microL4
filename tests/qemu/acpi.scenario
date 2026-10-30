@@ -1,0 +1,19 @@
+# ACPI is parsed once at boot, from the RSDP through the XSDT to the MADT,
+# HPET and MCFG (docs/design.md, ACPI and the timer). The summary names each
+# table and what the kernel takes from it. QEMU's q35 has one I/O APIC, IRQ 0
+# on GSI 2, the PCI interrupts level-triggered, an HPET and one ECAM range.
+cmdline: test=hello
+exit: success
+expect: acpi: RSDP revision 2 at
+expect: acpi:   FACP at
+expect: acpi:   APIC at
+expect: acpi:   HPET at
+expect: acpi:   MCFG at
+expect: acpi: MADT flags 0x1 PCAT_COMPAT, 1 processor, LAPIC 0xfee00000
+expect: acpi: I/O APIC 0: ID 0 at 0xfec00000, GSI base 0
+expect: acpi: override ISA IRQ 0 -> GSI 2, edge, active high (flags 0x0)
+expect: acpi: override ISA IRQ 9 -> GSI 9, level, active high (flags 0xd)
+expect: acpi: COM1 is ISA IRQ 4 -> GSI 4, edge, active high
+expect: acpi: HPET at 0xfed00000
+expect: acpi: ECAM segment 0, buses 0-255, at 0xe0000000
+expect: TEST PASS
