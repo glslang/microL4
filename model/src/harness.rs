@@ -290,8 +290,9 @@ pub struct World {
     pub last_events: Vec<Event>,
     /// Actions applied.
     pub steps: u64,
-    /// Partial revokes finished with a Delete (see `finish_abandoned`).
-    pub abandoned: u64,
+    /// Revokes that destroyed their own slot and stopped (see
+    /// `check_partial_revoke`).
+    pub partial_revokes: u64,
     /// If set, counts each action kind with its result, for coverage
     /// reports.
     pub tally: Option<BTreeMap<String, u64>>,
@@ -467,7 +468,7 @@ impl World {
             preemptions: 0,
             last_events: Vec::new(),
             steps: 0,
-            abandoned: 0,
+            partial_revokes: 0,
             tally: None,
         };
         for page in (MEM_BASE >> PAGE_BITS)..(MEM_END >> PAGE_BITS) {
@@ -596,6 +597,7 @@ impl World {
             Action::Revoke { slot } => self.m.cap(slot),
             _ => Cap::NULL,
         };
+        let pre_stray = self.stray_zombies(&pre_containers).len();
 
         // The model, atomically.
         let expected = self.run_model(action);
@@ -629,7 +631,7 @@ impl World {
         self.refresh_nz();
         let mut containers = pre_containers;
         containers.extend(self.containers());
-        self.finish_abandoned(action, revoked, &containers)
+        self.check_partial_revoke(action, revoked, pre_stray, &containers)
             .map_err(ctx)?;
 
         ensure(got == expected, || {
@@ -657,45 +659,42 @@ impl World {
         Ok(got)
     }
 
-    /// A Revoke that destroys the CNode holding its own slot stops when it
-    /// next reads that slot, which is then empty or holds a Zombie swapped
-    /// in by a nested deletion (`docs/design.md`, "Slot operations"). If a
-    /// preemption point fell inside that destruction after the slot changed,
-    /// the restarted call (which in the kernel could not even look the slot
-    /// up again) stops, and the destroyed CNode's Zombie stays half-cleared
-    /// where its last capability was: seL4's partial revoke (`cspace.tex`,
-    /// "Deletion and Revocation"). The model's revoke is atomic and finished
-    /// that deletion, so finish it here as the user would, with Delete.
-    /// Nothing else may leave a Zombie outside its own container's slot 0.
-    fn finish_abandoned(
+    /// A Revoke whose step deletes its own slot, with the CNode holding it,
+    /// or swaps a Zombie into it, stops after that step, preempted or not
+    /// (`docs/design.md`, "Slot operations"): seL4's partial revoke
+    /// (`cspace.tex`, "Deletion and Revocation"), except that seL4 finishes
+    /// the step's container unless a preemption point intervenes. Here the
+    /// container keeps what it still holds, its Zombie where the deletion
+    /// left it, perhaps outside its own slot 0 in a slot a user can name,
+    /// and the model stops the same way, so `compare_state` checks the
+    /// result. This counts such revokes, and checks that nothing else adds
+    /// a Zombie outside its own container's slot 0.
+    fn check_partial_revoke(
         &mut self,
         action: &Action,
         revoked: Cap,
+        before: usize,
         containers: &BTreeSet<(SlotAddr, u64)>,
     ) -> Result<(), String> {
-        loop {
-            let pending = all_slots(containers).into_iter().find(|&at| {
-                let cap = self.impl_slot(at).cap;
-                cap.cap_type() == CapType::Zombie && cap.object() != at.get()
-            });
-            let Some(at) = pending else { return Ok(()) };
-            let partial_revoke = match *action {
-                Action::Revoke { slot } => {
-                    self.preemptions > 0 && self.k.load(slot).cap.header != revoked.header
-                }
-                _ => false,
-            };
-            ensure(partial_revoke, || {
-                format!(
-                    "slot {at:?} holds an unfinished Zombie {:?}",
-                    self.k.load(at).cap
-                )
-            })?;
-            self.abandoned += 1;
-            cnode::delete(&mut self.k, at)
-                .map_err(|_| "preempted with preemption off".to_string())?;
-            self.refresh_nz();
+        let partial =
+            matches!(*action, Action::Revoke { slot } if self.k.load(slot).cap != revoked);
+        if partial {
+            self.partial_revokes += 1;
         }
+        let stray = self.stray_zombies(containers);
+        ensure(partial || stray.len() <= before, || {
+            format!("{before} Zombies outside their container's slot 0 became {stray:?}")
+        })
+    }
+
+    /// The slots of `containers` that hold a Zombie outside its own
+    /// container's slot 0, with the Zombie.
+    fn stray_zombies(&self, containers: &BTreeSet<(SlotAddr, u64)>) -> Vec<(SlotAddr, Cap)> {
+        all_slots(containers)
+            .into_iter()
+            .map(|at| (at, self.impl_slot(at).cap))
+            .filter(|(at, cap)| cap.cap_type() == CapType::Zombie && cap.object() != at.get())
+            .collect()
     }
 
     fn run_model(&mut self, action: &Action) -> Outcome {

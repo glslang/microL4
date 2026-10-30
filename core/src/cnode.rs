@@ -130,18 +130,33 @@ pub fn rotate<K: Kernel + ?Sized>(
 /// `CNode_Delete`: deletes the capability in `slot`, finalising its object
 /// if it is the last capability to it. An empty slot is left as it is.
 pub fn delete<K: Kernel + ?Sized>(k: &mut K, slot: SlotAddr) -> Result<(), Preempted> {
-    delete_slot(k, slot, true)
+    delete_slot(k, slot, true, None)
 }
 
 /// `CNode_Revoke`: deletes every capability derived, directly or not, from
-/// the one in `slot`, which stays. Re-reads `slot` at every step, so it stops
-/// cleanly if a step deletes the CNode holding `slot`.
+/// the one in `slot`, which stays. Re-reads `slot` at every step, and each
+/// deletion goes on only while a restarted revoke would find it (see
+/// [`finalise_slot`]), so if a step deletes the CNode holding `slot`, the
+/// revoke stops after that step, in the same state whether or not it was
+/// preempted.
 pub fn revoke<K: Kernel + ?Sized>(k: &mut K, slot: SlotAddr) -> Result<(), Preempted> {
     while let Some(child) = cdt::first_child(k, slot) {
-        delete_slot(k, child, true)?;
+        let anchor = Anchor {
+            slot,
+            cap: k.load(slot).cap,
+        };
+        delete_slot(k, child, true, Some(anchor))?;
         k.preempt()?;
     }
     Ok(())
+}
+
+/// Where a restarted revoke finds its work: as the first child of `cap`,
+/// the revoked capability, in `slot`.
+#[derive(Clone, Copy)]
+struct Anchor {
+    slot: SlotAddr,
+    cap: Cap,
 }
 
 /// The checks Copy and Mint share, then the derived capability with its
@@ -244,14 +259,15 @@ fn with_guard(cap: Cap, data: u64) -> Result<Cap, SyscallError> {
 /// the dying container's Zombie into its own slot 0 and carries on with
 /// what was there, so recursion is at most two levels deep. seL4 empties
 /// the slot if `exposed || done`; here an exposed deletion is not done only
-/// when a cycle of containers left another container's Zombie in `slot`
-/// (see [`reduce_zombie`]), which stays.
+/// when it is a revoke's and ends early (see [`finalise_slot`]), and then
+/// `slot` keeps its Zombie.
 fn delete_slot<K: Kernel + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     exposed: bool,
+    anchor: Option<Anchor>,
 ) -> Result<(), Preempted> {
-    let (done, cleanup) = finalise_slot(k, slot, exposed)?;
+    let (done, cleanup) = finalise_slot(k, slot, exposed, anchor)?;
     if done {
         empty_slot(k, slot, cleanup);
     }
@@ -261,13 +277,35 @@ fn delete_slot<K: Kernel + ?Sized>(
 /// Finalises the capability in `slot` until the slot can be emptied:
 /// seL4's `finaliseSlot`. Returns whether it can, and the cleanup to pass
 /// on. `false` for a nested deletion that leaves a Zombie in its own
-/// container's slot 0, and for a deletion that a cycle of containers left
-/// holding another container's Zombie (see [`reduce_zombie`]).
+/// container's slot 0, and for a revoke's deletion that ends early.
+///
+/// A preemption point separates two reduce steps, where seL4 has one after
+/// each: a step that leaves nothing to clear empties the slot before any
+/// point, and each call reduces once before its first, so a restarted call
+/// always progresses.
+///
+/// A revoke, which `anchor` names, finds its work after a restart only as
+/// the first child of its slot, so at each point its deletion checks that
+/// the restart still would: the revoke's slot holds the revoked capability,
+/// and `slot` the Zombie this call started clearing. A step can break
+/// either. Clearing the container that holds the revoke's slot can delete
+/// the revoked capability (the partial revoke of `docs/design.md`, "Slot
+/// operations"), or swap a Zombie into the revoke's slot and delete the
+/// revoked capability ("Deletion and finalisation", step 3); a cycle of
+/// containers can swap another container's Zombie into `slot` (step 3
+/// again). The deletion then ends without emptying `slot`, as a restart
+/// would leave it, so the outcome is the same wherever an interrupt falls,
+/// and the revoke re-reads its slot. A nested deletion needs no check: when
+/// its swap moves the revoked capability out of the revoke's slot, it
+/// deletes that capability before any point.
 fn finalise_slot<K: Kernel + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     immediate: bool,
+    anchor: Option<Anchor>,
 ) -> Result<(bool, Option<Cap>), Preempted> {
+    // The container this call clears, once it has reduced.
+    let mut clearing = None;
     loop {
         let cap = k.load(slot).cap;
         if cap.is_null() {
@@ -286,10 +324,19 @@ fn finalise_slot<K: Kernel + ?Sized>(
         if !immediate && remainder.object() == slot.get() {
             return Ok((false, cleanup));
         }
-        if !reduce_zombie(k, slot, immediate)? {
-            return Ok((false, None));
+        let container = (remainder.object(), remainder.zombie_is_tcb());
+        match clearing {
+            None => clearing = Some(container),
+            Some(first) => {
+                if let Some(a) = anchor
+                    && (k.load(a.slot).cap != a.cap || first != container)
+                {
+                    return Ok((false, None));
+                }
+                k.preempt()?;
+            }
         }
-        k.preempt()?;
+        reduce_zombie(k, slot, immediate)?;
     }
 }
 
@@ -334,26 +381,11 @@ fn removable(remainder: Cap, slot: SlotAddr) -> bool {
 /// `reduceZombie`. Exposed: deletes the highest slot left and counts it.
 /// Nested: swaps the Zombie into the container's slot 0, so the caller goes
 /// on with the capability that was there.
-///
-/// Returns `false` if the step left another container's Zombie in `slot`;
-/// the deletion then ends without emptying `slot`. Only a cycle does that:
-/// `slot` is slot 0 of a container `D` whose last capability lies in the
-/// container being cleared, so the nested deletion of that capability swaps
-/// `D`'s Zombie, with `D`'s derivation node, into `slot` (seL4's "Expected
-/// new Zombie to be self-referential"). seL4 then clears `D` in this
-/// deletion, but a restarted call could not resume that. No user can name
-/// `slot`, so only a revoke gets here, and a restarted revoke finds its work
-/// only among the revoked capability's descendants, which `D`'s Zombie need
-/// not be: a preemption point while clearing `D` would leave it half
-/// cleared, and the outcome would depend on where the interrupt fell.
-/// Instead `D` always stays, detached in its own slot 0, as every nested
-/// deletion leaves a container, until a deletion that reaches its Zombie
-/// clears it (`docs/design.md`, "Deletion and finalisation", step 3).
 fn reduce_zombie<K: Kernel + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     immediate: bool,
-) -> Result<bool, Preempted> {
+) -> Result<(), Preempted> {
     let zombie = k.load(slot).cap;
     let container = zombie.object();
     let n = zombie.zombie_slots();
@@ -361,9 +393,10 @@ fn reduce_zombie<K: Kernel + ?Sized>(
     let base = SlotAddr::new(container).expect("a Zombie names a slot address");
     if immediate {
         let end = base.offset(n - 1);
-        delete_slot(k, end, false)?;
+        delete_slot(k, end, false, None)?;
         let now = k.load(slot).cap;
         match now.cap_type() {
+            // `slot` was `end`: the Zombie went to the container's slot 0.
             CapType::Null => {}
             CapType::Zombie
                 if now.object() == container
@@ -375,10 +408,14 @@ fn reduce_zombie<K: Kernel + ?Sized>(
                 s.cap = now.with_zombie_slots(n - 1);
                 k.store(slot, s);
             }
+            // A cycle: `slot` is slot 0 of a container `D` whose last
+            // capability lay in the container being cleared, and the
+            // nested deletion swapped `D`'s Zombie, with `D`'s derivation
+            // node, into it (seL4's "Expected new Zombie to be
+            // self-referential"). A deletion goes on to clear `D`, as in
+            // seL4; a revoke's ends here (see [`finalise_slot`]).
             CapType::Zombie => {
-                // The nested deletion swapped a self-referential Zombie here.
                 debug_assert!(now.object() == slot.get() && container != slot.get());
-                return Ok(false);
             }
             _ => unreachable!("clearing a container left a non-Zombie in its slot"),
         }
@@ -387,7 +424,7 @@ fn reduce_zombie<K: Kernel + ?Sized>(
         let first = k.load(base).cap;
         cdt::swap_slots(k, first, base, zombie, slot);
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Empties `slot` and unlinks it, then passes on the cleanup: seL4's
