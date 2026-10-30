@@ -1213,10 +1213,12 @@ No `CPtr` reaches a TCB or IRQ-node slot.
 `kernel/src/arch/`. `SlotMemory` loads and stores a `Slot` by value at a
 `SlotAddr`, a 32-byte-aligned physical address held in a `NonZeroU64`.
 `Kernel: SlotMemory` adds the hooks into other subsystems: `finalise(cap,
-last)`, `after_delete(cleanup)`, `derive(cap)`, `moved(cap, old_slot,
-new_slot)`, `zero(paddr, len)`, `init_object(cap)` and `preempt()`, a
-preemption point that polls the local APIC's IRR (the kernel never opens an
-`sti` window).
+last)`, which returns a cleanup capability as seL4's `cleanupInfo`,
+`after_delete(cleanup)`, `moved(cap, old_slot, new_slot)`, `zero(paddr,
+len)`, `init_object(cap)` and `preempt()`, a preemption point that polls the
+local APIC's IRR (the kernel never opens an `sti` window). Every type's
+derivation rule is in `core/` (`l4core::cnode::derive`), so derivation needs
+no hook.
 
 Every relocation of a capability, Move, Mutate, both halves of Rotate, the
 Rotate swap, every Zombie swap and IPC's `CNode_SaveCaller`, goes through one
