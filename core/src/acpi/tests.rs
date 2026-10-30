@@ -948,6 +948,15 @@ fn hpet_table_checks() {
         hpet(0, 0xFED0_0C01),
         (None, vec![Warning::HpetBase { base: 0xFED0_0C01 }])
     );
+    // Above any physical address, which no page table can map.
+    assert_eq!(
+        hpet(0, 1 << 52),
+        (None, vec![Warning::HpetBase { base: 1 << 52 }])
+    );
+    assert_eq!(
+        hpet(0, (1 << 52) - 0x1000),
+        (Some((1 << 52) - 0x1000), vec![])
+    );
     // One byte short of the fixed layout.
     let mut short = hpet_table(0, 0xFED0_0000);
     short.truncate(55);

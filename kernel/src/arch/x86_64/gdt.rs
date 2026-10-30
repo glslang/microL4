@@ -113,8 +113,8 @@ pub(super) struct DescriptorPointer {
 /// Step 3 of the M3 boot sequence (`docs/design.md`, "Boot sequence"):
 /// builds the GDT, the TSS and the IDT, then loads them in that order, so no
 /// table is loaded before it is complete and no gate names an IST before the
-/// TSS is in place; then sets CR4.MCE, points `IA32_GS_BASE` at the per-CPU
-/// area and resets DR7. Runs once, with interrupts off. The firmware's GDT
+/// TSS is in place, and loads a null LDT; then sets CR4.MCE, points
+/// `IA32_GS_BASE` at the per-CPU area and resets DR7. Runs once, with interrupts off. The firmware's GDT
 /// and IDT are dead afterwards.
 pub fn init() {
     let stacks = stack_layout();
@@ -133,6 +133,13 @@ pub fn init() {
     // which nothing reads.
     unsafe {
         asm!("ltr {:x}", in(reg) trap::TSS_SELECTOR, options(nostack, preserves_flags));
+    }
+    // SAFETY: a null selector leaves LDTR unusable, whatever the firmware
+    // loaded, so no segment can come from an LDT and there is no 32-bit code
+    // segment anywhere (`docs/design.md`, "Rings and segments"). Nothing the
+    // kernel runs uses an LDT selector.
+    unsafe {
+        asm!("lldt {:x}", in(reg) 0u16, options(nostack, preserves_flags));
     }
     idt::load(idt);
 

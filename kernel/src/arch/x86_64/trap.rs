@@ -357,7 +357,12 @@ unsafe fn on_fresh_stack(f: extern "C" fn(u64) -> !, arg: u64) -> ! {
 /// Idles: enables interrupts and halts, at the top of the kernel stack, until
 /// an interrupt arrives. The interrupt discards the idle frame and runs
 /// [`irq::handle`] with interrupts off, then idles again on a fresh stack.
-/// Whatever is on the kernel stack when this is called is abandoned.
+///
+/// Whatever is on the kernel stack when this is called is abandoned and its
+/// memory reused without running a destructor. So call it only where no
+/// caller's frame holds anything that relies on being dropped or on its
+/// address staying valid, such as a pinned value: in practice, at the end of
+/// `kmain` or of an entry path.
 pub fn idle() -> ! {
     let entry = if IDLE_TEST_ROUNDS.load(Ordering::Relaxed) > 0 {
         idle_loop_int as *const () as u64

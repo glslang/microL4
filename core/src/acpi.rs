@@ -238,8 +238,9 @@ pub enum Warning {
     OverrideDropped { source: u8, gsi: u32 },
     /// The HPET's registers are not in system memory; no HPET.
     HpetNotMemory { space: u8 },
-    /// The HPET's base is 0, or its 1 KiB register block crosses a page;
-    /// no HPET.
+    /// The HPET's base is 0 or not below 2^52, the architectural limit of a
+    /// physical address, or its 1 KiB register block crosses a page; no
+    /// HPET.
     HpetBase { base: u64 },
     /// An ECAM range with a reversed bus range or a region that overflows;
     /// dropped (`docs/abi.md`, `Ecam`).
@@ -896,7 +897,7 @@ fn parse_hpet<M: PhysRead + ?Sized>(t: &Table<'_, M>, p: &mut Platform) {
     };
     if space != 0 {
         p.warn(Warning::HpetNotMemory { space });
-    } else if base == 0 || (base & 0xFFF) + HPET_REGS > 0x1000 {
+    } else if base == 0 || base >= 1 << 52 || (base & 0xFFF) + HPET_REGS > 0x1000 {
         p.warn(Warning::HpetBase { base });
     } else {
         p.hpet = Some(Hpet {

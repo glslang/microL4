@@ -37,6 +37,16 @@ jobs:
           name: microl4-vhdx
           path: target/xtask/image/disk.vhdx
           if-no-files-found: error
+      # The M3 Hyper-V check (tools/hyperv/README.md): one boot dumps the
+      # ACPI tables, prints the boot summary and times ten timer ticks.
+      - name: Build the M3 check image
+        run: cargo xtask image --cmdline "acpidump test=ticks"
+      - name: Upload the M3 check VHDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: microl4-vhdx-m3-check
+          path: target/xtask/image/disk.vhdx
+          if-no-files-found: error
 
   lint:
     name: rustfmt and clippy

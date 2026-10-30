@@ -23,7 +23,7 @@ expect: hpet: legacy replacement and comparator interrupts off, main counter on:
 expect: timer: calibrating against the HPET at 100000000 Hz
 expect: timer: LAPIC timer
 expect: timer: periodic at 100 Hz: divide by 1, vector 0xfd
-expect: cpu: CR0
+expect: cpu: CR0 0x80010033 CR4 0x300ee8 EFER 0xd00
 expect: cpu: IA32_APIC_BASE
 expect: cpu: meltdown:
 expect: hello from microL4

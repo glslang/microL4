@@ -1,12 +1,19 @@
 # With `acpidump` on the command line the loader prints every ACPI table it
 # can reach, for `cargo xtask acpidump` (core/tests/acpi/), then boots as
-# usual.
-cmdline: acpidump test=hello
+# usual. This is the command line of CI's M3 check image for Hyper-V
+# (tools/hyperv/README.md): one boot gives the dump, the boot summary and
+# ten timed ticks.
+cmdline: acpidump test=ticks
 exit: success
+timeout: 60
 expect: loader: acpidump: rsdp
 expect: loader: acpidump: table
 expect: RSDP
 expect: loader: acpidump: data
 expect: loader: acpidump: end
 expect: microL4 kernel
+expect: cpu: features NX PGE PAT SMEP SMAP XSAVE
+expect: timer: periodic at 100 Hz
+expect: cpu: meltdown:
+expect: ticks: within 100000 us within 1%
 expect: TEST PASS

@@ -8,7 +8,7 @@ Swaps the VHDX into the VM, starts it, reads COM1 until a marker line or the
 timeout, then turns the VM off. It passes when the output contains every
 -Expect string in order and ends with -Marker. The default expectations are
 those of tests/qemu/hello.scenario, except the hypervisor line, which reads
-Hyper-V here. The log is written to -LogPath for pasting into the PR.
+Hyper-V here, and the Hyper-V detection line, which QEMU cannot print. The log is written to -LogPath for pasting into the PR.
 
 Exit status 0 means pass, 1 means fail.
 
@@ -27,9 +27,15 @@ param(
         'loader: microL4 loader',
         'entering kernel',
         'microL4 kernel',
+        'cpu: features NX PGE PAT SMEP SMAP XSAVE',
         'memory:',
         'cpu: hypervisor Hyper-V',
         'cmdline: "test=hello"',
+        'hyperv: ',
+        'apic: IA32_APIC_BASE',
+        'timer: periodic at 100 Hz',
+        'cpu: CR0',
+        'cpu: meltdown:',
         'hello from microL4'
     )
 )

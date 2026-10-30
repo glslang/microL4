@@ -119,8 +119,9 @@ pub const SVR_ENABLE: u32 = 1 << 8;
 /// SVR bit 12: EOI-broadcast suppression, which the kernel leaves off so a
 /// local EOI reaches the I/O APIC for level-triggered pins.
 pub const SVR_EOI_BROADCAST_SUPPRESSION: u32 = 1 << 12;
-/// The SVR the kernel writes: enabled, spurious vector `0xFF`, focus
-/// checking and EOI-broadcast suppression off.
+/// The SVR the kernel writes: enabled, spurious vector `0xFF`, EOI-broadcast
+/// suppression off. Bit 9 stays clear, which leaves focus processor
+/// checking on where the bit still exists; it is reserved on current CPUs.
 pub const SVR_VALUE: u32 = SVR_ENABLE | trap::SPURIOUS as u32;
 /// The error LVT the kernel writes: unmasked, fixed, vector `0xFE`.
 pub const LVT_ERROR_VALUE: u32 = trap::APIC_ERROR as u32;
