@@ -242,14 +242,17 @@ fn with_guard(cap: Cap, data: u64) -> Result<Cap, SyscallError> {
 /// deletion (one a user asked for) clears a dying container completely; a
 /// nested one, of a capability inside a container being cleared, only moves
 /// the dying container's Zombie into its own slot 0 and carries on with
-/// what was there, so recursion is at most two levels deep.
+/// what was there, so recursion is at most two levels deep. seL4 empties
+/// the slot if `exposed || done`; here an exposed deletion is not done only
+/// when a cycle of containers left another container's Zombie in `slot`
+/// (see [`reduce_zombie`]), which stays.
 fn delete_slot<K: Kernel + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     exposed: bool,
 ) -> Result<(), Preempted> {
     let (done, cleanup) = finalise_slot(k, slot, exposed)?;
-    if exposed || done {
+    if done {
         empty_slot(k, slot, cleanup);
     }
     Ok(())
@@ -257,8 +260,9 @@ fn delete_slot<K: Kernel + ?Sized>(
 
 /// Finalises the capability in `slot` until the slot can be emptied:
 /// seL4's `finaliseSlot`. Returns whether it can, and the cleanup to pass
-/// on. `false` only for a nested deletion that leaves a Zombie in its own
-/// container's slot 0.
+/// on. `false` for a nested deletion that leaves a Zombie in its own
+/// container's slot 0, and for a deletion that a cycle of containers left
+/// holding another container's Zombie (see [`reduce_zombie`]).
 fn finalise_slot<K: Kernel + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
@@ -282,7 +286,9 @@ fn finalise_slot<K: Kernel + ?Sized>(
         if !immediate && remainder.object() == slot.get() {
             return Ok((false, cleanup));
         }
-        reduce_zombie(k, slot, immediate)?;
+        if !reduce_zombie(k, slot, immediate)? {
+            return Ok((false, None));
+        }
         k.preempt()?;
     }
 }
@@ -328,11 +334,26 @@ fn removable(remainder: Cap, slot: SlotAddr) -> bool {
 /// `reduceZombie`. Exposed: deletes the highest slot left and counts it.
 /// Nested: swaps the Zombie into the container's slot 0, so the caller goes
 /// on with the capability that was there.
+///
+/// Returns `false` if the step left another container's Zombie in `slot`;
+/// the deletion then ends without emptying `slot`. Only a cycle does that:
+/// `slot` is slot 0 of a container `D` whose last capability lies in the
+/// container being cleared, so the nested deletion of that capability swaps
+/// `D`'s Zombie, with `D`'s derivation node, into `slot` (seL4's "Expected
+/// new Zombie to be self-referential"). seL4 then clears `D` in this
+/// deletion, but a restarted call could not resume that. No user can name
+/// `slot`, so only a revoke gets here, and a restarted revoke finds its work
+/// only among the revoked capability's descendants, which `D`'s Zombie need
+/// not be: a preemption point while clearing `D` would leave it half
+/// cleared, and the outcome would depend on where the interrupt fell.
+/// Instead `D` always stays, detached in its own slot 0, as every nested
+/// deletion leaves a container, until a deletion that reaches its Zombie
+/// clears it (`docs/design.md`, "Deletion and finalisation", step 3).
 fn reduce_zombie<K: Kernel + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     immediate: bool,
-) -> Result<(), Preempted> {
+) -> Result<bool, Preempted> {
     let zombie = k.load(slot).cap;
     let container = zombie.object();
     let n = zombie.zombie_slots();
@@ -357,6 +378,7 @@ fn reduce_zombie<K: Kernel + ?Sized>(
             CapType::Zombie => {
                 // The nested deletion swapped a self-referential Zombie here.
                 debug_assert!(now.object() == slot.get() && container != slot.get());
+                return Ok(false);
             }
             _ => unreachable!("clearing a container left a non-Zombie in its slot"),
         }
@@ -365,7 +387,7 @@ fn reduce_zombie<K: Kernel + ?Sized>(
         let first = k.load(base).cap;
         cdt::swap_slots(k, first, base, zombie, slot);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Empties `slot` and unlinks it, then passes on the cleanup: seL4's
