@@ -1,8 +1,10 @@
 //! The microL4 kernel.
 //!
-//! M0: the loader enters [`arch`] at `_start`, which sets up a stack, zeroes
-//! BSS and calls [`kmain`]. The kernel prints what the loader handed over, runs
-//! the test named on the command line, if any, and stops.
+//! The loader enters [`arch`] at `_start`, which sets up a stack, zeroes BSS
+//! and calls [`kmain`]. The kernel checks the CPU, copies what the loader
+//! handed over, moves onto its own descriptor tables and page tables (M3),
+//! prints a boot summary, runs the test named on the command line, if any,
+//! and stops.
 
 #![no_std]
 #![no_main]
@@ -23,28 +25,33 @@ compile_error!("the kernel must be built without SSE");
 mod debug;
 #[allow(unsafe_code)]
 mod arch;
+mod boot;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use l4core::cmdline;
-use l4core::handoff::{self, Handoff, RegionKind};
+use l4core::handoff::{self, RegionKind};
 
-/// The kernel proper, called once by `arch` on the boot stack with interrupts
-/// off.
-fn kmain(handoff: &'static Handoff) -> ! {
+use boot::BootState;
+
+/// The kernel proper, called once by `arch` on the kernel stack with
+/// interrupts off, with the physical address of the loader's handoff.
+fn kmain(handoff_phys: u64) -> ! {
     let build = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
     kprintln!("microL4 kernel {} ({build})", env!("CARGO_PKG_VERSION"));
-    if let Err(e) = handoff.validate() {
-        panic!("bad handoff: {e}");
-    }
-    print_boot_info(handoff);
+    // The M3 boot sequence (docs/design.md, "Boot sequence"), steps 2 to 5.
+    arch::check_cpu();
+    let boot = boot::take_handoff(handoff_phys);
+    print_boot_info(boot);
+    arch::init(boot);
+    arch::print_cpu_state();
 
-    match cmdline::value(handoff.cmdline(), "test") {
+    match cmdline::value(boot.cmdline(), "test") {
         None => {
             kprintln!("hello from microL4");
             kprintln!("nothing more to do; halting");
@@ -63,19 +70,20 @@ fn kmain(handoff: &'static Handoff) -> ! {
     }
 }
 
-fn print_boot_info(h: &Handoff) {
+fn print_boot_info(boot: &BootState) {
+    let h = &boot.handoff;
     kprintln!(
         "kernel: {} KiB at phys {:#x}, virt {:#x}",
         h.kernel_size >> 10,
         h.kernel_phys_base,
         handoff::KERNEL_VIRT_BASE
     );
-    let regions = arch::memory_map(h);
+    let regions = boot.memory_map();
     kprintln!(
         "memory: {} regions, {} MiB usable, direct map covers {} GiB",
         regions.len(),
         handoff::total_bytes(regions, RegionKind::USABLE) >> 20,
-        h.phys_map_size >> 30
+        h.direct_map_end() >> 30
     );
     for r in regions {
         kprintln!("  {:#014x}-{:#014x} {}", r.base, r.end(), r.kind.name());
@@ -98,7 +106,7 @@ fn print_boot_info(h: &Handoff) {
         rsdp => kprintln!("acpi: RSDP at {rsdp:#x}"),
     }
     kprintln!("cpu: hypervisor {}", arch::hypervisor());
-    kprintln!("cmdline: {:?}", h.cmdline());
+    kprintln!("cmdline: {:?}", boot.cmdline());
 }
 
 #[panic_handler]

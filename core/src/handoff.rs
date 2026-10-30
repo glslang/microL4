@@ -17,6 +17,11 @@ pub const KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 /// `PHYS_MAP_BASE + p` for every `p < Handoff::phys_map_size`.
 pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 
+/// The kernel's own direct map, from M3, covers
+/// `[0, min(phys_map_size, DIRECT_MAP_MAX))`, and the loader allocates below
+/// it (ADR 0006).
+pub const DIRECT_MAP_MAX: u64 = 64 << 30;
+
 /// `"uL4BOOT\0"` read as a little-endian `u64`.
 pub const HANDOFF_MAGIC: u64 = u64::from_le_bytes(*b"uL4BOOT\0");
 
@@ -95,6 +100,44 @@ impl Handoff {
         Ok(())
     }
 
+    /// The end of the kernel's own direct map (M3):
+    /// `min(phys_map_size, DIRECT_MAP_MAX)`.
+    pub fn direct_map_end(&self) -> u64 {
+        self.phys_map_size.min(DIRECT_MAP_MAX)
+    }
+
+    /// Checks what the kernel needs before it copies the handoff and drops
+    /// the loader's tables (ADR 0006): the kernel image, this handoff, at
+    /// `handoff_phys`, and its memory map all end inside the kernel's direct
+    /// map, and the map has at most `max_regions` entries. Call after
+    /// [`Handoff::validate`].
+    pub fn check_kernel_bounds(
+        &self,
+        handoff_phys: u64,
+        max_regions: usize,
+    ) -> Result<(), HandoffError> {
+        if self.memory_map_len > max_regions as u64 {
+            return Err(HandoffError::TooManyRegions(self.memory_map_len));
+        }
+        let end = self.direct_map_end();
+        let map_len = self.memory_map_len * core::mem::size_of::<MemoryRegion>() as u64;
+        for (what, base, len) in [
+            ("kernel image", self.kernel_phys_base, self.kernel_size),
+            (
+                "handoff",
+                handoff_phys,
+                core::mem::size_of::<Handoff>() as u64,
+            ),
+            ("memory map", self.memory_map, map_len),
+        ] {
+            match base.checked_add(len) {
+                Some(e) if e <= end => {}
+                _ => return Err(HandoffError::OutsideDirectMap(what)),
+            }
+        }
+        Ok(())
+    }
+
     /// The command line, or `""` if it is not valid UTF-8.
     pub fn cmdline(&self) -> &str {
         let len = (self.cmdline_len as usize).min(CMDLINE_MAX);
@@ -111,6 +154,10 @@ pub enum HandoffError {
     BadCmdline,
     MisalignedMemoryMap,
     MemoryMapOutOfRange,
+    /// More memory-map entries than the kernel copies.
+    TooManyRegions(u64),
+    /// What ends at or above the kernel's direct map.
+    OutsideDirectMap(&'static str),
 }
 
 impl fmt::Display for HandoffError {
@@ -122,6 +169,10 @@ impl fmt::Display for HandoffError {
             Self::BadCmdline => f.write_str("command line longer than its buffer"),
             Self::MisalignedMemoryMap => f.write_str("memory map is misaligned"),
             Self::MemoryMapOutOfRange => f.write_str("memory map outside the direct map"),
+            Self::TooManyRegions(n) => write!(f, "{n} memory-map entries, too many"),
+            Self::OutsideDirectMap(what) => {
+                write!(f, "{what} ends above the kernel's direct map")
+            }
         }
     }
 }
@@ -378,6 +429,48 @@ mod tests {
         let mut h = valid_handoff();
         h.memory_map_len = u64::MAX / 2;
         assert_eq!(h.validate(), Err(HandoffError::MemoryMapOutOfRange));
+    }
+
+    #[test]
+    fn kernel_bounds_stop_at_the_kernels_direct_map() {
+        let h = valid_handoff();
+        assert_eq!(h.direct_map_end(), 4 << 30);
+        assert_eq!(h.check_kernel_bounds(0x30_0000, 256), Ok(()));
+        assert_eq!(
+            h.check_kernel_bounds(0x30_0000, 9),
+            Err(HandoffError::TooManyRegions(10))
+        );
+
+        // A big machine: the loader maps 512 GiB, the kernel only 64 GiB.
+        let mut h = valid_handoff();
+        h.phys_map_size = 512 << 30;
+        assert_eq!(h.direct_map_end(), DIRECT_MAP_MAX);
+        h.kernel_phys_base = DIRECT_MAP_MAX - h.kernel_size;
+        assert_eq!(h.check_kernel_bounds(0x30_0000, 256), Ok(()));
+        h.kernel_phys_base += 0x1000;
+        assert_eq!(
+            h.check_kernel_bounds(0x30_0000, 256),
+            Err(HandoffError::OutsideDirectMap("kernel image"))
+        );
+
+        let h = valid_handoff();
+        let last = (4 << 30) - size_of::<Handoff>() as u64;
+        assert_eq!(h.check_kernel_bounds(last, 256), Ok(()));
+        assert_eq!(
+            h.check_kernel_bounds(last + 8, 256),
+            Err(HandoffError::OutsideDirectMap("handoff"))
+        );
+        assert_eq!(
+            h.check_kernel_bounds(u64::MAX - 8, 256),
+            Err(HandoffError::OutsideDirectMap("handoff"))
+        );
+
+        let mut h = valid_handoff();
+        h.memory_map = (4 << 30) - 10 * size_of::<MemoryRegion>() as u64 + 8;
+        assert_eq!(
+            h.check_kernel_bounds(0x30_0000, 256),
+            Err(HandoffError::OutsideDirectMap("memory map"))
+        );
     }
 
     #[test]

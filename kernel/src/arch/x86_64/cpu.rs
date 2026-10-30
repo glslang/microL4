@@ -1,10 +1,25 @@
-//! CPUID and hypervisor detection.
+//! CPUID, control registers, MSRs, the CPU feature check and hypervisor
+//! detection.
 
 use core::arch::asm;
 use core::fmt;
 
+use l4core::cpu::{Cpuid, Meltdown};
+
+/// `IA32_ARCH_CAPABILITIES`; bit 0 is `RDCL_NO` (`docs/design.md`, H14).
+const IA32_ARCH_CAPABILITIES: u32 = 0x10A;
+/// `IA32_APIC_BASE`.
+pub const IA32_APIC_BASE: u32 = 0x1B;
+/// `IA32_EFER`.
+pub const IA32_EFER: u32 = 0xC000_0080;
+
 /// Runs CPUID for `leaf`, sub-leaf 0, and returns `(eax, ebx, ecx, edx)`.
-fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
+pub fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
+    cpuid_count(leaf, 0)
+}
+
+/// Runs CPUID for `leaf` and `subleaf` and returns `(eax, ebx, ecx, edx)`.
+pub fn cpuid_count(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let (eax, ebx, ecx, edx);
     // SAFETY: CPUID only reads processor identification; it touches no
     // memory. LLVM reserves rbx, so it is saved and restored by hand.
@@ -15,12 +30,157 @@ fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
             "xchg {saved:r}, rbx",
             saved = out(reg) ebx,
             inout("eax") leaf => eax,
-            inout("ecx") 0u32 => ecx,
+            inout("ecx") subleaf => ecx,
             out("edx") edx,
             options(nomem, nostack, preserves_flags),
         );
     }
     (eax, ebx, ecx, edx)
+}
+
+/// The CPUID words the feature check reads; a leaf above the CPU's maximum
+/// reads as zero.
+pub fn cpuid_features() -> Cpuid {
+    let (max_basic, ..) = cpuid(0);
+    let (max_ext, ..) = cpuid(0x8000_0000);
+    let (_, _, leaf1_ecx, leaf1_edx) = cpuid(1);
+    let (_, leaf7_ebx, leaf7_ecx, leaf7_edx) = if max_basic >= 7 {
+        cpuid_count(7, 0)
+    } else {
+        (0, 0, 0, 0)
+    };
+    let ext1_edx = if max_ext >= 0x8000_0001 {
+        cpuid(0x8000_0001).3
+    } else {
+        0
+    };
+    Cpuid {
+        leaf1_ecx,
+        leaf1_edx,
+        leaf7_ebx,
+        leaf7_ecx,
+        leaf7_edx,
+        ext1_edx,
+    }
+}
+
+/// Step 2 of the M3 boot sequence, before any CPU or firmware state
+/// changes: refuses to boot, with one `CPU lacks` line, on a CPU without a
+/// required feature (`docs/design.md`, CPU features). Prints the features
+/// found.
+pub fn check_cpu() -> Cpuid {
+    let c = cpuid_features();
+    if let Some(missing) = c.lacks() {
+        panic!("CPU lacks {missing}");
+    }
+    kprintln!("cpu: features {}", c.present());
+    c
+}
+
+/// Prints the M3 boot-summary lines for the CPU state the kernel booted
+/// with: CR0, CR4, EFER, `IA32_APIC_BASE` and Meltdown exposure.
+pub fn print_cpu_state() {
+    kprintln!(
+        "cpu: CR0 {:#x} CR4 {:#x} EFER {:#x}",
+        read_cr0(),
+        read_cr4(),
+        read_msr(IA32_EFER)
+    );
+    kprintln!("cpu: IA32_APIC_BASE {:#x}", read_msr(IA32_APIC_BASE));
+    let caps = cpuid_features()
+        .has_arch_capabilities()
+        .then(|| read_msr(IA32_ARCH_CAPABILITIES));
+    kprintln!(
+        "cpu: meltdown: {}",
+        Meltdown::from_arch_capabilities(caps).name()
+    );
+}
+
+/// Reads CR0.
+pub fn read_cr0() -> u64 {
+    let v;
+    // SAFETY: reading CR0 has no side effects.
+    unsafe { asm!("mov {}, cr0", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// Reads CR2, the address of the last page fault.
+#[expect(
+    dead_code,
+    reason = "M3's descriptor tables, page tables and devices use it"
+)]
+pub fn read_cr2() -> u64 {
+    let v;
+    // SAFETY: reading CR2 has no side effects.
+    unsafe { asm!("mov {}, cr2", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// Reads CR3.
+#[expect(
+    dead_code,
+    reason = "M3's descriptor tables, page tables and devices use it"
+)]
+pub fn read_cr3() -> u64 {
+    let v;
+    // SAFETY: reading CR3 has no side effects.
+    unsafe { asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// Reads CR4.
+pub fn read_cr4() -> u64 {
+    let v;
+    // SAFETY: reading CR4 has no side effects.
+    unsafe { asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// Writes CR4.
+///
+/// # Safety
+///
+/// The new value must keep every mapping the kernel relies on valid, and
+/// may set only features the CPU has.
+#[expect(
+    dead_code,
+    reason = "M3's descriptor tables, page tables and devices use it"
+)]
+pub unsafe fn write_cr4(v: u64) {
+    // SAFETY: the caller vouches for the value. The write can change how
+    // memory is translated, so it is not `nomem`.
+    unsafe { asm!("mov cr4, {}", in(reg) v, options(nostack, preserves_flags)) };
+}
+
+/// Reads model-specific register `msr`. An MSR the CPU lacks raises #GP,
+/// which the kernel reports as a fatal fault.
+pub fn read_msr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    // SAFETY: `rdmsr` reads a register and touches no memory.
+    unsafe {
+        asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
+            options(nomem, nostack, preserves_flags));
+    }
+    (hi as u64) << 32 | lo as u64
+}
+
+/// Writes model-specific register `msr`.
+///
+/// # Safety
+///
+/// The MSR must exist, and the value must leave the CPU in a state the
+/// kernel's memory safety survives.
+#[expect(
+    dead_code,
+    reason = "M3's descriptor tables, page tables and devices use it"
+)]
+pub unsafe fn write_msr(msr: u32, v: u64) {
+    // SAFETY: the caller vouches for the register and value. Some MSRs
+    // change how memory is accessed, so this is not `nomem`.
+    unsafe {
+        asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32,
+            options(nostack, preserves_flags));
+    }
 }
 
 /// The hypervisor we run under, from CPUID leaf 0x4000_0000.

@@ -1,8 +1,9 @@
 //! Kernel debug output on COM1.
 //!
-//! There is one core and interrupts stay off in M0, so the writer needs no
-//! lock. M3 turns interrupts on and must add one. M7 compiles this out of
-//! release kernels, once the `uart` server owns COM1.
+//! There is one core, and kernel code runs with interrupts off except in the
+//! idle loop, which prints nothing, so the writer needs no lock. An NMI or
+//! machine-check panic can split a line; both end the run. M7 compiles this
+//! out of release kernels, once the `uart` server owns COM1.
 
 use core::fmt::{self, Write};
 
