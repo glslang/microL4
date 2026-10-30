@@ -188,7 +188,11 @@ fn retype_errors_in_order() {
         err(SyscallError::DeleteFirst)
     );
     assert_eq!(
-        e(&mut w, args(ObjectType::Untyped, UT_BITS as u64 + 1, 2, 1), root),
+        e(
+            &mut w,
+            args(ObjectType::Untyped, UT_BITS as u64 + 1, 2, 1),
+            root
+        ),
         err(SyscallError::NotEnoughMemory(1 << UT_BITS))
     );
     // Nothing above changed the untyped or wrote memory.
