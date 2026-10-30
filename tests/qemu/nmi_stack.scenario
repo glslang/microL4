@@ -1,0 +1,15 @@
+# The kernel sends itself an NMI through the local APIC's ICR. The NMI
+# runs on IST2; in this test only, its handler recurses until IST2 runs
+# into the unmapped guard page below it. The page fault cannot push its
+# frame there, so the CPU raises a double fault, which runs on IST1 and
+# reports: an IST overflow ends in the #DF report, not a triple fault.
+cmdline: test=nmi_stack
+exit: failure
+expect: microL4 kernel
+expect: nmi_stack: sending an NMI to local APIC 0 through the ICR
+expect: nmi_stack: NMI on IST2; recursing until IST2
+expect: nmi_stack: double fault with CR2
+expect: in IST2's guard page
+expect: KERNEL PANIC at kernel/src/arch/x86_64/trap.rs:
+expect: DF double fault (vector 8) in ring 0
+expect: frame on IST1

@@ -43,7 +43,6 @@ impl<T> StaticCell<T> {
     }
 
     /// The value, if `init` has finished.
-    #[expect(dead_code, reason = "M3's trap handlers read state built at boot")]
     pub fn get(&'static self) -> Option<&'static T> {
         if self.state.load(Ordering::Acquire) == READY {
             // SAFETY: READY is stored only after `init` wrote the value, and

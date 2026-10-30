@@ -1,0 +1,16 @@
+# Without an HPET, and without Hyper-V's reference counter, the kernel has
+# nothing to calibrate the local APIC timer against and panics rather than
+# guess a rate (docs/design.md, "The timer"). Up to that point it boots:
+# the ACPI summary says there is no HPET and the rest is unchanged.
+cmdline: test=hello
+qemu_args: -machine hpet=off
+exit: failure
+expect: acpi: MADT flags 0x1 PCAT_COMPAT
+expect: acpi: COM1 is ISA IRQ 4 -> GSI 4, edge, active high
+expect: acpi: no HPET
+expect: acpi: ECAM segment 0, buses 0-255, at 0xe0000000
+expect: hyperv: no TLFS interface
+expect: apic: xAPIC ID 0
+expect: ioapic: 0:
+expect: KERNEL PANIC at kernel/src/arch/x86_64/timer.rs:
+expect: no timer reference

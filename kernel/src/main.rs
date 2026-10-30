@@ -76,6 +76,12 @@ fn kmain(handoff_phys: u64) -> ! {
         Some("idle_irq") => arch::idle_self_test(),
         Some("paging") => arch::test_paging(boot),
         Some("lowmem") => arch::test_lowmem(),
+        // The interrupt controllers and the timer (M3).
+        Some("ticks") => {
+            arch::start_ticks_test();
+            arch::idle()
+        }
+        Some("nmi_stack") => arch::test_nmi_stack(),
         Some("stack_overflow") => {
             kprintln!("recursing until the kernel stack overflows");
             let depth = overflow_stack(0);
@@ -129,10 +135,6 @@ fn print_boot_info(boot: &BootState) {
             fb.format.name(),
             fb.base
         );
-    }
-    match h.rsdp {
-        0 => kprintln!("acpi: no RSDP"),
-        rsdp => kprintln!("acpi: RSDP at {rsdp:#x}"),
     }
     kprintln!("cpu: hypervisor {}", arch::hypervisor());
     kprintln!("cmdline: {:?}", boot.cmdline());

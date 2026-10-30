@@ -17,6 +17,8 @@ extern crate std;
 extern crate alloc;
 
 pub mod acpi;
+pub mod apic;
+pub mod calibration;
 pub mod cap;
 pub mod cdt;
 pub mod cmdline;
@@ -26,6 +28,8 @@ pub mod cspace;
 pub mod elf;
 pub mod error;
 pub mod handoff;
+pub mod hpet;
+pub mod hyperv;
 pub mod kernel;
 pub mod slot;
 pub mod timer;
