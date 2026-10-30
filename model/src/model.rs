@@ -21,10 +21,12 @@
 //! `docs/design.md`, "Deletion and finalisation", which is seL4's
 //! `cteDelete`, `finaliseSlot`, `reduceZombie` and `capSwapForDelete`
 //! (`src/object/cnode.c`), keeping its recursion: here the recursion is the
-//! specification, not a risk. It departs from seL4 where `l4core` does: a
-//! revoke's deletion ends as soon as a restarted revoke could no longer
-//! find it (`Model::finalise_slot`), so that no outcome depends on where a
-//! preemption point fell.
+//! specification, not a risk. It departs from seL4 where `l4core` does, in
+//! one cycle case (`Model::finalise_slot`), so that the outcome cannot
+//! depend on where a preemption point fell. A partial revoke, one whose work
+//! destroys a CNode on its slot's lookup path (`docs/design.md`, "Slot
+//! operations"), is atomic here too: the model gives its unpreempted
+//! outcome, which the kernel's need not be (see `World::apply`).
 //!
 //! The model records the hook calls the kernel would see, as
 //! [`l4core::testing::Event`] values, and answers `finalise` as
@@ -95,13 +97,6 @@ pub struct Entry {
     /// Unique per inserted capability and kept through moves, swaps and the
     /// change to a Zombie, so a step can follow one capability.
     pub uid: u64,
-}
-
-/// A revoke in progress: its slot, and the capability it revokes.
-#[derive(Clone, Copy, Debug)]
-struct Anchor {
-    at: SlotAddr,
-    uid: u64,
 }
 
 /// A slot address that no real slot has (fake memory starts far above it),
@@ -648,6 +643,25 @@ impl Model {
             .map_err(|DepthExceeded| SyscallError::IllegalOperation)
     }
 
+    /// Turns the last capability to a CNode, in `at`, into the CNode's Zombie
+    /// with `slots_left` slots left to clear, keeping its entry, as step 1 of
+    /// a deletion and the steps that cleared the slots above would. No
+    /// operation of the model leaves this outside the CNode's own slot 0; only
+    /// a revoke cut short does, in the kernel. For scenarios that start there.
+    pub fn leave_zombie(&mut self, at: SlotAddr, slots_left: u64) {
+        let cap = self.cap(at);
+        assert!(
+            cap.cap_type() == CapType::CNode && self.is_final(at),
+            "not the last capability to a CNode"
+        );
+        assert!(
+            (slots_left..1u64 << cap.radix()).all(|i| self.cap(slot_at(cap.object(), i)).is_null()),
+            "the slots past the Zombie's count are not empty"
+        );
+        self.slots.get_mut(&at).unwrap().cap =
+            Cap::zombie(cap.object(), cap.size_bits(), slots_left, false);
+    }
+
     /// Writes the mapping record of the Frame or paging structure in `at`, as
     /// `l4core::vspace` will when it maps one (M5).
     pub fn set_mapping(&mut self, at: SlotAddr, record: u64) {
@@ -722,28 +736,24 @@ impl Model {
 
     /// `CNode_Delete`, after slot lookup: an exposed deletion.
     pub fn delete(&mut self, at: SlotAddr) {
-        self.cte_delete(at, true, None);
+        self.cte_delete(at, true);
     }
 
-    /// `CNode_Revoke`, after slot lookup: deletes the first remaining
-    /// descendant, in preorder, until there is none, re-reading `at` each
-    /// time. Each deletion goes on only while `at` holds the capability it
-    /// held when the deletion began (see [`Model::finalise_slot`]).
+    /// `CNode_Revoke`, after slot lookup: seL4's `cteRevoke`. Deletes the
+    /// first remaining descendant, in preorder, until there is none,
+    /// re-reading `at` each time, so it stops if a deletion took the revoked
+    /// capability with it.
     pub fn revoke(&mut self, at: SlotAddr) {
         while let Some(&first) = self.slots.get(&at).and_then(|e| e.children.first()) {
-            let anchor = Anchor {
-                at,
-                uid: self.slots[&at].uid,
-            };
-            self.cte_delete(first, true, Some(anchor));
+            self.cte_delete(first, true);
         }
     }
 
     /// seL4's `cteDelete`, which empties the slot if `exposed || success`;
-    /// here only if `success`, which differs only when a revoke's deletion
-    /// ends early (see [`Model::finalise_slot`]).
-    fn cte_delete(&mut self, at: SlotAddr, exposed: bool, anchor: Option<Anchor>) {
-        let (success, cleanup) = self.finalise_slot(at, exposed, anchor);
+    /// here only if `success`, which differs only in the cycle case of
+    /// [`Model::finalise_slot`].
+    fn cte_delete(&mut self, at: SlotAddr, exposed: bool) {
+        let (success, cleanup) = self.finalise_slot(at, exposed);
         if success {
             self.empty_slot(at, cleanup);
         }
@@ -751,24 +761,14 @@ impl Model {
 
     /// seL4's `finaliseSlot`: finalises the capability in `at` until the slot
     /// can be emptied. `false` when a nested deletion leaves a Zombie in its
-    /// own container's slot 0, or when a revoke's deletion ends early.
+    /// own container's slot 0, and in the cycle case.
     ///
-    /// A revoke's deletion (`anchor` set) goes on only while the revoke's
-    /// slot holds the revoked capability and `at` the capability, now a
-    /// Zombie, that the deletion began with: what a restarted revoke would
-    /// find. A step that deletes the revoke's slot, or swaps the revoked
-    /// capability out of it, or a cycle of containers that swaps another
-    /// container's Zombie into `at`, ends the deletion there, `at`
-    /// unemptied (`docs/design.md`, "Slot operations" and "Deletion and
-    /// finalisation"). seL4 goes on, so its outcome depends on whether a
-    /// preemption point intervenes.
-    fn finalise_slot(
-        &mut self,
-        at: SlotAddr,
-        immediate: bool,
-        anchor: Option<Anchor>,
-    ) -> (bool, Option<Cap>) {
-        let started = self.slots.get(&at).map(|e| e.uid);
+    /// The cycle case (`docs/design.md`, "Deletion and finalisation", step
+    /// 3): when a step of an exposed deletion leaves `at` holding the Zombie
+    /// of a container other than the one the deletion is clearing, the
+    /// deletion ends there and `at` keeps that Zombie, however few slots it
+    /// has left to clear. seL4 goes on to clear that container.
+    fn finalise_slot(&mut self, at: SlotAddr, immediate: bool) -> (bool, Option<Cap>) {
         loop {
             let cap = self.cap(at);
             if cap.is_null() {
@@ -784,13 +784,13 @@ impl Model {
             if !immediate && cyclic(rest, at) {
                 return (false, cleanup);
             }
-            if let Some(a) = anchor {
-                let revoked = self.slots.get(&a.at).map(|e| e.uid) == Some(a.uid);
-                if !revoked || self.slots[&at].uid != started.unwrap() {
-                    return (false, None);
-                }
-            }
             self.reduce_zombie(at, immediate);
+            let now = self.cap(at);
+            let other = now.cap_type() == CapType::Zombie
+                && (now.object(), now.zombie_is_tcb()) != (rest.object(), rest.zombie_is_tcb());
+            if immediate && other {
+                return (false, None);
+            }
         }
     }
 
@@ -839,8 +839,8 @@ impl Model {
     ///
     /// When the container being cleared held the last capability to a
     /// container D whose slot 0 is `at`, the exposed step leaves D's Zombie
-    /// in `at` (seL4's "self-referential" Zombie): a deletion goes on to
-    /// clear D, a revoke's ends ([`Model::finalise_slot`]).
+    /// in `at` (seL4's "self-referential" Zombie), and the deletion ends
+    /// ([`Model::finalise_slot`]).
     fn reduce_zombie(&mut self, at: SlotAddr, immediate: bool) {
         let z = self.cap(at);
         assert_eq!(z.cap_type(), CapType::Zombie);
@@ -850,7 +850,7 @@ impl Model {
         assert!(n > 0, "reducing a finished Zombie");
         if immediate {
             let end = slot_at(ptr, n - 1);
-            self.cte_delete(end, false, None);
+            self.cte_delete(end, false);
             let now = self.cap(at);
             match now.cap_type() {
                 CapType::Null => {}

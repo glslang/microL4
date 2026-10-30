@@ -31,7 +31,7 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 - [x] A fresh M3 reviewer found no kernel bug. It asked for the Hyper-V check image, a null LDT, PCIDE cleared, and a correction to the #DF-stack overflow text. All of these are done, and it signed off.
 - [x] The M3 Hyper-V check passed on the owner's host (2026-10-30, CI's `microl4-vhdx-m3-check`): ten ticks at 100.002 Hz against the reference counter and `TEST PASS`; the results are under "Hyper-V checks".
   - Its ACPI tables are host-tested as `core/tests/acpi/hyperv-gen2.dump`, without the 123 KB DSDT the parser never reads. The test checks no HPET, no MCFG, one I/O APIC with ID 1, only the IRQ 9 override, COM1 on GSI 4, and ISA IRQ 0 on GSI 0, unlike q35. The corrupted-copy test covers these tables too.
-- [x] An M2 bug found during M3, fixed in PR #4: a revoke whose own slot its work destroyed ended differently depending on where preemption fell. The first shape seen was two CNodes holding each other's only capability. See "Decisions" below.
+- [x] An M2 bug found during M3, fixed in PR #4: a revoke through two CNodes that held each other's only capability ended differently depending on where preemption fell; the cycle stop fixes it. A second shape the random test found, a revoke destroying the CNode that holds its own slot, is seL4's partial revoke, preemption-dependent as in seL4. See "Decisions" below.
 
 ## Next
 - [ ] M4 · Kernel objects and BootInfo:
@@ -51,8 +51,8 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 - **`int1` (`0xF1`):** in ring 0 it raises #UD on QEMU 8.2 TCG, not #DB. Recheck the design's `int1` claims on real hardware or Hyper-V in M10, brief 5.
 - **HPET above MAXPHYADDR:** an HPET base under 2^52 but above the CPU's MAXPHYADDR would fault when mapped instead of counting as no HPET. No known firmware does this.
 - **Unchecked hardware facts:** H10 (MTRR and PAT combination) is checked in M8, H11 (UMIP) in M5.
-- A revoke that destroys the CNode holding its own slot stops after that step, whether or not it is preempted. Under a boot untyped, a Zombie left in the CNode's own slot 0 is never finished; that region is dead anyway (`docs/design.md`, Slot operations).
-- The model harness covers user operations on a Zombie only through hand-written tests.
+- A partial revoke, one whose work destroys a CNode on its slot's lookup path, ends where preemption falls, as in seL4: the restart fails its lookup and the work left stays undone. Delete finishes a Zombie it leaves in a slot the user can name, and a revoke of an ancestor untyped the rest; under a boot untyped that region is dead (`docs/design.md`, Slot operations). A Delete named through a path that runs through its own slot can be cut short the same way. The harness carries a partial revoke's leftover into later steps only when deleting its Zombies reaches the model's state; otherwise it checks the leftover and replays the revoke unpreempted.
+- The model harness covers user operations on a Zombie only through hand-written tests and the Deletes that finish a revoke cut short.
 - `Kernel::finalise` runs with `last = true` for every deletion of an Untyped, IRQControl, IOPortControl or Hypervisor capability; the kernel's hook must ignore those (M4).
 - The optional `cargo-fuzz` target over the M2 sequences is not built.
 - Accepted risks, recorded for the M10 red team:
@@ -63,10 +63,10 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 
 ## Decisions this milestone
 - No new ADR: M3 follows `docs/design.md` and ADRs 0004 to 0008, 0014, 0019 and 0020, and `docs/abi.md` is unchanged.
-- **A revoke that destroys its own slot stops after that step, preempted or not; this departs from seL4.** seL4 goes on with the deletion unless preempted. A restart cannot find the rest of that work, so seL4's outcome depends on where the interrupt falls.
-  - In microL4 the half-cleared container's Zombie stays where its last capability was, or in its own slot 0, and Delete or a revoke of its untyped's parent finishes it. Delete itself is unchanged from seL4.
-  - The model's random test found two shapes of this bug in turn: the cycle, then a CNode holding a copy of itself.
-  - The fix replaces the first, cycle-only special case with one general rule, checked over 1.6 million random cases (`docs/design.md`, Slot operations, Deletion and finalisation, and its seL4 table).
+- **Deletion and revoke are seL4's but for one cycle stop.** When a deletion's step leaves another container's Zombie in the slot being deleted, because two CNodes hold each other's last capability, the deletion ends there, before checking whether that Zombie is removable. Only a revoke gets there, from a slot that stays reachable, so its outcome must not depend on preemption; seL4's does (`docs/design.md`, Deletion and finalisation, step 3, and its seL4 table).
+  - A revoke whose work destroys a CNode on its slot's lookup path is seL4's partial revoke. The kernel restarts a call by looking its slot up again, which then fails, so the outcome depends on where preemption fell; what is left is safe and finishable (`docs/design.md`, Slot operations).
+  - 2c60870's rule, that a revoke stops after any step that destroys its own slot, preempted or not, is withdrawn after its review: the restarted lookup fails from the first such step, so the rule bought nothing, and it left containers part-cleared without preemption. The reviewer also found its `removable` check ran before the cycle check, a regression from 5211e83. Preemption points are back where seL4's `finaliseSlot` has them.
+  - The model stays atomic and decides the cycle stop from the specification. The harness restarts Delete and Revoke by looking their slots up again. For a revoke cut short it checks what is left, deletes the leftover Zombies, and compares; where Zombies were not all the work left (the 266cf27d seed is one), it undoes the revoke and runs it again unpreempted.
 - **The boot-sequence order** is now written in `docs/design.md`:
   - EFER.NXE and CR0.WP are checked before the PAT is written;
   - Hyper-V's leftovers come first in step 5, since its time-unhalted timer can raise an NMI;

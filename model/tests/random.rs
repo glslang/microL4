@@ -185,7 +185,8 @@ fn pick(w: &World, reach: &[SlotAddr], sel: Sel) -> SlotAddr {
 
 /// Runs one generated operation: resolves it into actions and applies each.
 fn exec(w: &mut World, op: &Op, schedule: &[u8]) -> Result<(), String> {
-    let reach = w.reachable();
+    let paths = w.paths(w.root);
+    let reach: Vec<SlotAddr> = paths.keys().copied().collect();
     let p = |sel| pick(w, &reach, sel);
     let action = match *op {
         Op::Copy { src, dst, rights } => Action::Copy {
@@ -231,7 +232,15 @@ fn exec(w: &mut World, op: &Op, schedule: &[u8]) -> Result<(), String> {
             }
         }
         Op::Delete { slot } => Action::Delete { slot: p(slot) },
-        Op::Revoke { slot } => Action::Revoke { slot: p(slot) },
+        // The kernel restarts a revoke by looking its slot up again, so it
+        // needs a CPtr that names the slot.
+        Op::Revoke { slot } => {
+            let slot = p(slot);
+            if paths[&slot].is_none() {
+                return Ok(());
+            }
+            Action::Revoke { slot }
+        }
         Op::Retype {
             untyped,
             dest,
@@ -578,7 +587,8 @@ fn coverage_report() {
     let mut tally: BTreeMap<String, u64> = BTreeMap::new();
     let (mut steps, mut preempted, mut zombie_moves, mut max_slots, mut max_depth) =
         (0u64, 0u64, 0u64, 0usize, 0u32);
-    let (mut partial, mut detached, mut tcb_deaths) = (0u64, 0u64, 0u64);
+    let (mut partial, mut cut_short, mut replayed) = (0u64, 0u64, 0u64);
+    let (mut detached, mut tcb_deaths) = (0u64, 0u64);
     let n = cases().min(2000);
     for _ in 0..n {
         let (cfg, ops) = strategy.new_tree(&mut runner).unwrap().current();
@@ -607,6 +617,8 @@ fn coverage_report() {
         }
         steps += w.steps;
         partial += w.partial_revokes;
+        cut_short += w.cut_short;
+        replayed += w.replayed;
         detached +=
             w.m.entries()
                 .values()
@@ -618,8 +630,9 @@ fn coverage_report() {
     }
     println!(
         "{n} cases, {steps} steps, {preempted} preemptions, {zombie_moves} Zombie moves (nested deletions), \
-         {detached} detached containers left at the end, {tcb_deaths} TCBs finalised, {partial} partial revokes, \
-         at most {max_slots} reachable slots, depth up to {max_depth}"
+         {detached} detached containers left at the end, {tcb_deaths} TCBs finalised, {partial} partial revokes \
+         ({cut_short} cut short, {replayed} of them run again), at most {max_slots} reachable slots, \
+         depth up to {max_depth}"
     );
     for (k, v) in tally {
         println!("{v:>8}  {k}");
