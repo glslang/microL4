@@ -49,6 +49,8 @@ pub fn clippy() -> Result<()> {
             "--package",
             "l4core",
             "--package",
+            "l4model",
+            "--package",
             "xtask",
             "--all-targets",
             "--",
