@@ -1,21 +1,32 @@
 # Status
-Current milestone: M1 · Design and ABI, complete: the done-when test passed and the fresh reviewers signed off on 2026-10-29. Next: M2 · Capability core and model and M3 · Paging and interrupts, which can run in parallel.
+Current milestone: M2 · Capability core and model. The done-when test passed on 2026-10-30; the fresh reviewer is re-checking the fixes to its four points before signing off. Next: M3 · Paging and interrupts (it can run in parallel with M2), then M4 · Kernel objects and BootInfo, which needs both.
 
 ## Done
 - [x] M0 · Bootstrap and tooling (PR #1, merged 2026-10-29)
-- [x] Shared ABI decisions fixed first, so six areas could be designed in parallel: seL4's x86_64 registers, `MessageInfo` and IPC buffer, with microL4's own system call numbers, object type numbers and invocation labels (ADR 0022)
-- [x] `docs/design.md`: one section per row of PLAN.md's architecture table, plus TCBs, faults, address spaces, I/O ports, ACPI and the timer. Each section has its invariants, each naming its milestone, and a comparison with seL4 listing every divergence with its reason
-- [x] Six designer subagents wrote the areas (capabilities, IPC, threads, address spaces, interrupts and I/O, boot and ABI); a fresh spec checker per area compared each with the seL4 manual's source and kernel code (commit `7a852638f502`), made 143 fixes in place and raised 24 must-fix items, all settled
-- [x] `docs/abi.md` v0: system calls and registers, `MessageInfo`, IPC buffer, capability pointers and lookup, errors and detail words, object types and sizes, every invocation's label, arguments, results and errors, fault messages, BootInfo, the initial CSpace, root-task entry state, debug calls, and the boot handoff moved from `docs/boot.md`
-- [x] ADRs 0004 to 0023 and a list of open questions, each with its default and the milestone that answers it (`docs/design.md`, Open questions)
-- [x] Fresh review against the done-when test by three reviewers, one per group of areas. They found 7 blocking contradictions, 18 should-fix items and 39 nits; all were fixed, and each reviewer re-checked its items and signed off. The link check passes, and all 189 invariants name their milestone
+- [x] M1 · Design and ABI (PR #2, merged 2026-10-30): `docs/design.md`, `docs/abi.md` v0 and ADRs 0004 to 0023, checked against seL4 by a spec checker per area and signed off by three fresh reviewers
+- [x] M2 capability core in `l4core` (PR #3), all safe `no_std` code:
+  - `cap`: the 16-byte capability, object types and sizes, rights.
+  - `slot`: the 32-byte slot and `SlotMemory`.
+  - `cdt`: the depth-and-`low` derivation list of ADR 0012, with a `check_slot` invariant check.
+  - `cspace`: guarded radix lookup.
+  - `cnode`: derive, Copy, Mint, Move, Mutate, Rotate, Delete and Revoke, with seL4's Zombie deletion ported to loops with preemption points.
+  - `untyped`: retype with the watermark rules and a preemptible top-down reset.
+  - `kernel`: the hooks the kernel implements.
+  - `testing` (a feature): fake memory and a recording kernel for tests.
+- [x] `model/` (`l4model`): a reference model of plain maps and an ordered derivation forest. A test writer built it from the specification, reading only the core's public API. A proptest harness runs each random sequence on both. After every step, and at every injected preemption, it compares results, every slot, parents, finality, children and hooks, and checks the invariants. Six self-tests show it catches deliberate corruption. `cargo test` runs 10,000 cases in about 16 s; a 100,000-case soak also passed. It found no bug in the core.
+- [x] Miri clean on `l4core`. Under Miri it skips the 4,095-deep chain test and the reviewer's checker tests, which scan all memory after every call, to save time.
+- [x] A fresh reviewer failed to hand-write a sequence that breaks an invariant. Its checking kernel follows every capability through every slot write and hook against a plain parent map. Before it was trusted, it caught six bugs planted one at a time. Eleven targeted attacks held, each with preemption at every point and other calls before the restart, as did about 7,000 seeds of a random explorer and a lookup fuzzer. It raised four disagreements between code and specification, all settled below.
 
 ## Next
-- [ ] Merge the M1 PR, then start M2 and M3 (two sessions can run them in parallel)
-- [ ] M2 · Capability core and model, from `docs/design.md` Kernel objects to Derivation tracking: the 32-byte slot, the depth-and-`low` derivation list (ADR 0012), copy, mint, move, mutate, rotate, delete, revoke, Zombies, untyped retype, the `moved` hook for paging back-references
 - [ ] M3 · Paging and interrupts. First, before any feature that needs them: xtask passes `-cpu max,la57=off` and scenarios gain a `qemu_args:` key; the loader allocates below 64 GiB (ADR 0006); `tools/hyperv/New-L4Vm.ps1` turns processor compatibility mode off; the CPU feature check covers XSAVE too and prints one `CPU lacks` line naming every missing feature; the boot summary prints the CPUID features the kernel requires, `IA32_APIC_BASE` and the Meltdown line (XCR0 and the XSAVE size from M5)
+- [ ] M4 · Kernel objects and BootInfo: implement `SlotMemory` and `Kernel` in `kernel/src/arch/` over the direct map; decode the CNode and Untyped invocations around `l4core` (slot lookup, including `Untyped_Retype`'s `node_depth` 0); the self-test that retypes, revokes and retypes again
 
 ## Open issues
+- A revoke that destroys the CNode holding its own slot deletes the revoked capability and stops, so its later descendants survive. If it is preempted inside that destruction, the CNode's Zombie is left, partly cleared, in a slot the user can name, until Delete or a revoke of its untyped finishes it. seL4 does the same; accepted (`docs/design.md`, Slot operations). The M10 red team should know it.
+- The model harness finishes such a Zombie with a Delete before comparing. Otherwise random sequences never leave a Zombie the user can name, so user operations on Zombies are covered only by the hand-written tests in `core/src/tests.rs` and `core/src/review_tests.rs`.
+- `Kernel::finalise` runs with `last = true` on every deletion of an Untyped, IRQControl, IOPortControl or Hypervisor capability, because `same_object` is false for them, as in seL4's `isFinalCapability`. The kernel's hook must ignore those (M4).
+- The `capCyclicZombie` return in `finalise_slot` is unreachable without overlapping objects; it is kept as seL4 has it.
+- The optional `cargo-fuzz` target over the same sequences is not built.
 - QEMU's default CPU model (`qemu64`), which xtask uses today, lacks SMEP, SMAP and XSAVE (from memory). The kernel checks for all three from M3 (ADRs 0004 and 0014), so M3 must change xtask first.
 - The loader's 1:1 map of low memory is still live in the kernel; M3 drops it (`docs/design.md`, Privilege levels).
 - `kprintln!` has no lock. Fine while interrupts are off, and the kernel never enables them outside the idle loop (`docs/design.md`, Kernel execution model).
@@ -26,26 +37,17 @@ Current milestone: M1 · Design and ABI, complete: the done-when test passed and
 - `rustup target add` worked again this session; the `build-std` fallback is kept (ADR 0001).
 
 ## Decisions this milestone
-- ADR 0004: the kernel requires NX, PGE, PAT, SMEP, SMAP and XSAVE, and maps itself from static tables shared by every address space
-- ADR 0005: paging structures keep back-references to the capabilities mapped in them, instead of ASIDs; PCID is off
-- ADR 0006: the direct map covers at most 64 GiB, and the loader allocates below it (amends ADR 0002)
-- ADR 0007: the root task's objects come from a boot region outside every untyped, and a two-page BootInfo describes the rest
-- ADR 0008: kernel entry builds one trap frame on the kernel stack; IST stacks serve only fatal and debug vectors; `sysretq` returns only below 2^47
-- ADR 0009: a capability is a header word and a data word; CNodes and TCBs are destroyed through Zombie capabilities
-- ADR 0010: retype allocates at the watermark while an untyped has children, and resets it only when it has none
-- ADR 0011: CSpaces are seL4's guarded radix trees, with no limit on levels
-- ADR 0012: the derivation list stores a depth and a low-water depth in every slot
-- ADR 0013: fixed-priority round-robin with MCP, one 10 ms tick per slice, woken threads at the queue tail
-- ADR 0014: eager XSAVE of x87 and SSE state only, with XSAVE required
-- ADR 0015: CR4.FSGSBASE stays off; the kernel sets and switches user FS and GS bases
-- ADR 0016: the reply capability is a one-shot capability in the receiver's TCB, made from a master in the caller's TCB
-- ADR 0017: IPC names up to three capabilities, copies at most one, and unwraps capabilities to the sending endpoint
-- ADR 0018: IPC does no priority inheritance; endpoint and notification queues are FIFO
-- ADR 0019: IRQControl names interrupt sources; the kernel allocates vectors, applies MADT overrides, bounds every pin to three interrupts per Ack, and runs the local APIC in xAPIC mode
-- ADR 0020: the Hypervisor capability exposes two hypercalls; SINTs are IRQ handlers; the SynIC pages are boot frames the kernel never touches
-- ADR 0021: all UART code and the debug system calls exist only with the `debug` feature
-- ADR 0022: the ABI keeps seL4's x86_64 registers and layouts, with its own numbers
-- ADR 0023: M5 builds the IPC that fault delivery needs (endpoints, reply capabilities, fault delivery, cancellation); M6 keeps the rest
+- No new ADR: the core follows `docs/design.md` and ADRs 0009 to 0012, and `docs/abi.md` is unchanged.
+- The `Kernel` trait has no `derive` hook; every derivation rule lives in `l4core::cnode::derive`.
+- A TCB's `finalise` hook returns no cleanup, as seL4's thread finalisation does. The trait's doc says so and `core/` asserts it.
+- `l4core`'s `testing` feature gives `model/` the fake memory and recording kernel; the kernel never enables it.
+- Proptest's failure files are git-ignored; minimal cases worth keeping become named tests in `model/tests/scenarios.rs`.
+- `docs/design.md` now states the partial revoke in Slot operations and in three invariants, and corrects the list note on plain copies, which ignored deleted slots.
+- The test writer settled these specification gaps from seL4, and the core already agreed:
+  - Each object a retype makes becomes the untyped's first child, in creation order.
+  - `init_object` runs for every new object.
+  - The reply master carries Grant.
+  - A swap calls `moved` only for non-empty slots, naming the capability as it lands.
 
 ## Hyper-V checks
 - M0 VHDX (7c4609f, 2026-10-29): boots with Secure Boot off; hello and `TEST PASS` on COM1 through the named pipe. It confirms the plan's Hyper-V column for M0:
@@ -54,7 +56,7 @@ Current milestone: M1 · Design and ABI, complete: the done-when test passed and
   - The ACPI RSDP is at `0x1FFFA014`.
   - The memory map has 10 regions, 509 MiB usable of 512 MiB; the highest RAM ends at `0x20000000`, so the direct map is the 4 GiB minimum.
   - Unlike QEMU, the map lists no MMIO or high reserved ranges.
-- M1 is documents only; the next Hyper-V check is at the end of M3.
+- M1 was documents only and M2 is host code only; the next Hyper-V check is at the end of M3.
 
 ## Last session
-2026-10-29: M1 written. The shared ABI decisions came first; six designer subagents then wrote the areas in parallel, a fresh spec checker per area compared each with seL4's manual source, and the lead settled the cross-area questions (39 decisions, now in the documents and ADRs). `sel4.systems` is blocked by the proxy, so the manual was read from its LaTeX source in the seL4 repository. Three fresh reviewers then checked both documents; their blocking findings were contradictions between sections (the M3 boot order, XSAVE milestones, the root TCB's reply master, the M5/M6 split), all fixed. M1 signed off. The next session starts M2 or M3 from the playbook prompt, once the M1 PR is merged.
+2026-10-30: M2. The lead wrote the capability core in `l4core` and its scenario tests, porting seL4's deletion onto the ADR 0012 list. Two agents then worked in parallel, each in its own worktree. A test writer built `model/` and the differential proptest from the specification alone. A fresh reviewer tried to break the core with hand-written sequences and its own checking kernel. Neither found an implementation bug. Their findings were specification gaps: the partial revoke, and a TCB's cleanup contract. Both are now fixed in the docs and the core. The reviewer's sign-off on those fixes is pending.
