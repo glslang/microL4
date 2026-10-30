@@ -22,7 +22,7 @@ pub struct FakeMemory {
 impl FakeMemory {
     /// `len` bytes of zeros from `base`; both multiples of 8.
     pub fn new(base: u64, len: u64) -> FakeMemory {
-        assert!(base % 8 == 0 && len % 8 == 0);
+        assert!(base.is_multiple_of(8) && len.is_multiple_of(8));
         FakeMemory {
             base,
             words: vec![0; (len / 8) as usize],
@@ -45,7 +45,7 @@ impl FakeMemory {
     }
 
     fn index(&self, paddr: u64) -> usize {
-        assert!(paddr % 8 == 0, "unaligned access at {paddr:#x}");
+        assert!(paddr.is_multiple_of(8), "unaligned access at {paddr:#x}");
         let off = paddr
             .checked_sub(self.base)
             .filter(|off| *off < self.len())
@@ -66,7 +66,7 @@ impl FakeMemory {
 
     /// Writes zeros to `len` bytes from `paddr`.
     pub fn zero(&mut self, paddr: u64, len: u64) {
-        assert!(len % 8 == 0);
+        assert!(len.is_multiple_of(8));
         if len == 0 {
             return;
         }
@@ -77,7 +77,7 @@ impl FakeMemory {
 
     /// Whether `len` bytes from `paddr` are all zero.
     pub fn is_zero(&self, paddr: u64, len: u64) -> bool {
-        assert!(len % 8 == 0);
+        assert!(len.is_multiple_of(8));
         if len == 0 {
             return true;
         }

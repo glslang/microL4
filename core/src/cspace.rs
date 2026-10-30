@@ -137,7 +137,7 @@ mod tests {
     fn resolves_through_two_levels() {
         let (mem, root) = setup();
         // guard 1010, index 0011, then index 10: 10 bits.
-        let cptr = 0b1010_0011_10;
+        let cptr = 0b10_1000_1110;
         assert_eq!(
             resolve(&mem, root, cptr, 10),
             Ok((SlotAddr::new(CHILD + 2 * 32).unwrap(), 0))
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn stops_at_a_non_cnode_with_bits_left() {
         let (mem, root) = setup();
-        let cptr = 0b1010_0101_01;
+        let cptr = 0b10_1001_0101;
         assert_eq!(
             resolve(&mem, root, cptr, 10),
             Ok((SlotAddr::new(ROOT + 5 * 32).unwrap(), 2))
@@ -190,7 +190,7 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve(&mem, root, 0b1010_001, 7),
+            resolve(&mem, root, 0b101_0001, 7),
             Err(LookupFailure::DepthMismatch {
                 bits_left: 7,
                 bits_found: 8
@@ -198,7 +198,7 @@ mod tests {
         );
         // The child CNode needs 2 more bits than the 1 left.
         assert_eq!(
-            resolve(&mem, root, 0b1010_0011_1, 9),
+            resolve(&mem, root, 0b1_0100_0111, 9),
             Err(LookupFailure::DepthMismatch {
                 bits_left: 1,
                 bits_found: 2

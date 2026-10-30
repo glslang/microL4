@@ -137,15 +137,15 @@ pub fn check_slot<M: SlotMemory + ?Sized>(mem: &M, slot: SlotAddr) -> Result<(),
     if s.node.low() > s.node.depth() || s.node.depth() > MAX_DERIVATION_DEPTH {
         return Err("low or depth out of range");
     }
-    if let Some(p) = s.node.prev() {
-        if mem.load(p).node.next() != Some(slot) {
-            return Err("prev does not link back");
-        }
+    if let Some(p) = s.node.prev()
+        && mem.load(p).node.next() != Some(slot)
+    {
+        return Err("prev does not link back");
     }
-    if let Some(n) = s.node.next() {
-        if mem.load(n).node.prev() != Some(slot) {
-            return Err("next does not link back");
-        }
+    if let Some(n) = s.node.next()
+        && mem.load(n).node.prev() != Some(slot)
+    {
+        return Err("next does not link back");
     }
     Ok(())
 }
