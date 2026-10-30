@@ -102,15 +102,10 @@ struct Ck {
     mem: FakeMemory,
     preempt_in: Option<u64>,
     preempt_points: u64,
-    /// Return a cleanup capability from every `finalise` call, and check
-    /// that each reaches `after_delete`.
+    /// Return a cleanup capability from every `finalise` call but a TCB's,
+    /// which the `Kernel::finalise` contract keeps at `None`, and check that
+    /// each reaches `after_delete`.
     cleanup_all: bool,
-    /// With `cleanup_all`, also for the last capability to a TCB. Off:
-    /// `finalise_slot` keeps only the cleanup of its last iteration, so the
-    /// one `finalise(tcb, true)` returns, before the Zombie, never reaches
-    /// `after_delete` (seL4's thread finalisation returns none either; the
-    /// `Kernel::finalise` contract does not say so).
-    cleanup_tcb: bool,
     /// Act as the kernel's TCB finalisation (M5): deleting the last
     /// capability to a TCB first deletes the reply capability its master
     /// has outstanding (`docs/design.md`, Deletion and finalisation).
@@ -145,7 +140,6 @@ impl Ck {
             preempt_in: None,
             preempt_points: 0,
             cleanup_all: false,
-            cleanup_tcb: false,
             reply_hook: false,
             hook_deleted: Vec::new(),
             cleanups: Vec::new(),
@@ -565,7 +559,7 @@ impl Kernel for Ck {
                 self.err(format!("{cap:?} deleted after its last capability"));
             }
         }
-        if self.cleanup_all && !(t == CapType::Tcb && last && !self.cleanup_tcb) {
+        if self.cleanup_all && t != CapType::Tcb {
             self.cleanups.push(cap);
             Some(cap)
         } else {

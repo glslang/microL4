@@ -277,6 +277,8 @@ fn finalise_slot<K: Kernel + ?Sized>(
         let mut s = k.load(slot);
         s.cap = remainder;
         k.store(slot, s);
+        // seL4's `capCyclicZombie`. Without overlapping objects no nested
+        // deletion reaches a Zombie in its own slot 0; kept as seL4 has it.
         if !immediate && remainder.object() == slot.get() {
             return Ok((false, cleanup));
         }
@@ -299,13 +301,11 @@ fn finalise_cap<K: Kernel + ?Sized>(k: &mut K, cap: Cap, last: bool) -> (Cap, Op
         CapType::CNode => (Cap::NULL, None),
         CapType::Tcb => {
             let cleanup = k.finalise(cap, last);
+            debug_assert!(cleanup.is_none(), "a TCB's finalisation has no cleanup");
             if last {
-                (
-                    Cap::zombie(cap.object(), TCB_BITS, TCB_SLOTS, true),
-                    cleanup,
-                )
+                (Cap::zombie(cap.object(), TCB_BITS, TCB_SLOTS, true), None)
             } else {
-                (Cap::NULL, cleanup)
+                (Cap::NULL, None)
             }
         }
         _ => (Cap::NULL, k.finalise(cap, last)),

@@ -23,7 +23,9 @@ pub trait Kernel: SlotMemory {
     /// the slot empties. A TCB's hook suspends and unbinds the thread; a
     /// Frame's unmaps on every deletion; an Endpoint's releases its queue.
     /// Returns a capability to pass to [`Kernel::after_delete`] once the slot
-    /// is empty, as seL4's `cleanupInfo`.
+    /// is empty, as seL4's `cleanupInfo`. A TCB's hook returns `None`, as
+    /// seL4's thread finalisation does: its last capability becomes a Zombie,
+    /// and its slot empties only steps later.
     fn finalise(&mut self, cap: Cap, last: bool) -> Option<Cap>;
 
     /// The slot that held a finalised capability is now empty.

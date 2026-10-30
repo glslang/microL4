@@ -1213,12 +1213,12 @@ No `CPtr` reaches a TCB or IRQ-node slot.
 `kernel/src/arch/`. `SlotMemory` loads and stores a `Slot` by value at a
 `SlotAddr`, a 32-byte-aligned physical address held in a `NonZeroU64`.
 `Kernel: SlotMemory` adds the hooks into other subsystems: `finalise(cap,
-last)`, which returns a cleanup capability as seL4's `cleanupInfo`,
-`after_delete(cleanup)`, `moved(cap, old_slot, new_slot)`, `zero(paddr,
-len)`, `init_object(cap)` and `preempt()`, a preemption point that polls the
-local APIC's IRR (the kernel never opens an `sti` window). Every type's
-derivation rule is in `core/` (`l4core::cnode::derive`), so derivation needs
-no hook.
+last)`, which returns a cleanup capability as seL4's `cleanupInfo` (none
+for a TCB), `after_delete(cleanup)`, `moved(cap, old_slot, new_slot)`,
+`zero(paddr, len)`, `init_object(cap)` and `preempt()`, a preemption point
+that polls the local APIC's IRR (the kernel never opens an `sti` window).
+Every type's derivation rule is in `core/` (`l4core::cnode::derive`), so
+derivation needs no hook.
 
 Every relocation of a capability, Move, Mutate, both halves of Rotate, the
 Rotate swap, every Zombie swap and IPC's `CNode_SaveCaller`, goes through one
@@ -1630,14 +1630,16 @@ after each; an interrupted call restarts, looks its slot up again and goes
 on. Revoke re-reads its slot every step, so it stops cleanly if it deletes
 the CNode holding its own slot; if it destroys the caller's TCB, the caller
 is suspended and a preempted revoke is never restarted (the partial-revoke
-cases of `cspace.tex`, "Deletion and Revocation"). In the first case a
-preemption point inside that CNode's destruction, after the slot is gone,
-ends the revoke: the restarted call cannot look its slot up, or finds it
-empty, and the CNode's Zombie stays, partly cleared, where the CNode's
-last capability was. That is a slot the user can name. The Zombie can be
-moved, and Delete, or a revoke of its untyped, finishes the clearing
-([Deletion and finalisation](#deletion-and-finalisation)). A user avoids
-this, as in seL4, by not revoking from inside what the revoke destroys.
+cases of `cspace.tex`, "Deletion and Revocation"). In the first case the
+revoked capability is deleted with that CNode, its descendants not yet
+deleted pass to its parent and survive, and the revoke ends. If a
+preemption point falls inside that CNode's destruction after the slot is
+gone, the restarted call cannot look its slot up, or finds it empty, so
+the CNode's Zombie also stays, partly cleared, where the CNode's last
+capability was: a slot the user can name. The Zombie can be moved, and
+Delete, or a revoke of its untyped, finishes the clearing ([Deletion and
+finalisation](#deletion-and-finalisation)). A user avoids both, as in
+seL4, by not revoking from inside what the revoke destroys.
 
 Copy, Mint, IPC transfer and the TCB and IRQ-node installs go through
 `derive`, as seL4's `deriveCap`. It refuses Null, Zombie, Reply,
@@ -1680,14 +1682,14 @@ IRQ-node install. M9: Hypervisor narrowing.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Revoke deletes exactly the capabilities derived, directly or not, from the slot | `low`-run walk; proptest against `model/`'s transitive parent map | M2 |
+| Revoke deletes exactly the capabilities derived, directly or not, from the slot, unless it destroys the CNode holding that slot and stops ([Slot operations](#slot-operations)) | `low`-run walk; proptest against `model/`'s transitive parent map | M2 |
 | Deleting a capability changes no survivor's ancestry except that its children pass to its nearest surviving ancestor | `low` update in unlink; proptest | M2 |
 | Rights never grow, a badge is set once, only Mint sets a badge, and a Hypervisor Mint never widens | `derive`, Mint and Mutate rules; proptest; badge scenario (M6); `core::hyperv` host tests; red-team brief 1 | M2, M6, M9, M10 |
 | A PDPT, PageDirectory or PageTable capability is never derived, and a derived Frame capability is never mapped | `derive`; proptest; red-team brief 4 | M2, M5, M10 |
 | A plain copy never has children, so holding one gives no power over other copies | the `original` rule; proptest | M2 |
 | All capabilities to one object are adjacent, so `is_final` is exact | insertion next to the source; proptest compares `is_final` with `model/` | M2 |
 | The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step; debug asserts | M2, M4 |
-| No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress | single-step revoke with restart; red-team brief 2 | M2, M5, M6, M10 |
+| No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless the revoke destroys the CNode holding its own slot and stops ([Slot operations](#slot-operations)) | single-step revoke with restart; red-team brief 2 | M2, M5, M6, M10 |
 | `depth` never exceeds 4095 and never wraps, so no capability leaves its ancestors' runs | one child-insert function in `l4core::cdt` checks the limit; proptest drives a chain to 4095 by copy and delete; red-team brief 1 | M2, M10 |
 | Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5) and `IRQHandler_SetNotification` (M7); IPC transfer skips the capability (M6); tests at depth 4095 per path | M4 to M7 |
 
