@@ -121,6 +121,9 @@ global_asm!(
     // Each stub's address, in vector order, for the IDT.
     ".pushsection .rodata.trap_stubs, \"a\", @progbits",
     ".balign 8",
+    // Labels Rust names through `extern` must be global: the asm and its
+    // user can land in different codegen units.
+    ".global TRAP_STUBS",
     "TRAP_STUBS:",
     ".irp hi, 0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f",
     ".irp lo, 0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f",
@@ -134,6 +137,7 @@ global_asm!(
     // [idle_loop, idle_loop_end). Neither loop continues after an interrupt:
     // the handler discards the frame and enters a loop afresh.
     ".pushsection .text.idle, \"ax\", @progbits",
+    ".global idle_loop, idle_loop_int, idle_loop_end",
     "idle_loop:",
     "    sti",
     "    hlt",
