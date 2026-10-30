@@ -113,10 +113,6 @@ pub fn read_cr2() -> u64 {
 }
 
 /// Reads CR3.
-#[expect(
-    dead_code,
-    reason = "M3's descriptor tables, page tables and devices use it"
-)]
 pub fn read_cr3() -> u64 {
     let v;
     // SAFETY: reading CR3 has no side effects.

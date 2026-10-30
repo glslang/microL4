@@ -29,6 +29,7 @@ pub mod kernel;
 pub mod slot;
 pub mod trap;
 pub mod untyped;
+pub mod vspace;
 pub mod window;
 
 #[cfg(any(test, feature = "testing"))]
