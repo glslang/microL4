@@ -229,7 +229,55 @@ extern "C" fn trap_fatal(frame: *const TrapFrame) -> ! {
     if NMI_OVERFLOW.load(Ordering::Relaxed) {
         nmi_overflow_test(frame, cr2);
     }
+    if DF_OVERFLOW.load(Ordering::Relaxed) != 0 {
+        df_overflow_test(frame, cr2);
+    }
     panic!("fatal trap: {}", report(frame, cr2))
+}
+
+/// Set by `test=df_stack` (M3 review) only: 1 once armed, then the number
+/// of `#DF`s the handler has seen plus 1.
+static DF_OVERFLOW: AtomicU8 = AtomicU8::new(0);
+
+/// `test=df_stack`, in the fatal handler (M3 review). `docs/design.md`
+/// says an overflow of IST1, the `#DF` stack, ends in a triple fault. On
+/// the first `#DF`: recurse until IST1 runs into its guard page. The `#PF`
+/// cannot push its frame there, which makes a `#DF`, but delivering that
+/// `#DF` reloads RSP from the TSS's IST1 slot, the mapped top of IST1, so
+/// no triple fault follows: the handler runs again over the first one's
+/// frames. On that second `#DF`: report it and pass. A triple fault would
+/// end the run with QEMU's own status instead.
+fn df_overflow_test(frame: &TrapFrame, cr2: u64) {
+    if frame.vector != u64::from(t::DOUBLE_FAULT) {
+        return;
+    }
+    let ist1 = &gdt::stack_layout().ist[0];
+    let here = gdt::stack_layout().stack_of(frame as *const TrapFrame as u64);
+    match DF_OVERFLOW.fetch_add(1, Ordering::Relaxed) {
+        1 => {
+            kprintln!(
+                "df_stack: #DF on {here}; recursing until IST1 ({:#x}-{:#x}) overflows",
+                ist1.start,
+                ist1.end
+            );
+            let depth = overflow_stack(0);
+            panic!("df_stack: IST1 never overflowed (depth {depth})")
+        }
+        2 => {
+            kprintln!(
+                "df_stack: #DF again, frame on {here} at {:#x}, CR2 {cr2:#x} {} IST1's guard page: no triple fault",
+                frame as *const TrapFrame as u64,
+                if (ist1.start - 4096..ist1.start).contains(&cr2) {
+                    "in"
+                } else {
+                    "NOT in"
+                }
+            );
+            kprintln!("TEST PASS");
+            exit(ExitCode::Success)
+        }
+        _ => {}
+    }
 }
 
 /// Set by `test=nmi_stack` only: the NMI handler recurses until IST2
@@ -423,6 +471,9 @@ pub enum Provoke {
     /// nor the `#PF` that follows it can push a frame. IST1 is painted first
     /// and the panic prints how much of it the report used.
     DoubleFault,
+    /// `#DF` as [`Provoke::DoubleFault`] raises it, whose handler then
+    /// overflows IST1 (`test=df_stack`, M3 review).
+    DoubleFaultStack,
     /// `#BP`: `int3`, with a distinct value in each general register.
     Breakpoint,
     /// `#GP`: a load of DS with selector `0x38`, past the GDT's limit, so
@@ -455,6 +506,13 @@ pub fn provoke(p: Provoke) -> ! {
             paint_ist(1);
             // SAFETY: the kernel stack is abandoned for RSP in an unmapped
             // page, which no push can reach; the #DF handler runs on IST1.
+            unsafe {
+                asm!("mov rsp, {}", "ud2", in(reg) UNMAPPED + 0x1000, options(noreturn));
+            }
+        }
+        Provoke::DoubleFaultStack => {
+            DF_OVERFLOW.store(1, Ordering::Relaxed);
+            // SAFETY: as for `Provoke::DoubleFault`.
             unsafe {
                 asm!("mov rsp, {}", "ud2", in(reg) UNMAPPED + 0x1000, options(noreturn));
             }
