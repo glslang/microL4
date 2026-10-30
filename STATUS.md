@@ -100,9 +100,15 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 - **Setup:** the lead laid a skeleton first: the CPU check, `BootState`, the linker layout and guard pages, `qemu_args:`, the 64 GiB loader bound and the device-window layout.
 - **Builders:** three worked in parallel worktrees on ACPI, page tables and traps, then a fourth on the interrupt controllers, HPET, Hyper-V and the timer. The lead merged them, added the stack-overflow scenario and the `stac` check, and applied every builder's design corrections through a docs agent.
 - **Problems found along the way:**
-  - The M2 model's random test found the preempted-revoke cycle bug; it is fixed.
+  - The M2 model's random test found revokes whose outcome depended on where preemption fell.
+    - The cycle case got a fix.
+    - A broader "stop after destroying your own slot" rule followed. A fresh reviewer showed it could not hold, because the kernel restarts a call by looking its slot up again.
+    - The rework went back to seL4's Delete and Revoke with the corrected cycle stop. Partial revokes are now documented as preemption-dependent, as in seL4.
+    - The harness restarts through lookups. It checks that a cut-short revoke stops exactly where the uninterrupted one passed a preemption point. The reviewer signed off.
   - CI's newer Rust exposed a non-global asm label and a new clippy lint; both are fixed.
   - Codex caught the ACPI reader stopping at 64 GiB instead of `phys_map_size`; it is fixed.
+  - The ten-tick check failed once under host load: QEMU folded three timer expirations into one interrupt. The test now restarts its window when it sees a gap of 1.5 periods or more.
 - **Review:** the fresh reviewer's one blocking item was the missing Hyper-V tick check, now CI's `microl4-vhdx-m3-check`. It signed off after the fixes.
 - **Hyper-V:** the owner ran the M3 check that evening and it passed. Its results are recorded above and in `docs/design.md`'s answered open questions. One new problem for M7: Hyper-V's I/O APIC has no EOI register.
-- **Next:** the Hyper-V ACPI dump from the full log, then M4.
+- **Hyper-V ACPI tables:** from the owner's full log, committed as `core/tests/acpi/hyperv-gen2.dump` with a host test.
+- **Next:** merge PR #4, then M4.
