@@ -1,0 +1,13 @@
+# M3 review. docs/design.md says an overflow of IST1, the #DF stack, ends
+# in a triple fault. The #DF handler here recurses until IST1 runs into its
+# guard page. The #PF cannot push its frame there and becomes a #DF, whose
+# delivery reloads RSP from the TSS's IST1 slot, the mapped top of IST1: the
+# handler runs again over the first one's frames instead. A triple fault
+# would end the run with QEMU's own status, not the success exit.
+cmdline: test=df_stack
+exit: success
+expect: microL4 kernel
+expect: DF on IST1; recursing until IST1
+expect: DF again, frame on IST1
+expect: in IST1's guard page: no triple fault
+expect: TEST PASS

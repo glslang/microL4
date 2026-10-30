@@ -66,6 +66,7 @@ fn kmain(handoff_phys: u64) -> ! {
         // Ring-0 traps and the idle loop's interrupt path (M3).
         Some("page_fault") => arch::provoke(arch::Provoke::PageFault),
         Some("double_fault") => arch::provoke(arch::Provoke::DoubleFault),
+        Some("df_stack") => arch::provoke(arch::Provoke::DoubleFaultStack),
         Some("trap_breakpoint") => arch::provoke(arch::Provoke::Breakpoint),
         Some("trap_general_protection") => arch::provoke(arch::Provoke::GeneralProtection),
         Some("trap_nmi") => arch::provoke(arch::Provoke::Nmi),
