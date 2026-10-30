@@ -84,7 +84,7 @@ The kernel never blocks and has no kernel threads.
 | --- | --- | --- |
 | Kernel code runs with interrupts disabled, from entry to exit; only the idle thread's halt loop runs with `IF = 1` in ring 0 | `IA32_FMASK` clears IF; every IDT gate is an interrupt gate; no `sti` outside the idle loop (review, M10 brief 5) | M3, M5 |
 | Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; M10 brief 6 | M2, M4, M5, M6, M10 |
-| A system call restarted after a preemption point continues its work and never repeats a completed step; the one exception is a revoke whose work destroyed its own slot, which stops ([Slot operations](#slot-operations)) | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random | M2, M4 |
+| A system call restarted after a preemption point continues its work and never repeats a completed step; the one exception is a revoke whose step destroyed its own slot, which stops after that step, preempted or not ([Slot operations](#slot-operations)) | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random | M2, M4 |
 | The kernel allocates no memory after boot | the kernel links no allocator; every object comes from `Untyped_Retype` | M4 |
 | The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map; SMAP on (M3); no `stac` anywhere (CI grep over `kernel/`) | M3, M5 |
 | Every exception and interrupt entry clears RFLAGS.AC and DF before any Rust code runs | `clac` and `cld` in every entry stub ([Kernel entry and exit](#kernel-entry-and-exit)) | M3 |
@@ -1325,20 +1325,24 @@ Rust:
 2. A deletion a user asked for (`CNode_Delete`, or revoke deleting a
    descendant) clears the container from the highest slot down, one
    capability per step, storing the count in the Zombie and passing a
-   preemption point after each; a restarted call resumes.
+   preemption point between steps, so a step that leaves nothing to clear
+   empties the slot at once; a restarted call resumes.
 3. A nested deletion, of the last capability to another container `D`, does
    not recurse: `D`'s Zombie is swapped into `D`'s slot 0 and `D`'s old
    slot-0 capability is deleted instead. The swap carries both derivation
-   nodes and calls `moved`; a preemption point may follow it. A nested
+   nodes and calls `moved`, and the capability it moves out of `D`'s slot 0
+   is finalised before the next preemption point. A nested
    deletion that meets a Zombie already in its own container's slot 0 stops
    (seL4 `capCyclicZombie`). `D` stays, unreachable, until a revoke of its
    untyped reaches the Zombie (`cspace.tex`, "Deletion and Revocation",
-   footnote). If `D`'s slot 0 is the slot being deleted (each container
-   holds the other's last capability), `D`'s Zombie stays there and that
-   deletion ends without emptying it.
+   footnote). If `D`'s slot 0 is the slot a revoke is deleting (each
+   container holds the other's last capability), `D`'s Zombie stays there
+   and that deletion ends without emptying it ([Slot
+   operations](#slot-operations)).
 4. The slot empties when the count reaches 0, or 1 with the Zombie in the
-   container's own slot 0, except in the cycle of step 3, where it keeps
-   `D`'s Zombie.
+   container's own slot 0, except when a revoke's deletion ends early
+   ([Slot operations](#slot-operations)): the slot then keeps `D`'s Zombie
+   in the cycle of step 3, or its own Zombie, partly cleared.
 
 Nesting is at most two calls deep. A Zombie cannot be invoked
 (`InvalidCapability`) or derived (`IllegalOperation`); it can be moved, and
@@ -1386,7 +1390,7 @@ IRQHandlers, IOPorts and the IRQ node; M9 for Hypervisor capabilities.
 | No Hypervisor capability | Tag 15 | Hyper-V SynIC and hypercalls (PLAN.md, Hyper-V interface) |
 | Odd tags mark architecture capabilities (`isArchCap`) | Flat 5-bit tags | One architecture |
 | TCB slots in the order CTable, VTable, Reply, Caller, Buffer (`tcb_cnode_index`, `include/object/structures.h`) | CSpace root, VSpace root, IPC buffer, `reply`, `caller` | The [TCB layout](#tcb-layout); only the Zombie's clearing order (highest slot first) depends on it |
-| When a cycle of containers leaves `D`'s Zombie in the slot being deleted, the same deletion goes on to clear `D` (`finaliseSlot`, `reduceZombie`, `src/object/cnode.c`) | The deletion stops; `D`'s Zombie stays, detached, in `D`'s slot 0 until a revoke of `D`'s untyped reaches it | No user can name that slot, so only a revoke gets there, and a restarted revoke looks for work only among the revoked capability's descendants, which `D`'s Zombie is not: a preemption point while clearing `D` would leave it half cleared, so the outcome would depend on where the interrupt fell |
+| A revoke's deletion goes on after a step that deletes or swaps a Zombie into the revoke's own slot, or leaves another container's Zombie in the slot being deleted, and stops there only if preempted (`finaliseSlot`, `reduceZombie`, `src/object/cnode.c`) | Such a revoke stops after that step, preempted or not; preemption points fall between reduce steps, none after the last | A restarted revoke finds its work only as the first child of its own slot, so seL4's outcome depends on where the interrupt falls; microL4's does not |
 
 ## Memory and retype
 
@@ -1679,20 +1683,22 @@ Rotate is kept: it swaps two capabilities without a spare slot, and `core/`
 needs the swap for Zombies anyway. Mutate is kept: it is the only way to set
 the guard of an original CNode capability without making a child. Revoke and
 delete are sequences of single-capability steps with a preemption point
-after each; an interrupted call restarts, looks its slot up again and goes
+between steps; an interrupted call restarts, looks its slot up again and goes
 on. Revoke re-reads its slot every step, so it stops cleanly if it deletes
 the CNode holding its own slot; if it destroys the caller's TCB, the caller
 is suspended and a preempted revoke is never restarted (the partial-revoke
 cases of `cspace.tex`, "Deletion and Revocation"). In the first case the
-revoked capability is deleted with that CNode, its descendants not yet
-deleted pass to its parent and survive, and the revoke ends. If a
-preemption point falls inside that CNode's destruction after the slot is
-gone, the restarted call cannot look its slot up, or finds it empty, so
-the CNode's Zombie also stays, partly cleared, where the CNode's last
-capability was: a slot the user can name. The Zombie can be moved, and
-Delete, or a revoke of its untyped, finishes the clearing ([Deletion and
-finalisation](#deletion-and-finalisation)). A user avoids both, as in
-seL4, by not revoking from inside what the revoke destroys.
+revoked capability is deleted in a step of that CNode's destruction, its
+descendants not yet deleted pass to its parent and survive, and the revoke
+stops after that step, preempted or not, since a restarted call could not
+find the rest of the work. The CNode is destroyed if that step left nothing
+to clear. Otherwise its Zombie stays, partly cleared, where its last
+capability was, or in its own slot 0 if that capability lay in the CNode.
+From a slot the user can name, Delete finishes it ([Deletion and
+finalisation](#deletion-and-finalisation)); from its own slot 0, a revoke
+of the revoked untyped's parent does, and under a boot untyped, which has
+no parent, the region stays dead. A user avoids this, as in seL4, by not
+revoking from inside what the revoke destroys.
 
 Copy, Mint, IPC transfer and the TCB and IRQ-node installs go through
 `derive`, as seL4's `deriveCap`. It refuses Null, Zombie, Reply,

@@ -30,7 +30,7 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
   - **Source check:** `cargo xtask test` fails if the kernel source contains `stac`.
 - [x] A fresh M3 reviewer found no kernel bug. It asked for the Hyper-V check image, a null LDT, PCIDE cleared, and a correction to the #DF-stack overflow text. All of these are done, and it signed off.
 - [x] The M3 Hyper-V check passed on the owner's host (2026-10-30, CI's `microl4-vhdx-m3-check`): ten ticks at 100.002 Hz against the reference counter and `TEST PASS`; the results are under "Hyper-V checks".
-- [x] An M2 bug found during M3, fixed in PR #4: a preempted revoke through two CNodes that held each other's only capability ended differently than an uninterrupted one. See "Decisions" below.
+- [x] An M2 bug found during M3, fixed in PR #4: a revoke whose own slot its work destroyed ended differently depending on where preemption fell. The first shape seen was two CNodes holding each other's only capability. See "Decisions" below.
 
 ## Next
 - [ ] Commit the Hyper-V ACPI tables. The pasted log on PR #4 starts after the dump. The full COM1 log, `l4-com1-20261030-184352.log` on the owner's host, has the `loader: acpidump:` lines.
@@ -53,7 +53,7 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 - **`int1` (`0xF1`):** in ring 0 it raises #UD on QEMU 8.2 TCG, not #DB. Recheck the design's `int1` claims on real hardware or Hyper-V in M10, brief 5.
 - **HPET above MAXPHYADDR:** an HPET base under 2^52 but above the CPU's MAXPHYADDR would fault when mapped instead of counting as no HPET. No known firmware does this.
 - **Unchecked hardware facts:** H10 (MTRR and PAT combination) is checked in M8, H11 (UMIP) in M5.
-- A revoke that destroys the CNode holding its own slot stops part way, as seL4's does (M2; `docs/design.md`, Slot operations).
+- A revoke that destroys the CNode holding its own slot stops after that step, whether or not it is preempted. Under a boot untyped, a Zombie left in the CNode's own slot 0 is never finished; that region is dead anyway (`docs/design.md`, Slot operations).
 - The model harness covers user operations on a Zombie only through hand-written tests.
 - `Kernel::finalise` runs with `last = true` for every deletion of an Untyped, IRQControl, IOPortControl or Hypervisor capability; the kernel's hook must ignore those (M4).
 - The optional `cargo-fuzz` target over the M2 sequences is not built.
@@ -65,7 +65,10 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 
 ## Decisions this milestone
 - No new ADR: M3 follows `docs/design.md` and ADRs 0004 to 0008, 0014, 0019 and 0020, and `docs/abi.md` is unchanged.
-- **The M2 cycle fix departs from seL4 in one case.** Two CNodes C and D each hold the other's only capability. A deletion of C reaches D's capability and swaps D's Zombie into D's slot 0. seL4 goes on to clear D in the same call, which a restarted revoke could not resume. microL4 stops there and leaves D detached until a revoke of its untyped reaches it. The outcome is now the same whether or not the revoke is preempted (`docs/design.md`, Deletion and finalisation, and its seL4 table).
+- **A revoke that destroys its own slot stops after that step, preempted or not; this departs from seL4.** seL4 goes on with the deletion unless preempted. A restart cannot find the rest of that work, so seL4's outcome depends on where the interrupt falls.
+  - In microL4 the half-cleared container's Zombie stays where its last capability was, or in its own slot 0, and Delete or a revoke of its untyped's parent finishes it. Delete itself is unchanged from seL4.
+  - The model's random test found two shapes of this bug in turn: the cycle, then a CNode holding a copy of itself.
+  - The fix replaces the first, cycle-only special case with one general rule, checked over 1.6 million random cases (`docs/design.md`, Slot operations, Deletion and finalisation, and its seL4 table).
 - **The boot-sequence order** is now written in `docs/design.md`:
   - EFER.NXE and CR0.WP are checked before the PAT is written;
   - Hyper-V's leftovers come first in step 5, since its time-unhalted timer can raise an NMI;
