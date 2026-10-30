@@ -28,6 +28,7 @@ guest on the owner's machine.
 | `cargo xtask image` | build `target/xtask/image/disk.img` and `disk.vhdx`, with `test=hello` |
 | `cargo xtask run [--cmdline "..."]` | boot under OVMF with COM1 on the terminal; Ctrl-A X quits |
 | `cargo xtask gdb` | boot paused with GDB attached |
+| `cargo xtask acpidump [--from-log <file>] [--out <file>]` | dump the ACPI tables the loader reads, from a QEMU boot or a COM1 log (the Hyper-V check), for `core/tests/acpi/` |
 
 Plain `cargo test` and `cargo build` cover only the host crates (`core`,
 `xtask`); the kernel and loader need their own targets, which xtask passes.
@@ -36,7 +37,7 @@ Plain `cargo test` and `cargo build` cover only the host crates (`core`,
 
 | Path | What |
 | --- | --- |
-| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader and the kernel (handoff ABI, ELF parser, command line; from M2 the capability core) |
+| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader and the kernel (handoff ABI, ELF parser, command line; from M2 the capability core; from M3 the CPU feature check, ACPI parser, page-table builder, trap decoding, APIC, HPET, Hyper-V and timer arithmetic) |
 | `kernel/` | the kernel, `x86_64-unknown-none`, linked at `0xFFFF_FFFF_8000_0000` by `kernel/linker.ld` |
 | `loader/` | the UEFI loader, `x86_64-unknown-uefi`, with its own minimal UEFI bindings |
 | `xtask/` | build, image, QEMU runner and scenario harness |
