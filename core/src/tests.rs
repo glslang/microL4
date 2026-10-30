@@ -2,6 +2,7 @@
 //! sequences against a reference model live in `model/`.
 
 use std::format;
+use std::vec;
 use std::vec::Vec;
 
 use crate::cap::{
@@ -939,6 +940,80 @@ fn a_revoke_restarted_by_looking_its_slot_up_again_is_cut_short() {
         cut += 1;
     }
     assert!(cut >= 8, "cut short at {cut} points");
+}
+
+/// Re-review of 7462b41: a revoke cut short leaves "the rest of the work
+/// undone" (`docs/design.md`, "Slot operations"), so its memory must be
+/// what the unpreempted revoke had at one of its preemption points, however
+/// many restarts succeeded before the one whose lookup failed. That is the
+/// exact check `World::finish_partial_revoke` could make instead of
+/// replaying; this shows it holds for the shapes above, under every
+/// schedule of up to three preemptions.
+#[test]
+fn a_revoke_cut_short_stops_where_the_unpreempted_revoke_passed() {
+    let shapes = [(2, 3, 1, None), (2, 3, 2, Some(1)), (1, 1, 0, None)];
+    for (radix, last, u, endpoint) in shapes {
+        let setup = || {
+            let mut w = World::new();
+            cdt::insert_root(
+                &mut w.k,
+                slot(ROOT, 2),
+                Cap::untyped(DEV, UT_BITS, false, 1 << UT_BITS),
+            );
+            w.retype(1, ObjectType::Untyped, 12, World::root(), 30, 1);
+            w.retype(30, ObjectType::CNode, radix, World::root(), 20, 1);
+            let c = w.cap(slot(ROOT, 20));
+            if let Some(i) = endpoint {
+                w.retype(2, ObjectType::Endpoint, 0, c, i, 1);
+            }
+            cnode::copy(&mut w.k, slot(ROOT, 20), slot(c.object(), last), 0xF).unwrap();
+            // Two endpoints from U come first among its children, so the
+            // first restarts look the slot up again and go on.
+            w.retype(30, ObjectType::Endpoint, 0, World::root(), 40, 2);
+            cnode::move_cap(&mut w.k, slot(ROOT, 30), slot(c.object(), u)).unwrap();
+            w.k.events.clear();
+            (w, c)
+        };
+        let (w, c) = setup();
+        let named = path(20, c, u);
+        let at = crate::cspace::lookup_slot(&w.k, user_root(), named.0, named.1, false).unwrap();
+        // The unpreempted revoke's memory at each of its points.
+        let mut passed = Vec::new();
+        for p in 0.. {
+            let (mut w, _) = setup();
+            w.k.preempt_in = Some(p);
+            if cnode::revoke(&mut w.k, at).is_ok() {
+                break;
+            }
+            passed.push(w.k.mem.clone());
+        }
+        let n = passed.len() as u64 + 1;
+        let mut schedules: Vec<Vec<u64>> = Vec::new();
+        for a in 0..n {
+            schedules.push(vec![a]);
+            for b in 0..n {
+                schedules.push(vec![a, b]);
+                for c in 0..n {
+                    schedules.push(vec![a, b, c]);
+                }
+            }
+        }
+        let mut restarted_then_cut = 0;
+        for schedule in schedules {
+            let (mut w, _) = setup();
+            if revoke_call(&mut w, named, &schedule).is_ok() {
+                continue;
+            }
+            if schedule.len() > 1 && schedule[0] == 0 {
+                restarted_then_cut += 1;
+            }
+            assert!(
+                passed.contains(&w.k.mem),
+                "U in slot {u}, schedule {schedule:?}: cut short where the unpreempted revoke never was"
+            );
+        }
+        assert!(restarted_then_cut > 0, "U in slot {u}");
+    }
 }
 
 /// A Delete is cut short the same way only if the path that names its slot
