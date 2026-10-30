@@ -1,9 +1,10 @@
 //! `no_std` logic shared by the loader and the kernel.
 //!
 //! Everything here is plain, safe Rust with no hardware access, so it also
-//! builds for the host and runs under `cargo test` and Miri. From M2 this crate
-//! holds the capability core; in M0 it holds the boot handoff ABI, the ELF
-//! parser and the command-line parser.
+//! builds for the host and runs under `cargo test` and Miri. It holds the boot
+//! handoff ABI, the ELF parser and the command-line parser (M0), and the
+//! capability core (M2): capabilities and slots, the derivation list, capability
+//! addressing, the slot operations and untyped retype.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -11,6 +12,20 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(any(test, feature = "testing"))]
+extern crate alloc;
+
+pub mod cap;
+pub mod cdt;
 pub mod cmdline;
+pub mod cnode;
+pub mod cspace;
 pub mod elf;
+pub mod error;
 pub mod handoff;
+pub mod kernel;
+pub mod slot;
+pub mod untyped;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
