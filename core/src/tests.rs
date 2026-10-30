@@ -775,6 +775,134 @@ fn a_revoke_that_destroys_its_own_slot_ends_the_same_preempted_or_not() {
     }
 }
 
+/// Review of 2c60870: the cycle of the test above, where D's Zombie,
+/// swapped into the slot being deleted, has one slot left. A partial revoke
+/// leaves such a Zombie: D's untyped RA, revoked from D's slot 1 while D's
+/// last capability is outside D, deletes RA and stops with D's Zombie
+/// counting 1. Here that capability lies in C's slot 1 and C's only
+/// capability, from U, in D's slot 0.
+///
+/// Revoking U deletes C's capability in D's slot 0. Clearing C deletes C's
+/// slot 1 in a nested deletion, which swaps D's Zombie into D's slot 0 and
+/// C's Zombie, with C's node, into C's slot 1, then passes a preemption
+/// point before it swaps C's Zombie on into C's slot 0. Unpreempted, the
+/// revoke's deletion then finds D's Zombie in its slot removable (one slot
+/// left, in its own slot 0) and empties the slot before it reaches the
+/// anchor check, destroying D, which is not U's descendant. Preempted at
+/// that point, the restarted revoke finds C's Zombie in C's slot 1 and
+/// never touches D's slot 0, so D's Zombie stays. 5211e83 stopped the
+/// deletion inside `reduce_zombie`, before the removable check.
+#[test]
+fn a_revoke_through_a_cycle_leaves_a_removable_zombie_the_same_preempted_or_not() {
+    let setup = || {
+        let mut w = World::new();
+        cdt::insert_root(
+            &mut w.k,
+            slot(ROOT, 2),
+            Cap::untyped(DEV, UT_BITS, false, 1 << UT_BITS),
+        );
+        w.retype(1, ObjectType::CNode, 1, World::root(), 20, 1);
+        w.retype(2, ObjectType::CNode, 1, World::root(), 21, 1);
+        let (c, d) = (w.cap(slot(ROOT, 20)), w.cap(slot(ROOT, 21)));
+        cnode::move_cap(&mut w.k, slot(ROOT, 21), slot(c.object(), 1)).unwrap();
+        cnode::move_cap(&mut w.k, slot(ROOT, 20), slot(d.object(), 0)).unwrap();
+        cnode::move_cap(&mut w.k, slot(ROOT, 2), slot(d.object(), 1)).unwrap();
+        // The partial revoke: RA goes, D's Zombie stays in C's slot 1.
+        cnode::revoke(&mut w.k, slot(d.object(), 1)).unwrap();
+        assert_eq!(
+            w.cap(slot(c.object(), 1)),
+            Cap::zombie(d.object(), d.size_bits(), 1, false)
+        );
+        assert_eq!(w.cap(slot(d.object(), 0)), c);
+        assert!(w.cap(slot(d.object(), 1)).is_null());
+        w.k.events.clear();
+        (w, c, d)
+    };
+
+    let (mut whole, c, d) = setup();
+    cnode::revoke(&mut whole.k, slot(ROOT, 1)).unwrap();
+    assert!((0..2).all(|i| whole.cap(slot(c.object(), i)).is_null()));
+    assert!(!cdt::has_children(&whole.k, slot(ROOT, 1)));
+    whole.check(c.object(), 2);
+    whole.check(d.object(), 2);
+    // `docs/design.md`, "Deletion and finalisation", step 3: D's Zombie
+    // stays in D's slot 0, and the revoke's deletion ends without emptying
+    // it. Today the unpreempted revoke empties it.
+    assert_eq!(
+        whole.cap(slot(d.object(), 0)),
+        Cap::zombie(d.object(), d.size_bits(), 1, false),
+        "the unpreempted revoke destroyed D"
+    );
+
+    ends_the_same_preempted_or_not(
+        &whole,
+        || setup().0,
+        |k| cnode::revoke(k, slot(ROOT, 1)),
+        &[(c.object(), 2), (d.object(), 2)],
+    );
+}
+
+/// Review of 2c60870: the kernel restarts a preempted system call by
+/// executing it again with the same arguments, so a restarted revoke looks
+/// its slot up again (`docs/design.md`, "System-call dispatch" and "Slot
+/// operations"). The tests above restart with the slot address instead.
+/// Revoking U from C's slot 4, named through C's only capability in root
+/// slot 10, turns that capability into C's Zombie in its first step; from
+/// then on the lookup stops at the Zombie. Unpreempted, the revoke deletes
+/// U and stops after that step, C's Zombie counting 4; preempted at its
+/// first point, after C's slot 7, the restarted call fails its lookup and
+/// U survives, C's Zombie counting 7. So a revoke that destroys the CNode
+/// holding its own slot still ends differently preempted or not.
+#[test]
+fn a_revoke_restarted_by_looking_its_slot_up_again_ends_the_same() {
+    // The root with no guard, so a 9-bit CPtr reaches C's slots.
+    let root = Cap::cnode(ROOT, ROOT_RADIX, 0, 0);
+    let (cptr, depth) = ((10 << 3) | 4, u64::from(ROOT_RADIX) + 3);
+    let setup = || {
+        let mut w = World::new();
+        w.retype(1, ObjectType::CNode, 3, World::root(), 10, 1);
+        let c = w.cap(slot(ROOT, 10));
+        cnode::move_cap(&mut w.k, slot(ROOT, 1), slot(c.object(), 4)).unwrap();
+        w.k.events.clear();
+        w
+    };
+    // CNode_Revoke as the kernel runs it: look the slot up, revoke, and on
+    // a preemption do both again.
+    let syscall = |w: &mut World, preempt_in: Option<u64>| -> Result<(), SyscallError> {
+        loop {
+            let at = crate::cspace::lookup_slot(&w.k, root, cptr, depth, false)?;
+            w.k.preempt_in = preempt_in;
+            if cnode::revoke(&mut w.k, at).is_ok() {
+                return Ok(());
+            }
+        }
+    };
+
+    let mut whole = setup();
+    let c = whole.cap(slot(ROOT, 10));
+    assert_eq!(syscall(&mut whole, None), Ok(()));
+    assert_eq!(
+        whole.cap(slot(ROOT, 10)),
+        Cap::zombie(c.object(), c.size_bits(), 4, false)
+    );
+    assert!(whole.cap(slot(c.object(), 4)).is_null());
+
+    let mut w = setup();
+    let r = syscall(&mut w, Some(0));
+    assert!(r.is_err(), "the restart looked its slot up: {r:?}");
+    assert_eq!(
+        w.cap(slot(c.object(), 4)).cap_type(),
+        CapType::Untyped,
+        "U survives"
+    );
+    assert!(
+        w.k.mem == whole.k.mem,
+        "preempted at the first point, C's Zombie in root slot 10 is {:?}, not {:?}",
+        w.cap(slot(ROOT, 10)),
+        whole.cap(slot(ROOT, 10))
+    );
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "4,094 copy-and-delete steps are too slow under Miri")]
 fn depth_limit_is_reachable_and_refused() {
