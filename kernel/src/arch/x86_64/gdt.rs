@@ -114,8 +114,8 @@ pub(super) struct DescriptorPointer {
 /// builds the GDT, the TSS and the IDT, then loads them in that order, so no
 /// table is loaded before it is complete and no gate names an IST before the
 /// TSS is in place, and loads a null LDT; then sets CR4.MCE, points
-/// `IA32_GS_BASE` at the per-CPU area and resets DR7. Runs once, with interrupts off. The firmware's GDT
-/// and IDT are dead afterwards.
+/// `IA32_GS_BASE` at the per-CPU area and resets DR7. Runs once, with
+/// interrupts off. The firmware's GDT and IDT are dead afterwards.
 pub fn init() {
     let stacks = stack_layout();
     check_stacks(&stacks);
