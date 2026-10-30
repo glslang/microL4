@@ -67,39 +67,47 @@ TEST PASS
 The kernel halts after `TEST PASS` on Hyper-V, since there is no
 `isa-debug-exit` device; the script turns the VM off.
 
-## At the M3 check: dump the ACPI tables
+## At the M3 check
 
-The kernel's ACPI parser is tested on the host against tables dumped from
-each platform (`core/tests/acpi/`); the Hyper-V dump has to come from your
-VM. With the word `acpidump` on the kernel command line, the loader prints
-every ACPI table to COM1 before it starts the kernel. The CI image boots
-with `test=hello` only, so build one on any Linux machine with the
-repository, WSL included, after `tools/setup.sh`:
-
-```sh
-cargo xtask image --cmdline "acpidump test=hello"
-```
-
-Copy `target/xtask/image/disk.vhdx` to the Windows host and boot it. The
-command line differs from the CI image's, so replace the default
-expectations; the dump takes a few seconds more over COM1:
+CI builds a second image for this check, the `microl4-vhdx-m3-check`
+artifact. It boots `acpidump test=ticks`: the loader prints every ACPI table
+to COM1, the kernel prints its boot summary, then it times ten ticks of the
+100 Hz timer against the Hyper-V reference counter. The dump takes a few
+seconds over COM1, so allow two minutes:
 
 ```powershell
-.\Test-L4Vhdx.ps1 -VhdxPath .\disk.vhdx -TimeoutSeconds 120 -LogPath acpidump.log `
-    -Expect 'acpidump: rsdp', 'acpidump: end', 'hello from microL4'
+.\Test-L4Vhdx.ps1 -VhdxPath .\microl4-vhdx-m3-check\disk.vhdx -TimeoutSeconds 120 `
+    -LogPath m3-check.log -Expect 'acpidump: rsdp', 'acpidump: end', `
+    'cpu: features NX PGE PAT SMEP SMAP XSAVE', 'cpu: hypervisor Hyper-V', `
+    'hyperv: ', 'timer: calibrating against the Hyper-V reference counter', `
+    'timer: periodic at 100 Hz', 'cpu: meltdown:', `
+    'ticks: within 100000 us within 1%'
 ```
 
-Attach `acpidump.log` to the PR, or commit it, and a session (or you)
-converts it:
+Paste `m3-check.log` into the PR. These lines are what the check is for:
+
+| Line | What it shows |
+| --- | --- |
+| `cpu: features ...` | SMEP, SMAP and XSAVE are passed through; without them the boot stops at `CPU lacks` |
+| `cpu: meltdown: ...` | recorded in `STATUS.md` |
+| `apic: IA32_APIC_BASE ... at handover` | whether the firmware left x2APIC on; QEMU never does, so that path first runs here |
+| `hyperv: ...` | the TLFS interface and privileges, each firmware overlay found and switched off, the hypercall MSR and whether it is locked, the frequency MSRs |
+| `acpi: ...` | the tables, the I/O APIC, COM1's route (GSI 4, edge, active high expected) and no HPET |
+| `pic: ...`, `ioapic: ...` | the 8259 and every I/O APIC pin masked |
+| `timer: ...` | the calibration against the reference counter, and its agreement with the frequency MSRs |
+| `ticks: ...` | ten ticks within 1% of 100 ms |
+
+A session (or you) then turns the ACPI part of the log into the Hyper-V
+test tables:
 
 ```sh
-cargo xtask acpidump --from-log acpidump.log --out core/tests/acpi/hyperv-gen2.dump
+cargo xtask acpidump --from-log m3-check.log --out core/tests/acpi/hyperv-gen2.dump
 ```
 
 That checks the dump is whole, prints what the parser makes of it (the
 tables, the I/O APIC, each ISA route, the HPET, the ECAM ranges) and writes
-the file to commit. The log may have `\r\n` line ends and other lines
-between the dump lines.
+the file to commit, with a host test that reads it. The log may have `\r\n`
+line ends and other lines between the dump lines.
 
 ## The pieces
 

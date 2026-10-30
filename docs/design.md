@@ -242,8 +242,13 @@ the Meltdown line below.
   and the M3 table builder skips them, both at `KERNEL_VIRT_BASE` and in the
   direct map's 4 KiB alias of the image. An overflow takes a page fault and
   then a double fault on IST1 (the `stack_overflow` and `nmi_stack`
-  scenarios); an overflow of IST1 itself ends in a triple fault. This closes
-  the STATUS.md open issue.
+  scenarios). An overflow of IST1 itself does not end in a triple fault:
+  the page fault in IST1's guard page becomes another double fault, whose
+  delivery reloads RSP from the TSS, the top of IST1, so the handler runs
+  again over the first one's frames (the `df_stack` scenario). The second
+  panic finds the first under way and exits without a report, so the first
+  report may be cut short; nothing runs on. This closes the STATUS.md open
+  issue.
 - **From what memory.** The kernel's tables are static, in `.bss`: the
   kernel PML4; the direct-map PDPT, 64 page directories (256 KiB, enough for
   64 GiB of 2 MiB pages) and 9 page tables for the image's alias; the image
@@ -337,7 +342,7 @@ in `STATUS.md`, and M10 lists the risk. TCG's `-cpu max` does not report
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | User code runs only in ring 3 and in 64-bit mode | the GDT has no DPL-3 32-bit code descriptor and there is no LDT; user CS and SS are fixed selectors, never taken from user registers | M3, M5 |
-| The kernel never runs without NX, PGE, PAT, SMEP, SMAP and XSAVE | `arch::cpu::check_features` before any other M3 step; the `cpu_refuse` scenario boots `qemu_args: -cpu qemu64` and expects one `CPU lacks` line naming SMEP, SMAP and XSAVE | M3 |
+| The kernel never runs without NX, PGE, PAT, SMEP, SMAP and XSAVE | `arch::check_cpu` before any other M3 step; the `cpu_refuse` scenario boots `qemu_args: -cpu qemu64` and expects one `CPU lacks` line naming SMEP, SMAP and XSAVE | M3 |
 | CR0.WP, EFER.NXE, CR4.SMEP, CR4.SMAP and CR4.PGE are set before the first user instruction and never cleared | M3 init; the boot summary prints CR0, CR4 and EFER and a scenario matches the line | M3 |
 | Every boot states its Meltdown exposure | M3 prints `cpu: meltdown: vulnerable`, `not vulnerable` or `unknown` from `RDCL_NO`; a scenario matches the line; the Hyper-V check records it in `STATUS.md`; M10 lists the accepted risk | M3, M10 |
 | Kernel code always runs with RFLAGS.AC = 0 and DF = 0 | `IA32_FMASK` includes AC and DF; `clac` and `cld` at every exception and interrupt entry; review of `arch` entry code | M3, M5 |
@@ -1137,7 +1142,7 @@ reaches a preemption point leaves the thread `Restart`, so it re-executes
 | GS points at `PerCpu` whenever a ring-0 path outside the IST handlers and the two windows reads it | `swapgs` exactly once per ring-3 entry and exit, keyed on saved CS; review; M10 brief 5 | M5 |
 | `sysenter`, compatibility-mode `syscall` and far transfers cannot enter ring 0 | `IA32_SYSENTER_CS` = 0; no 32-bit code descriptor; `IA32_CSTAR` stub | M5 |
 | A ring-0 interrupt is accepted only from `idle_loop`; every other ring-0 exception panics with a decoded report | `trap_from_kernel` RIP check; M3 page-fault scenario | M3 |
-| An overflow of the kernel stack or of the NMI, #MC or #DB IST stack ends in a #DF report, and an overflow of the #DF stack in a triple fault, never in silent corruption | a guard page below each of the five stacks, reserved by the linker script and skipped by the M3 table builder; #DF on IST1; M3 scenarios overflow the kernel stack (`stack_overflow`) and, from a `test=` hook, the NMI stack after an NMI the kernel sends itself through the ICR (`nmi_stack`), naming its own APIC ID, since the self shorthand is valid only for fixed delivery | M3 |
+| An overflow of the kernel stack or of the NMI, #MC or #DB IST stack ends in a #DF report, and an overflow of the #DF stack in a second #DF over the first, which stops the machine with the first report possibly cut short; never in silent corruption | a guard page below each of the five stacks, reserved by the linker script and skipped by the M3 table builder; #DF on IST1; the panic path's re-entry guard; M3 scenarios overflow the #DF stack (`df_stack`), the kernel stack (`stack_overflow`) and, from a `test=` hook, the NMI stack after an NMI the kernel sends itself through the ICR (`nmi_stack`), naming its own APIC ID, since the self shorthand is valid only for fixed delivery | M3 |
 | The kernel stack holds no state across entries | every entry starts at RSP0 or the stack top; exits rebuild the frame from the TCB | M5 |
 | An unknown or, without `debug`, a debug system call number reaches no handler and raises `UnknownSyscall` | `Syscall::from_number`; host tests for both builds | M5 |
 | A preempted system call restarts with the caller's arguments | `fault_ip`, `Restart` ([Register frame and restart](#register-frame-and-restart)); M5 self-test | M5 |
@@ -3557,7 +3562,7 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Does the Generation 2 firmware leave the hypercall page, SIMP, SIEFP, reference TSC page, VP assist page or synthetic timers enabled, or the hypercall MSR locked, at `ExitBootServices`? | An overlay left on over `USABLE` memory corrupts whatever M4 retypes there; a locked hypercall MSR removes the Hypervisor capability | M3 Hyper-V check | Disable each one before M4 reuses memory; keep a locked hypercall page out of every untyped and the boot region; print the values found. M3 does all three; TCG never reports `Hv#1`, so the answer is open until the M3 Hyper-V check |
 | Should the timer read `HV_X64_MSR_APIC_FREQUENCY` instead of calibrating, when Hyper-V allows it? | It gives the exact rate with no measurement | M3 Hyper-V check | Calibrate against the reference counter, as PLAN.md says. M3 prints the APIC and TSC frequency MSRs beside the calibrated rates, with the difference in ppm, when `AccessFrequencyRegs` and CPUID `0x4000_0003` EDX bit 8 allow; open until the M3 Hyper-V check gives those numbers |
 | How long are the calibration windows, and how close must the rate be? | Too short a window gives a wrong rate; too long slows every boot | M3 (answered) | Answered in M3: three 20 ms windows, median, for the local APIC timer and the TSC, with each reference read bracketed by a LAPIC and a TSC read; QEMU's 1 GHz APIC clock calibrates to within about 30 ppm. The `ticks` scenario requires 1% over ten ticks, each dated by the timer's reload ([The timer](#the-timer)) |
-| Is 8 KiB enough for a fatal handler's panic report on its IST stack? | An overflow of an IST stack ends in a triple fault with no report | M3 (answered) | Answered in M3: yes. The `double_fault` scenario's #DF report used 1,872 bytes of IST1's 8,192 in the dev profile and 1,904 in release, so no fixed-format writer is needed ([Static kernel memory and the boot region](#static-kernel-memory-and-the-boot-region)) |
+| Is 8 KiB enough for a fatal handler's panic report on its IST stack? | An overflow of the #DF stack ends in a second #DF over the first, with the report cut short | M3 (answered) | Answered in M3: yes. The `double_fault` scenario's #DF report used 1,872 bytes of IST1's 8,192 in the dev profile and 1,904 in release, so no fixed-format writer is needed ([Static kernel memory and the boot region](#static-kernel-memory-and-the-boot-region)) |
 | Is 4 KiB the right chunk for clearing an untyped between preemption points? | seL4 clears 256 bytes per preemption point; 4 KiB under TCG may take tens of microseconds | M4 | 4 KiB with an IRR read after each chunk; measure the longest non-preemptible stretch on QEMU and Hyper-V, and add a work-unit counter like seL4's only if the reads dominate |
 | Are boot-created objects (root CNode, TCB, VSpace, BootInfo) covered by an untyped? | If they are, revoking that untyped destroys the root task; if not, their memory is never reclaimed | M4 | As seL4: they come from the boot region, outside every untyped, and their capabilities are derivation roots |
 | Are 448 untyped descriptors enough? | Boot panics if not | M4, from the recorded QEMU and Hyper-V memory maps | Yes, by several times on both targets; if not, BootInfo grows to four pages as version 2 |

@@ -20,6 +20,8 @@ use crate::boot::BootState;
 const CR0_WP: u64 = 1 << 16;
 const CR4_PGE: u64 = 1 << 7;
 const CR4_UMIP: u64 = 1 << 11;
+const CR4_FSGSBASE: u64 = 1 << 16;
+const CR4_PCIDE: u64 = 1 << 17;
 const CR4_SMEP: u64 = 1 << 20;
 const CR4_SMAP: u64 = 1 << 21;
 const EFER_NXE: u64 = 1 << 11;
@@ -164,14 +166,18 @@ pub fn init(boot: &'static BootState, window: &DeviceWindow) {
     };
     let pml4 = KernelTables::table_phys(tables_phys, PML4);
 
-    let mut cr4 = cpu::read_cr4() | CR4_SMEP | CR4_SMAP | CR4_PGE;
+    // PCID stays off and the kernel switches FS and GS bases itself
+    // (`docs/design.md`, CPU features; ADR 0015), whatever the firmware left.
+    let mut cr4 = (cpu::read_cr4() | CR4_SMEP | CR4_SMAP | CR4_PGE) & !(CR4_PCIDE | CR4_FSGSBASE);
     if cpu::cpuid_features().has(Feature::Umip) {
         cr4 |= CR4_UMIP;
     }
     // SAFETY: `check_cpu` found SMEP, SMAP and PGE, and UMIP is set only
     // when CPUID reports it. No page the kernel uses is user-accessible in
     // the loader's tables or in its own, so SMEP and SMAP stop nothing it
-    // does; PGE only lets the new tables' global bits take effect.
+    // does; PGE only lets the new tables' global bits take effect. Clearing
+    // PCIDE is allowed at any time, and the CR3 load below then uses no
+    // PCID; nothing in the kernel uses the FS or GS base instructions.
     unsafe { cpu::write_cr4(cr4) };
     // SAFETY: `build` mapped the image at KERNEL_VIRT_BASE with this code,
     // the stack (minus its guard pages) and BootState, and the direct map
