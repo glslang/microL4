@@ -3,15 +3,21 @@
 //! the machine.
 
 mod acpi;
+mod apic;
 mod cell;
 mod cpu;
 mod entry;
 mod gdt;
+mod hpet;
+mod hyperv;
 mod idt;
 mod io;
+mod ioapic;
 mod irq;
 mod paging;
+mod pic;
 pub mod serial;
+mod timer;
 mod trap;
 
 use core::arch::{asm, global_asm};
@@ -20,10 +26,12 @@ use l4core::handoff::{Handoff, MemoryRegion, PHYS_MAP_BASE};
 
 use crate::boot::BootState;
 
+pub use apic::test_nmi_stack;
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
 pub use paging::{test_lowmem, test_paging};
-pub use trap::{Provoke, idle_self_test, print_stack_use, provoke};
+pub use timer::start_ticks_test;
+pub use trap::{Provoke, idle, idle_self_test, print_stack_use, provoke};
 
 // The Hyper-V hypercall page (`docs/design.md`, "The kernel half"): one page
 // of the text segment of its own. M9 points `HV_X64_MSR_HYPERCALL` at it and
@@ -37,7 +45,8 @@ global_asm!(
 /// Steps 3 to 5 of the M3 boot sequence (`docs/design.md`, "Boot
 /// sequence"), after the CPU check and the copy of the handoff into `boot`.
 /// Runs with interrupts off, on the loader's page tables until `paging`
-/// replaces them.
+/// replaces them. Afterwards the timer ticks at 100 Hz, and the first tick
+/// is taken when the kernel idles.
 pub fn init(boot: &'static BootState) {
     // Step 3: GDT, TSS, IDT, CR4.MCE, GS base, DR7.
     gdt::init();
@@ -45,6 +54,16 @@ pub fn init(boot: &'static BootState) {
     // kernel's page tables, PAT, CR4 and CR3.
     let window = acpi::init(boot);
     paging::init(boot, &window);
+    // Step 5: Hyper-V's leftovers off (a synthetic timer can raise an
+    // NMI); the local APIC, LINT0 masked before the PIC is reprogrammed;
+    // the I/O APICs; the HPET; then calibration and the 100 Hz timer.
+    let hv = hyperv::init();
+    let platform = acpi::platform();
+    apic::init();
+    pic::init(platform.madt.pcat_compat());
+    ioapic::init(platform);
+    let hpet = hpet::init(platform);
+    timer::init(hv, hpet);
 }
 
 /// QEMU's `isa-debug-exit` device, configured by `cargo xtask` at this port.

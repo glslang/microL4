@@ -23,7 +23,7 @@
 
 use core::arch::{asm, global_asm};
 use core::ops::Range;
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use l4core::trap::{self as t, KernelTrap, Report, TrapFrame};
 
@@ -226,7 +226,59 @@ extern "C" fn trap_fatal(frame: *const TrapFrame) -> ! {
     // SAFETY: as in `trap_from_kernel`; `trap_fatal_entry` pushed the frame
     // on the vector's IST stack.
     let frame = unsafe { &*frame };
+    if NMI_OVERFLOW.load(Ordering::Relaxed) {
+        nmi_overflow_test(frame, cr2);
+    }
     panic!("fatal trap: {}", report(frame, cr2))
+}
+
+/// Set by `test=nmi_stack` only: the NMI handler recurses until IST2
+/// overflows.
+static NMI_OVERFLOW: AtomicBool = AtomicBool::new(false);
+
+/// Arms `test=nmi_stack`'s recursion in the NMI handler.
+pub fn arm_nmi_overflow() {
+    NMI_OVERFLOW.store(true, Ordering::Relaxed);
+}
+
+/// `test=nmi_stack`, in the fatal handler. On the NMI: recurse until IST2
+/// runs into the unmapped guard page below it, where the page fault cannot
+/// push its frame and becomes a double fault on IST1. On that double fault:
+/// say whether CR2 is in IST2's guard page, then report as usual.
+fn nmi_overflow_test(frame: &TrapFrame, cr2: u64) {
+    let ist2 = &gdt::stack_layout().ist[1];
+    match u8::try_from(frame.vector) {
+        Ok(t::NMI) => {
+            kprintln!(
+                "nmi_stack: NMI on {}; recursing until IST2 ({:#x}-{:#x}) overflows",
+                gdt::stack_layout().stack_of(frame as *const TrapFrame as u64),
+                ist2.start,
+                ist2.end
+            );
+            let depth = overflow_stack(0);
+            panic!("nmi_stack: IST2 never overflowed (depth {depth})")
+        }
+        Ok(t::DOUBLE_FAULT) => kprintln!(
+            "nmi_stack: double fault with CR2 {cr2:#x} {} IST2's guard page",
+            if (ist2.start - 4096..ist2.start).contains(&cr2) {
+                "in"
+            } else {
+                "NOT in"
+            }
+        ),
+        _ => {}
+    }
+}
+
+/// Recurses until the stack runs into its guard page. Each frame holds 512
+/// bytes the optimiser cannot drop, so an 8 KiB IST stack is gone after
+/// about 16 calls.
+fn overflow_stack(depth: u64) -> u64 {
+    let frame = core::hint::black_box([depth; 64]);
+    if depth == u64::MAX {
+        return 0;
+    }
+    overflow_stack(depth + 1) + frame[(depth % 64) as usize]
 }
 
 /// Calls `f(arg)` at the top of the kernel stack.
@@ -330,6 +382,10 @@ fn idle_test_round(vector: u8, rsp: u64, rflags: u64) {
     const IF: u64 = 1 << 9;
     let left = IDLE_TEST_ROUNDS.load(Ordering::Relaxed);
     if left == 0 {
+        return;
+    }
+    // The periodic timer runs from step 5; its ticks are not rounds.
+    if vector == t::TIMER {
         return;
     }
     let round = IDLE_TEST - left + 1;

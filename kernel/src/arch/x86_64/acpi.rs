@@ -61,10 +61,6 @@ pub fn init(boot: &'static BootState) -> DeviceWindow {
 }
 
 /// What the kernel took from ACPI. Panics before [`init`].
-#[expect(
-    dead_code,
-    reason = "M3's interrupt controllers and timer read it (builder D)"
-)]
 pub fn platform() -> &'static Platform {
     PLATFORM.get().expect("ACPI is parsed in arch::init")
 }
