@@ -27,6 +27,7 @@ pub mod error;
 pub mod handoff;
 pub mod kernel;
 pub mod slot;
+pub mod trap;
 pub mod untyped;
 pub mod window;
 

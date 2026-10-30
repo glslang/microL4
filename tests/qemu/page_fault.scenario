@@ -1,0 +1,14 @@
+# A ring-0 read of an upper-half address no page table maps (PML4 slot 300)
+# is a kernel bug: the #PF handler panics with one report naming the vector,
+# the decoded error code, CR2, RIP and RSP (docs/design.md, "Interrupts and
+# exceptions taken in ring 0").
+cmdline: test=page_fault
+exit: failure
+expect: microL4 kernel
+expect: KERNEL PANIC at kernel/src/arch/x86_64/trap.rs:
+expect: fatal trap:
+expect: PF page fault (vector 14) in ring 0: error 0x0 (not present, supervisor read), CR2 0xffff960000000000, RIP 0xffffffff8
+expect: RSP 0xffffffff8
+expect: CS 0x8, frame on the kernel stack
+expect: rax
+expect: r15

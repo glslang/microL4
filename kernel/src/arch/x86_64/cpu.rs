@@ -105,10 +105,6 @@ pub fn read_cr0() -> u64 {
 }
 
 /// Reads CR2, the address of the last page fault.
-#[expect(
-    dead_code,
-    reason = "M3's descriptor tables, page tables and devices use it"
-)]
 pub fn read_cr2() -> u64 {
     let v;
     // SAFETY: reading CR2 has no side effects.
@@ -142,10 +138,6 @@ pub fn read_cr4() -> u64 {
 ///
 /// The new value must keep every mapping the kernel relies on valid, and
 /// may set only features the CPU has.
-#[expect(
-    dead_code,
-    reason = "M3's descriptor tables, page tables and devices use it"
-)]
 pub unsafe fn write_cr4(v: u64) {
     // SAFETY: the caller vouches for the value. The write can change how
     // memory is translated, so it is not `nomem`.
@@ -170,10 +162,6 @@ pub fn read_msr(msr: u32) -> u64 {
 ///
 /// The MSR must exist, and the value must leave the CPU in a state the
 /// kernel's memory safety survives.
-#[expect(
-    dead_code,
-    reason = "M3's descriptor tables, page tables and devices use it"
-)]
 pub unsafe fn write_msr(msr: u32, v: u64) {
     // SAFETY: the caller vouches for the register and value. Some MSRs
     // change how memory is accessed, so this is not `nomem`.

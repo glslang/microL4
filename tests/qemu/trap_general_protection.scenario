@@ -1,0 +1,9 @@
+# Loading DS with selector 0x38, past the GDT's seven entries, raises #GP
+# with the selector as its error code, which the CPU pushes; the report
+# decodes it, and the frame is read in place (CS is the kernel's).
+cmdline: test=trap_general_protection
+exit: failure
+expect: microL4 kernel
+expect: fatal trap:
+expect: GP general protection (vector 13) in ring 0: error 0x38 (GDT selector 0x38), RIP 0xffffffff8
+expect: CS 0x8, frame on the kernel stack

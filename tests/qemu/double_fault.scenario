@@ -1,0 +1,13 @@
+# With RSP in an unmapped page, `ud2` cannot push its #UD frame and the #PF
+# that follows cannot push either, so the CPU raises #DF, which runs on IST1
+# and panics with its report. IST1 is painted first; the panic handler then
+# prints how much of its 8 KiB the report used.
+cmdline: test=double_fault
+exit: failure
+expect: microL4 kernel
+expect: KERNEL PANIC at kernel/src/arch/x86_64/trap.rs:
+expect: fatal trap:
+expect: DF double fault (vector 8) in ring 0: error 0x0, CR2 0xffff960000000ff8,
+expect: frame on IST1
+expect: IST1: the fatal report used
+expect: of 8192 bytes

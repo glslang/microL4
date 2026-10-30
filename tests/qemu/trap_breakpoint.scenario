@@ -1,0 +1,13 @@
+# `int3` in ring 0 reaches the #BP stub (DPL 3, so ring 3 can use it from
+# M5) and panics. Each general register holds a distinct value, so the
+# report shows the frame in the design's order.
+cmdline: test=trap_breakpoint
+exit: failure
+expect: microL4 kernel
+expect: fatal trap:
+expect: BP breakpoint (vector 3) in ring 0: error 0x0, RIP
+expect: CS 0x8, frame on the kernel stack
+expect: rax 0x000000000000aaaa  rbx 0x000000000000bbbb  rcx 0x000000000000cccc  rdx 0x000000000000dddd
+expect: rsi 0x0000000000005151  rdi 0x000000000000d1d1  rbp 0x000000000000b9b9   r8 0x0000000000008888
+expect: r9 0x0000000000009999  r10 0x0000000000001010  r11 0x0000000000001111  r12 0x0000000000001212
+expect: r13 0x0000000000001313  r14 0x0000000000001414  r15 0x0000000000001515

@@ -1,0 +1,12 @@
+# The idle loop's interrupt path without a timer: a test variant of the loop
+# raises the spurious vector with `int 0xff`. Each time the frame is
+# discarded, irq::handle runs with interrupts off, and the loop is entered
+# again on a fresh stack, so every round sees the same RSP.
+cmdline: test=idle_irq
+exit: success
+expect: microL4 kernel
+expect: idle: round 1: interrupt 0xff with IF 0 at RSP 0xffffffff8
+expect: idle: round 2: interrupt 0xff with IF 0 at RSP 0xffffffff8
+expect: idle: round 3: interrupt 0xff with IF 0 at RSP 0xffffffff8
+expect: idle: 3 interrupts from the idle loop, each on a fresh stack
+expect: TEST PASS
