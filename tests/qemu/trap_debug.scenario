@@ -1,0 +1,8 @@
+# A single step in ring 0 (TF set by `popfq`) raises #DB, which runs on
+# IST4; a ring-0 #DB anywhere but at `syscall_entry` (M5) panics.
+cmdline: test=trap_debug
+exit: failure
+expect: microL4 kernel
+expect: fatal trap:
+expect: DB debug (vector 1) in ring 0: error 0x0, RIP
+expect: frame on IST4

@@ -63,6 +63,17 @@ fn kmain(handoff_phys: u64) -> ! {
             arch::exit(arch::ExitCode::Success)
         }
         Some("panic") => panic!("deliberate panic requested by the command line"),
+        // Ring-0 traps and the idle loop's interrupt path (M3).
+        Some("page_fault") => arch::provoke(arch::Provoke::PageFault),
+        Some("double_fault") => arch::provoke(arch::Provoke::DoubleFault),
+        Some("trap_breakpoint") => arch::provoke(arch::Provoke::Breakpoint),
+        Some("trap_general_protection") => arch::provoke(arch::Provoke::GeneralProtection),
+        Some("trap_nmi") => arch::provoke(arch::Provoke::Nmi),
+        Some("trap_machine_check") => arch::provoke(arch::Provoke::MachineCheck),
+        Some("trap_debug") => arch::provoke(arch::Provoke::Debug),
+        Some("trap_cannot_occur") => arch::provoke(arch::Provoke::CannotOccur),
+        Some("trap_irq_outside_idle") => arch::provoke(arch::Provoke::InterruptOutsideIdle),
+        Some("idle_irq") => arch::idle_self_test(),
         Some(other) => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)
@@ -123,6 +134,7 @@ fn panic(info: &PanicInfo) -> ! {
             ),
             None => kprintln!("KERNEL PANIC: {}", info.message()),
         }
+        arch::print_stack_use();
     }
     arch::exit(arch::ExitCode::Failure)
 }

@@ -1,0 +1,7 @@
+# `int 2` runs the NMI handler on IST2, which panics from either ring
+# without reading GS.
+cmdline: test=trap_nmi
+exit: failure
+expect: microL4 kernel
+expect: fatal trap: NMI non-maskable interrupt (vector 2) in ring 0: error 0x0, RIP
+expect: frame on IST2

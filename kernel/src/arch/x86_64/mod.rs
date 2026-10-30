@@ -6,9 +6,12 @@ mod cell;
 mod cpu;
 mod entry;
 mod gdt;
+mod idt;
 mod io;
+mod irq;
 mod paging;
 pub mod serial;
+mod trap;
 
 use core::arch::{asm, global_asm};
 
@@ -18,6 +21,7 @@ use crate::boot::BootState;
 
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
+pub use trap::{Provoke, idle_self_test, print_stack_use, provoke};
 
 // The Hyper-V hypercall page (`docs/design.md`, "The kernel half"): one page
 // of the text segment of its own. M9 points `HV_X64_MSR_HYPERCALL` at it and

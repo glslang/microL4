@@ -1,0 +1,8 @@
+# `int 18` runs the #MC handler on IST3, which panics from either ring
+# without reading GS.
+cmdline: test=trap_machine_check
+exit: failure
+expect: microL4 kernel
+expect: fatal trap:
+expect: MC machine check (vector 18) in ring 0: error 0x0, RIP
+expect: frame on IST3
