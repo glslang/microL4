@@ -30,12 +30,10 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
   - **Source check:** `cargo xtask test` fails if the kernel source contains `stac`.
 - [x] A fresh M3 reviewer found no kernel bug. It asked for the Hyper-V check image, a null LDT, PCIDE cleared, and a correction to the #DF-stack overflow text. All of these are done, and it signed off.
 - [x] The M3 Hyper-V check passed on the owner's host (2026-10-30, CI's `microl4-vhdx-m3-check`): ten ticks at 100.002 Hz against the reference counter and `TEST PASS`; the results are under "Hyper-V checks".
+  - Its ACPI tables are host-tested as `core/tests/acpi/hyperv-gen2.dump`, without the 123 KB DSDT the parser never reads. The test checks no HPET, no MCFG, one I/O APIC with ID 1, only the IRQ 9 override, COM1 on GSI 4, and ISA IRQ 0 on GSI 0, unlike q35. The corrupted-copy test covers these tables too.
 - [x] An M2 bug found during M3, fixed in PR #4: a revoke whose own slot its work destroyed ended differently depending on where preemption fell. The first shape seen was two CNodes holding each other's only capability. See "Decisions" below.
 
 ## Next
-- [ ] Commit the Hyper-V ACPI tables. The pasted log on PR #4 starts after the dump. The full COM1 log, `l4-com1-20261030-184352.log` on the owner's host, has the `loader: acpidump:` lines.
-  - Attach it to the PR or commit it, then run `cargo xtask acpidump --from-log <log> --out core/tests/acpi/hyperv-gen2.dump`.
-  - Add a host test of what the boot log showed: no HPET, no MCFG, COM1 on GSI 4, edge, active high, one I/O APIC with ID 1 at `0xfec00000`, and only the IRQ 9 override.
 - [ ] M4 · Kernel objects and BootInfo:
   - wire `l4core` into the kernel through `SlotMemory` and `Kernel` in `arch`;
   - make the BootInfo untyped from the memory map, keeping out `kernel_reserved`: the device-window pages, the MSI window, and `hyperv::Info.locked_hypercall_page`;

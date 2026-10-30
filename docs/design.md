@@ -3149,7 +3149,9 @@ message decoding, with host tests and a proptest against a set model;
 The kernel alone parses ACPI, once at boot (M3), from the RSDP the loader
 passes: the XSDT (the RSDT only for revision 0), the MADT, the HPET table and
 the MCFG. The parser is in `core/`, host-tested on tables dumped from QEMU's
-q35, and from Hyper-V once the M3 Hyper-V check dumps them; user space gets
+q35, and from the owner's Hyper-V Generation 2 VM at the M3 Hyper-V check
+(`core/tests/acpi/hyperv-gen2.dump`, without its 123 KB DSDT, which the
+parser never reads); user space gets
 the few facts it needs in BootInfo's
 `InterruptInfo`, never the tables, and `ACPI_RECLAIMABLE` memory becomes RAM
 untyped after parsing. The local APIC timer runs periodically at 100 Hz,
