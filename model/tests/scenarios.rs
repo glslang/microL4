@@ -453,7 +453,8 @@ fn partial_revoke_of_an_untyped_inside_a_cnode_made_from_it() {
 /// Revoking their untyped deletes C's capability first: clearing C meets
 /// D's last capability, whose Zombie is swapped into D's slot 0, which is
 /// the slot being deleted. That slot now holds D's Zombie (seL4's
-/// "self-referential" case), so the deletion goes on to clear D.
+/// "self-referential" case), so that deletion ends; D's Zombie is the
+/// untyped's descendant too, so the revoke reaches it next and clears D.
 #[test]
 fn cnodes_holding_each_others_only_capabilities() {
     let mut w = World::new(&Config::default());
@@ -541,6 +542,74 @@ fn revoke_whose_slot_receives_a_zombie() {
         assert!(is_zombie_for(w.m.cap(cnode_slot(d, 0)), d));
         assert!(w.m.cap(root_slot(11)).is_null());
         assert!((0..4).all(|i| w.m.cap(cnode_slot(c, i)).is_null()));
+    }
+}
+
+/// The shape of a random failure: CNodes C, from an untyped U made from the
+/// big untyped, and D, from the big untyped itself, hold each other's only
+/// capabilities, C's in D's slot 0. Revoking U deletes C's capability there;
+/// clearing C meets D's last capability, whose Zombie the nested deletion
+/// swaps into D's slot 0, the slot being deleted. D's Zombie is not U's
+/// descendant, so a restarted revoke could not go on clearing D: the
+/// deletion ends there, preempted or not, and D stays detached, its
+/// endpoint alive, until a revoke of the big untyped reaches its Zombie.
+#[test]
+fn revoke_through_a_cycle_leaves_the_other_cnode_detached() {
+    let schedules: [&[u8]; 9] = [
+        &[],
+        &[0],
+        &[1],
+        &[2],
+        &[3],
+        &[4],
+        &[5],
+        &[2, 4],
+        &EVERY_POINT,
+    ];
+    for schedule in schedules {
+        let mut w = World::new(&Config::default());
+        let root = w.root;
+        ok(&mut w, retype(big(), root, UNTYPED, 12, 10, 1));
+        ok(&mut w, retype(root_slot(10), root, CNODE, 1, 11, 1));
+        ok(&mut w, retype(big(), root, CNODE, 2, 12, 1));
+        let (c, d) = (w.m.cap(root_slot(11)), w.m.cap(root_slot(12)));
+        ok(&mut w, retype(big(), d, ENDPOINT, 0, 1, 1));
+        let endpoint = w.m.cap(cnode_slot(d, 1));
+        ok(
+            &mut w,
+            Action::Move {
+                src: root_slot(11),
+                dst: cnode_slot(d, 0),
+            },
+        );
+        ok(
+            &mut w,
+            Action::Move {
+                src: root_slot(12),
+                dst: cnode_slot(c, 0),
+            },
+        );
+
+        ok_preempted(
+            &mut w,
+            Action::Revoke {
+                slot: root_slot(10),
+            },
+            schedule,
+        );
+        let zombie = w.m.cap(cnode_slot(d, 0));
+        assert!(is_zombie_for(zombie, d), "{schedule:?}: {zombie:?}");
+        assert_eq!(zombie.zombie_slots(), 4, "{schedule:?}");
+        assert_eq!(w.m.cap(cnode_slot(d, 1)), endpoint, "{schedule:?}");
+        assert!((0..2).all(|i| w.m.cap(cnode_slot(c, i)).is_null()));
+        assert_eq!(w.abandoned, 0);
+
+        ok_preempted(&mut w, Action::Revoke { slot: big() }, schedule);
+        assert!((0..4).all(|i| w.m.cap(cnode_slot(d, i)).is_null()));
+        assert!(w.last_events.contains(&Event::Finalise {
+            cap: endpoint,
+            last: true
+        }));
     }
 }
 

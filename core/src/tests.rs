@@ -593,6 +593,79 @@ fn a_cnode_holding_its_only_capability_is_cleared_by_revoke() {
     assert!(w.finalised_last().contains(&ep(c.object() + 64)));
 }
 
+/// CNodes C and D, from different untyped, hold each other's only
+/// capabilities: C's in D's slot 0, D's in C's slot 0. Revoking C's untyped
+/// deletes C's capability in D's slot 0; clearing C meets D's last
+/// capability, and the nested deletion swaps D's Zombie into the slot being
+/// deleted. A restarted revoke finds its work only among the untyped's
+/// descendants, which D's Zombie is not, so the deletion ends there: D stays
+/// detached in its own slot 0, as after any nested deletion, and the revoke
+/// ends in the same state wherever it is preempted. (seL4 goes on to clear
+/// D, and abandons it half-cleared if preempted while doing so.)
+#[test]
+fn revoke_through_a_cycle_of_cnodes_ends_the_same_preempted_or_not() {
+    let setup = || {
+        let mut w = World::new();
+        cdt::insert_root(
+            &mut w.k,
+            slot(ROOT, 2),
+            Cap::untyped(DEV, UT_BITS, false, 1 << UT_BITS),
+        );
+        w.retype(1, ObjectType::CNode, 1, World::root(), 20, 1);
+        w.retype(2, ObjectType::CNode, 2, World::root(), 21, 1);
+        let (c, d) = (w.cap(slot(ROOT, 20)), w.cap(slot(ROOT, 21)));
+        w.retype(2, ObjectType::Endpoint, 0, d, 1, 1);
+        cnode::move_cap(&mut w.k, slot(ROOT, 20), slot(d.object(), 0)).unwrap();
+        cnode::move_cap(&mut w.k, slot(ROOT, 21), slot(c.object(), 0)).unwrap();
+        w.k.events.clear();
+        (w, c, d)
+    };
+
+    let (mut whole, c, d) = setup();
+    cnode::revoke(&mut whole.k, slot(ROOT, 1)).unwrap();
+    let detached = Cap::zombie(d.object(), d.size_bits(), 4, false);
+    assert_eq!(whole.cap(slot(d.object(), 0)), detached);
+    assert_eq!(whole.cap(slot(d.object(), 1)), ep(d.object() + 128));
+    assert!(whole.cap(slot(c.object(), 0)).is_null());
+    assert!(!cdt::has_children(&whole.k, slot(ROOT, 1)));
+    assert_eq!(
+        cdt::parent(&whole.k, slot(d.object(), 0)),
+        Some(slot(ROOT, 2))
+    );
+    assert!(whole.finalised_last().is_empty());
+    whole.check(c.object(), 2);
+    whole.check(d.object(), 4);
+
+    // Preempted once at each point in turn, then at every point.
+    let mut points = 0;
+    loop {
+        let (mut w, ..) = setup();
+        w.k.preempt_in = Some(points);
+        let mut preempted = false;
+        while cnode::revoke(&mut w.k, slot(ROOT, 1)) == Err(Preempted) {
+            preempted = true;
+            w.check(c.object(), 2);
+            w.check(d.object(), 4);
+        }
+        assert!(w.k.mem == whole.k.mem, "preempted at point {points}");
+        assert_eq!(w.k.events, whole.k.events, "preempted at point {points}");
+        if !preempted {
+            break;
+        }
+        points += 1;
+    }
+    assert!(points >= 3, "only {points} preemption points");
+    let (mut w, ..) = setup();
+    w.until_done(0, |k| cnode::revoke(k, slot(ROOT, 1)));
+    assert!(w.k.mem == whole.k.mem);
+
+    // A revoke of D's untyped reaches the Zombie and clears D.
+    cnode::revoke(&mut whole.k, slot(ROOT, 2)).unwrap();
+    assert!((0..4).all(|i| whole.cap(slot(d.object(), i)).is_null()));
+    assert_eq!(whole.finalised_last(), [ep(d.object() + 128)]);
+    assert!(!cdt::has_children(&whole.k, slot(ROOT, 2)));
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "4,094 copy-and-delete steps are too slow under Miri")]
 fn depth_limit_is_reachable_and_refused() {
