@@ -18,7 +18,8 @@ never sees UEFI.
    first, then 1.0) and the GOP framebuffer, if the current mode has a linear
    RGB or BGR framebuffer.
 3. It reads `\kernel.elf` and the optional `\cmdline.txt` from the partition it
-   was loaded from, and parses the ELF with `l4core::elf`.
+   was loaded from, dumps the ACPI tables to COM1 if the command line asks
+   ([Command line](#command-line)), and parses the ELF with `l4core::elf`.
 4. It copies the kernel's non-empty `PT_LOAD` segments into one contiguous
    run of LoaderData pages and zeroes the rest (BSS). Every loader allocation
    uses AllocateMaxAddress below 64 GiB, the end of the kernel's direct map
@@ -80,6 +81,13 @@ knows one key:
 | `test=hello` | the same, then `TEST PASS` and exit with success |
 | `test=panic` | panic deliberately |
 | `test=<other>` | `TEST FAIL: unknown test`, exit with failure |
+
+The loader reads one word itself (M3). With `acpidump` on the line, in any
+build, it prints every ACPI table it can reach from the RSDP to COM1 before
+it loads the kernel, then boots as usual; `cargo xtask acpidump` turns that
+log into a test file in `core/tests/acpi/` (on Hyper-V, see
+`tools/hyperv/README.md`). The kernel ignores the word. The `acpidump`
+scenario checks it.
 
 QEMU scenarios choose a test by writing `cmdline.txt`; there is one kernel
 binary for every scenario. `cargo xtask image`, and so the CI-built VHDX, uses
