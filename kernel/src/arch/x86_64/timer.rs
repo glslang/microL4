@@ -180,8 +180,13 @@ fn ppm(measured: u64, expected: u64) -> i128 {
 
 /// Tick intervals the test times.
 const TIMED_TICKS: u64 = 10;
-/// Ticks the test has seen.
+/// Windows the test may restart after a lost interrupt before it fails.
+const MAX_RESTARTS: u64 = 5;
+/// Ticks the test has seen in the current window.
 static TEST_SEEN: AtomicU64 = AtomicU64::new(0);
+/// The previous tick's reload, and how many windows were restarted.
+static TEST_PREV_RELOAD: AtomicU64 = AtomicU64::new(0);
+static TEST_RESTARTS: AtomicU64 = AtomicU64::new(0);
 /// The reference when the handler of the tick that starts the timing ran,
 /// and when that tick's reload happened.
 static TEST_START: AtomicU64 = AtomicU64::new(0);
@@ -194,7 +199,10 @@ static TEST_START_RELOAD: AtomicU64 = AtomicU64::new(0);
 /// next [`TIMED_TICKS`] intervals against the reference, dating each tick
 /// by its reload ([`calibration::last_reload`]) so that the host's delay in
 /// delivering an interrupt does not count. It passes if they took 100 ms
-/// within 1%, and prints the handler-to-handler time as well.
+/// within 1%, and prints the handler-to-handler time as well. A gap of one
+/// and a half periods between two reloads means the host lost an interrupt
+/// ([`t::tick_lost`]); the window then starts again, at most
+/// [`MAX_RESTARTS`] times.
 pub fn start_ticks_test() {
     let Some(clock) = CLOCK.get() else {
         panic!("ticks: the timer is not running");
@@ -233,7 +241,29 @@ fn ticks_test_tick(_tick: u64) {
     let c = &clock.calibration;
     let reload =
         calibration::last_reload(reference, now, mask, c.initial_count, current, c.lapic_hz);
-    let seen = TEST_SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+    let fs = |from: &AtomicU64, to: u64| {
+        reference.elapsed_fs(counter_delta(from.load(Ordering::Relaxed), to, mask))
+    };
+    let us = |fs: u128| fs / 1_000_000_000;
+    let period = 1000 / u128::from(TICK_HZ) * FS_PER_MS;
+    let mut seen = TEST_SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+    if seen > 2 {
+        let gap = fs(&TEST_PREV_RELOAD, reload);
+        if t::tick_lost(gap, period) {
+            let restarts = TEST_RESTARTS.fetch_add(1, Ordering::Relaxed) + 1;
+            kprintln!(
+                "ticks: {} us between two reloads: the host lost an interrupt; restarting the window ({restarts} of {MAX_RESTARTS})",
+                us(gap)
+            );
+            if restarts > MAX_RESTARTS {
+                kprintln!("TEST FAIL");
+                exit(ExitCode::Failure)
+            }
+            TEST_SEEN.store(2, Ordering::Relaxed);
+            seen = 2;
+        }
+    }
+    TEST_PREV_RELOAD.store(reload, Ordering::Relaxed);
     if seen == 2 {
         TEST_START.store(now, Ordering::Relaxed);
         TEST_START_RELOAD.store(reload, Ordering::Relaxed);
@@ -241,14 +271,10 @@ fn ticks_test_tick(_tick: u64) {
     if seen != 2 + TIMED_TICKS {
         return;
     }
-    let fs = |from: &AtomicU64, to: u64| {
-        reference.elapsed_fs(counter_delta(from.load(Ordering::Relaxed), to, mask))
-    };
     let handlers = fs(&TEST_START, now);
     let reloads = fs(&TEST_START_RELOAD, reload);
     let expected = u128::from(TIMED_TICKS) * 1000 / u128::from(TICK_HZ) * FS_PER_MS;
     let ok = t::within_percent(reloads, expected, 1);
-    let us = |fs: u128| fs / 1_000_000_000;
     let millihertz = (u128::from(TIMED_TICKS) * t::FS_PER_S * 1000)
         .checked_div(reloads)
         .unwrap_or(0);

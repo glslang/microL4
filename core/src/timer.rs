@@ -198,6 +198,17 @@ pub fn within_percent(measured: u128, expected: u128, percent: u32) -> bool {
     measured.abs_diff(expected).saturating_mul(100) <= expected.saturating_mul(u128::from(percent))
 }
 
+/// Whether the reference time between two consecutive timer reloads the
+/// kernel saw, `gap`, means an interrupt was lost: at least one and a half
+/// periods. A host that runs the guest late, as QEMU's TCG does under load,
+/// folds expirations into one pending interrupt, so the ten-tick check
+/// would count fewer interrupts than periods. A timer whose period is
+/// itself 50% or more too long loses "ticks" on every interval, so it
+/// still fails the check rather than passing it.
+pub fn tick_lost(gap: u128, period: u128) -> bool {
+    gap.saturating_mul(2) >= period.saturating_mul(3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +425,15 @@ mod tests {
         assert!(!within_percent(99 * FS_PER_MS - 1, expected, 1));
         assert!(!within_percent(u128::MAX, expected, 1));
         assert!(within_percent(0, 0, 0));
+    }
+
+    #[test]
+    fn a_lost_tick_is_a_gap_of_one_and_a_half_periods() {
+        let period = 10 * FS_PER_MS;
+        assert!(!tick_lost(period, period));
+        assert!(!tick_lost(15 * FS_PER_MS - 1, period));
+        assert!(tick_lost(15 * FS_PER_MS, period));
+        assert!(tick_lost(20 * FS_PER_MS, period));
+        assert!(!tick_lost(0, period));
     }
 }
