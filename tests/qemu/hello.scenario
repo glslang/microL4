@@ -1,12 +1,17 @@
-# The kernel boots on QEMU, reports what the loader handed over, and says
-# hello. The CI-built VHDX runs the same command line on Hyper-V.
+# The kernel boots on QEMU, reports what the loader handed over and the CPU
+# state it set up, and says hello. The CI-built VHDX runs the same command
+# line on Hyper-V.
 cmdline: test=hello
 exit: success
 expect: loader: microL4 loader
 expect: entering kernel
 expect: microL4 kernel
+expect: cpu: features NX PGE PAT SMEP SMAP XSAVE
 expect: memory:
 expect: cpu: hypervisor QEMU
 expect: cmdline: "test=hello"
+expect: cpu: CR0
+expect: cpu: IA32_APIC_BASE
+expect: cpu: meltdown:
 expect: hello from microL4
 expect: TEST PASS

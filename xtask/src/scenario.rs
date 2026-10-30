@@ -9,6 +9,7 @@
 //! cmdline: test=hello
 //! exit: success            # or: failure
 //! timeout: 60              # seconds; optional, at most 60
+//! qemu_args: -cpu qemu64   # optional; appended to the QEMU command line
 //! expect: microL4 kernel   # a substring of one serial line
 //! expect: TEST PASS
 //! ```
@@ -55,6 +56,8 @@ impl Exit {
 pub struct Scenario {
     pub name: String,
     pub cmdline: String,
+    /// Extra QEMU arguments, split on whitespace.
+    pub qemu_args: Vec<String>,
     pub exit: Exit,
     pub timeout: Duration,
     pub expect: Vec<String>,
@@ -62,6 +65,7 @@ pub struct Scenario {
 
 pub fn parse(name: &str, text: &str) -> Result<Scenario> {
     let mut cmdline = String::new();
+    let mut qemu_args = Vec::new();
     let mut exit = None;
     let mut timeout = MAX_TIMEOUT;
     let mut expect = Vec::new();
@@ -83,6 +87,7 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
         .trim();
         match key.trim() {
             "cmdline" => cmdline = value.to_string(),
+            "qemu_args" => qemu_args.extend(value.split_whitespace().map(String::from)),
             "exit" => {
                 exit = Some(match value {
                     "success" => Exit::Success,
@@ -111,6 +116,7 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
     Ok(Scenario {
         name: name.to_string(),
         cmdline,
+        qemu_args,
         exit,
         timeout,
         expect,
@@ -245,6 +251,7 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
     let start = Instant::now();
     let mut child = qemu::base_command(&disk)?
         .args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
+        .args(&sc.qemu_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -365,6 +372,7 @@ expect: TEST PASS   # the kernel's success marker
             Scenario {
                 name: "hello".into(),
                 cmdline: "test=hello".into(),
+                qemu_args: vec![],
                 exit: Exit::Success,
                 timeout: MAX_TIMEOUT,
                 expect: vec!["microL4 kernel".into(), "TEST PASS".into()],
@@ -378,6 +386,16 @@ expect: TEST PASS   # the kernel's success marker
         assert_eq!(s.expect, vec!["issue#12 seen"]);
         assert_eq!(s.timeout, Duration::from_secs(5));
         assert_eq!(s.cmdline, "");
+    }
+
+    #[test]
+    fn qemu_args_split_and_accumulate() {
+        let s = parse(
+            "x",
+            "exit: failure\nqemu_args: -cpu qemu64  # old CPU\nqemu_args: -machine hpet=off\nexpect: x\n",
+        )
+        .unwrap();
+        assert_eq!(s.qemu_args, ["-cpu", "qemu64", "-machine", "hpet=off"]);
     }
 
     #[test]

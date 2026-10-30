@@ -38,9 +38,15 @@ fn ovmf() -> Result<PathBuf> {
 /// The machine every boot uses: q35, 256 MiB, OVMF, the disk, and the
 /// isa-debug-exit device the kernel's test exits rely on. Display, serial and
 /// monitor are left to the caller.
+///
+/// The CPU is `max` without LA57: QEMU's default `qemu64` lacks SMEP, SMAP
+/// and XSAVE, which the kernel requires (`docs/design.md`, CPU features),
+/// and the loader refuses 5-level paging. A later `-cpu` argument, such as a
+/// scenario's `qemu_args:`, overrides it.
 pub fn base_command(disk: &Path) -> Result<Command> {
     let mut cmd = Command::new(QEMU);
-    cmd.args(["-machine", "q35", "-m", "256M", "-no-reboot"])
+    cmd.args(["-machine", "q35", "-cpu", "max,la57=off", "-m", "256M"])
+        .arg("-no-reboot")
         .arg("-bios")
         .arg(ovmf()?)
         .arg("-drive")

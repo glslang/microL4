@@ -1,0 +1,9 @@
+# On a CPU without a required feature the kernel refuses to boot before it
+# changes any state, with one line naming every missing feature. QEMU's
+# qemu64 model lacks SMEP, SMAP and XSAVE (docs/design.md, CPU features).
+cmdline: test=hello
+qemu_args: -cpu qemu64
+exit: failure
+expect: microL4 kernel
+expect: KERNEL PANIC at kernel/src/arch/x86_64/cpu.rs:
+expect: CPU lacks SMEP SMAP XSAVE

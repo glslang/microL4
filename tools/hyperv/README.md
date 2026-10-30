@@ -24,13 +24,21 @@ Actions page or with the GitHub CLI:
 gh run download --repo glslang/microL4 --name microl4-vhdx --dir microl4-vhdx <run-id>
 ```
 
-Then create the VM. It is a Generation 2 VM named `l4` with 512 MB, Secure
-Boot off, COM1 on `\\.\pipe\l4-com1`, and no automatic checkpoints. Pass
-`-SwitchName ''` if you have no `Default Switch`; networking is not needed
-until M9.
+Then create the VM. It is a Generation 2 VM named `l4` with 512 MB, one vCPU
+with processor compatibility mode off, Secure Boot off, COM1 on
+`\\.\pipe\l4-com1`, and no automatic checkpoints. Pass `-SwitchName ''` if
+you have no `Default Switch`; networking is not needed until M9.
 
 ```powershell
 .\New-L4Vm.ps1 -VhdxPath .\microl4-vhdx\disk.vhdx
+```
+
+From M3 the kernel refuses to boot without SMEP, SMAP and XSAVE, which
+processor compatibility mode hides. A VM created before M3 needs it turned off
+once, with the VM off:
+
+```powershell
+Set-VMProcessor -VMName l4 -Count 1 -CompatibilityForMigrationEnabled $false
 ```
 
 ## Each check: boot a new VHDX
