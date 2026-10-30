@@ -1,11 +1,11 @@
 # Status
-Current milestone: M3 · Paging and interrupts. The code is built and passes on QEMU, and the fresh reviewer signed off on 2026-10-30. The done-when test's Hyper-V half, the timer rate on the owner's host, waits for the M3 Hyper-V check: boot CI's `microl4-vhdx-m3-check` artifact (`tools/hyperv/README.md`, "At the M3 check"). Tick M3 when that log passes. Next: M4 · Kernel objects and BootInfo, which needs M2 and M3.
+Current milestone: M3 · Paging and interrupts, complete: the done-when test passed on QEMU and on the owner's Hyper-V host (2026-10-30), and the fresh reviewer signed off. Next: M4 · Kernel objects and BootInfo.
 
 ## Done
 - [x] M0 · Bootstrap and tooling (PR #1, merged 2026-10-29)
 - [x] M1 · Design and ABI (PR #2, merged 2026-10-30): `docs/design.md`, `docs/abi.md` v0 and ADRs 0004 to 0023
 - [x] M2 · Capability core and model (PR #3, merged 2026-10-30): the capability core in `l4core`, a reference model in `model/` with a 10,000-case differential proptest, and Miri clean. A fresh reviewer failed to break an invariant.
-- [x] M3 code (PR #4), the boot sequence of `docs/design.md`, "Boot":
+- [x] M3 · Paging and interrupts (PR #4), the boot sequence of `docs/design.md`, "Boot":
   - **CPU check:** `l4core::cpu`, `arch::check_cpu`. The kernel refuses to boot without NX, PGE, PAT, SMEP, SMAP and XSAVE, with one `CPU lacks` line (`cpu_refuse` boots `-cpu qemu64`). The boot summary prints the features, CR0, CR4, EFER, `IA32_APIC_BASE` and the Meltdown line.
   - **`BootState`:** the handoff and memory map are copied out of loader memory after the ADR 0006 bounds check. The loader allocates below 64 GiB.
   - **Descriptor tables and traps:** `l4core::trap`, `arch::{gdt,idt,trap,irq}`.
@@ -29,20 +29,14 @@ Current milestone: M3 · Paging and interrupts. The code is built and passes on 
   - **Scenarios:** 22, covering the boot summary, eleven traps, page and double faults, overflows of the kernel, NMI and #DF stacks, the empty lower half, ACPI and its dump, ten ticks, and `hpet=off`.
   - **Source check:** `cargo xtask test` fails if the kernel source contains `stac`.
 - [x] A fresh M3 reviewer found no kernel bug. It asked for the Hyper-V check image, a null LDT, PCIDE cleared, and a correction to the #DF-stack overflow text. All of these are done, and it signed off.
+- [x] The M3 Hyper-V check passed on the owner's host (2026-10-30, CI's `microl4-vhdx-m3-check`): ten ticks at 100.002 Hz against the reference counter and `TEST PASS`; the results are under "Hyper-V checks".
 - [x] An M2 bug found during M3, fixed in PR #4: a preempted revoke through two CNodes that held each other's only capability ended differently than an uninterrupted one. See "Decisions" below.
 
 ## Next
-- [ ] The owner's M3 Hyper-V check: boot `microl4-vhdx-m3-check` with the README's command, and paste `m3-check.log` into PR #4. It must show:
-  - SMEP, SMAP and XSAVE in `cpu: features`;
-  - the `hyperv:` lines;
-  - calibration against the reference counter;
-  - `ticks: ... within 1%`.
-  Record the `cpu: meltdown:` line below.
-- [ ] From that log:
-  - `cargo xtask acpidump --from-log m3-check.log --out core/tests/acpi/hyperv-gen2.dump`, plus a host test that COM1 is GSI 4 and there is no HPET;
-  - close the Hyper-V open questions in `docs/design.md`: SMEP/SMAP/XSAVE, x2APIC handover, `PCAT_COMPAT`, PIC, PIT and HPET, the firmware leftovers, and the frequency MSRs;
-  - fix anything the Hyper-V paths got wrong. They have never run: TCG ignores `hv-*` flags and never offers x2APIC.
-- [ ] Tick M3, then start M4 · Kernel objects and BootInfo:
+- [ ] Commit the Hyper-V ACPI tables. The pasted log on PR #4 starts after the dump. The full COM1 log, `l4-com1-20261030-184352.log` on the owner's host, has the `loader: acpidump:` lines.
+  - Attach it to the PR or commit it, then run `cargo xtask acpidump --from-log <log> --out core/tests/acpi/hyperv-gen2.dump`.
+  - Add a host test of what the boot log showed: no HPET, no MCFG, COM1 on GSI 4, edge, active high, one I/O APIC with ID 1 at `0xfec00000`, and only the IRQ 9 override.
+- [ ] M4 · Kernel objects and BootInfo:
   - wire `l4core` into the kernel through `SlotMemory` and `Kernel` in `arch`;
   - make the BootInfo untyped from the memory map, keeping out `kernel_reserved`: the device-window pages, the MSI window, and `hyperv::Info.locked_hypercall_page`;
   - decode the CNode and Untyped invocations;
@@ -51,9 +45,9 @@ Current milestone: M3 · Paging and interrupts. The code is built and passes on 
   - add the retype, revoke and retype self-test.
 
 ## Open issues
-- **Untested paths:** the Hyper-V and x2APIC-handover paths have never run, and the M3 Hyper-V check is their first test. From memory and still unchecked:
-  - the VP assist page is gated on `AccessIntrCtrlRegs`, as KVM does;
-  - the time-unhalted timer's enable bit is bit 8.
+- **Never run anywhere:** the x2APIC-to-xAPIC handover. Both firmwares hand over in xAPIC mode, so only a host test covers it.
+- **From memory, never exercised:** the VP assist page's privilege gate (`AccessIntrCtrlRegs`, as KVM does) and the time-unhalted timer's enable bit 8. Both read as off on Hyper-V, so they were never written.
+- **Hyper-V's I/O APIC is version `0x11`, with no EOI register.** M7's plan for a stale Remote IRR (write the old vector to the EOI register) does not work there; see `docs/design.md`, Open questions.
 - **Toolchain drift:** CI runs Rust stable (1.99), and this session's default toolchain was 1.97. Run `cargo +1.99 xtask clippy` or newer before pushing, or pin the toolchain (ADR 0001 is the place to decide). On 1.99 a non-`.global` asm label read from Rust failed to link; every label Rust names through `extern` must be `.global`.
 - **#DF stack overflow:** it re-enters the #DF handler over its own frames, so the first report may be cut short (`df_stack`). Accepted: nothing runs on.
 - **`int1` (`0xF1`):** in ring 0 it raises #UD on QEMU 8.2 TCG, not #DB. Recheck the design's `int1` claims on real hardware or Hyper-V in M10, brief 5.
@@ -90,10 +84,15 @@ Current milestone: M3 · Paging and interrupts. The code is built and passes on 
   - GOP framebuffer 1024x768 BGR at `0xF8000000`, stride 1024.
   - RSDP at `0x1FFFA014`.
   - 10 memory regions, 509 MiB usable of 512 MiB; RAM ends at `0x20000000`, so the direct map is the 4 GiB minimum; no MMIO ranges in the map.
-- **M3:** pending. The README lists the lines to record. The QEMU equivalents for comparison:
-  - `cpu: meltdown: unknown`, since TCG reports no `IA32_ARCH_CAPABILITIES`;
-  - xAPIC at handover (`0xfee00900`);
-  - `PCAT_COMPAT` set, HPET present.
+- **M3 VHDX** (`microl4-vhdx-m3-check`, 2026-10-30): boots to `TEST PASS`; ten ticks reload over 99,998 µs, 100.002 Hz, against the reference counter.
+  - `cpu: meltdown: not vulnerable`. SMEP, SMAP and XSAVE are passed through: the boot got past `check_cpu`.
+  - `IA32_APIC_BASE` `0xfee00900`: xAPIC at handover, though CPUID offers x2APIC. LAPIC version `0x50014`, 6 LVTs.
+  - TLFS `Hv#1`, highest leaf `0x4000000b`; privileges EAX `0xae7f`, EBX `0x3b8030`; features EDX `0xe0bed7b2`.
+  - Firmware leftovers: only SCONTROL was on (`0x1`), now off. Everything else was off, no SINT was unmasked, and the hypercall MSR read `0x0`, so it was not locked.
+  - Calibration: LAPIC 200,001,000 Hz, 5 ppm from the APIC frequency MSR (200 MHz); TSC 2,112,120,929 Hz, 57 ppm from its MSR.
+  - ACPI: RSDP revision 2 at `0x1fffa014`, XSDT; tables FACP, OEM0, WAET, APIC, SRAT and BGRT; no HPET and no MCFG. MADT flags 0, so no `PCAT_COMPAT` and the 8259s are left alone. One I/O APIC, ID 1 at `0xfec00000`, version `0x11`, 24 pins. Only override: IRQ 9 to GSI 9, level, active high. COM1 on GSI 4, edge, active high.
+  - Paging: the direct map covers 4 GiB, 256 WB and 1792 UC 2 MiB pages; the device window holds 2 pages (no HPET).
+  - `Test-L4Vhdx.ps1` reported FAIL only because the owner ran it with its defaults, which then expected `cmdline: "test=hello"`. The defaults now hold only the lines every image prints.
 
 ## Last session
 2026-10-30: M3.
@@ -104,4 +103,5 @@ Current milestone: M3 · Paging and interrupts. The code is built and passes on 
   - CI's newer Rust exposed a non-global asm label and a new clippy lint; both are fixed.
   - Codex caught the ACPI reader stopping at 64 GiB instead of `phys_map_size`; it is fixed.
 - **Review:** the fresh reviewer's one blocking item was the missing Hyper-V tick check, now CI's `microl4-vhdx-m3-check`. It signed off after the fixes.
-- **Next:** the owner's Hyper-V check, then M4.
+- **Hyper-V:** the owner ran the M3 check that evening and it passed. Its results are recorded above and in `docs/design.md`'s answered open questions. One new problem for M7: Hyper-V's I/O APIC has no EOI register.
+- **Next:** the Hyper-V ACPI dump from the full log, then M4.
