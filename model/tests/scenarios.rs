@@ -619,6 +619,57 @@ fn revoke_through_a_cycle_leaves_the_other_cnode_detached() {
     }
 }
 
+/// Review of 2c60870: the cycle of the test above, where D's Zombie,
+/// swapped into the slot being deleted, has one slot left. A partial revoke
+/// of the small untyped from D's slot 1, while D's last capability lies in
+/// C's slot 1, leaves D's Zombie there counting 1; C's only capability, from
+/// the big untyped, lies in D's slot 0. Revoking the big untyped deletes
+/// it: clearing C swaps D's Zombie into D's slot 0 and C's Zombie into C's
+/// slot 1, and a preemption point falls before C's Zombie moves on to C's
+/// slot 0. Unpreempted, the revoke's deletion finds D's Zombie in its slot
+/// removable and empties it before its anchor check; preempted there, the
+/// restart finds C's Zombie in C's slot 1 and never comes back to D's slot
+/// 0. `docs/design.md` ("Deletion and finalisation", step 3) says D's
+/// Zombie stays.
+#[test]
+fn revoke_through_a_cycle_leaves_a_removable_zombie_alone() {
+    let mut schedules: Vec<Vec<u8>> = (0..8).map(|p| vec![p]).collect();
+    schedules.push(Vec::new());
+    schedules.push(EVERY_POINT.to_vec());
+    for schedule in &schedules {
+        let mut w = World::new(&Config::default());
+        let root = w.root;
+        let small = root_slot(boot::SMALL_UNTYPED);
+        ok(&mut w, retype(big(), root, CNODE, 1, 10, 1));
+        ok(&mut w, retype(small, root, CNODE, 1, 11, 1));
+        let (c, d) = (w.m.cap(root_slot(10)), w.m.cap(root_slot(11)));
+        for (src, dst) in [
+            (root_slot(11), cnode_slot(c, 1)),
+            (root_slot(10), cnode_slot(d, 0)),
+            (small, cnode_slot(d, 1)),
+        ] {
+            ok(&mut w, Action::Move { src, dst });
+        }
+        ok(
+            &mut w,
+            Action::Revoke {
+                slot: cnode_slot(d, 1),
+            },
+        );
+        assert_eq!(w.partial_revokes, 1);
+        let zombie = w.m.cap(cnode_slot(c, 1));
+        assert!(is_zombie_for(zombie, d) && zombie.zombie_slots() == 1);
+
+        ok_preempted(&mut w, Action::Revoke { slot: big() }, schedule);
+        assert!((0..2).all(|i| w.m.cap(cnode_slot(c, i)).is_null()));
+        let zombie = w.m.cap(cnode_slot(d, 0));
+        assert!(
+            is_zombie_for(zombie, d) && zombie.zombie_slots() == 1,
+            "{schedule:?}: D's slot 0 holds {zombie:?}"
+        );
+    }
+}
+
 /// The shape of a random failure: the big untyped U, revoked from slot `u`
 /// of a CNode C made from it, while C's last capability lies in C itself.
 /// The revoke deletes the root's capability to C, then C's last one,
