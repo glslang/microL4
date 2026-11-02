@@ -51,7 +51,15 @@ pub fn init(boot: &BootState, facts: &BootFacts) {
 }
 
 /// Boot step 9: BootInfo's two frames at physical `paddr`, in the boot
-/// region step 6 zeroed, as one `BootInfo` for boot to fill. Once per boot.
+/// region step 6 zeroed, as one `BootInfo` for boot to fill. The first call
+/// only gets them; any later one panics.
+///
+/// Checked here: `paddr` is page-aligned, both frames are RAM kernel
+/// objects may occupy (inside the direct map, outside the kernel image and
+/// a locked hypercall page), and they read zero. The caller's word: they
+/// are BootInfo's frames in the boot region, which no untyped covers and
+/// nothing but boot touches; `l4core::boot::plan` placed them there, and
+/// boot passes that address.
 pub fn bootinfo_frames(paddr: u64) -> &'static mut BootInfo {
     static TAKEN: AtomicBool = AtomicBool::new(false);
     assert!(
@@ -61,17 +69,27 @@ pub fn bootinfo_frames(paddr: u64) -> &'static mut BootInfo {
     let memory = MEMORY
         .get()
         .expect("kernel objects exist only after arch::init");
+    let len = BOOTINFO_SIZE as u64;
     assert!(
-        paddr.is_multiple_of(4096) && memory.contains(paddr, BOOTINFO_SIZE as u64),
+        paddr.is_multiple_of(4096) && memory.contains(paddr, len),
         "BootInfo's frames at {paddr:#x} are not page-aligned RAM for kernel objects"
     );
-    // SAFETY: the two frames are page-aligned RAM below the direct map's end,
-    // mapped RW and write-back at `PHYS_MAP_BASE + paddr`, outside the kernel
-    // image (checked above). They lie in the boot region, which no untyped
-    // covers and only boot uses, and hold no slot, so nothing else reads or
-    // writes them and no other reference to them exists; `TAKEN` hands this
-    // one out once. Every field of `BootInfo` is a plain integer, so any
-    // contents, here zeros, are a valid value.
+    let zero = (paddr..paddr + len).step_by(8).all(|a| {
+        // SAFETY: as in `Objects::load`: a word of RAM below the direct
+        // map's end, checked above, read by value; any bits are a `u64`.
+        unsafe { ptr::read(phys_to_virt(a) as *const u64) == 0 }
+    });
+    assert!(zero, "BootInfo's frames at {paddr:#x} are not zeroed");
+    // SAFETY: the frames are page-aligned RAM below the direct map's end,
+    // mapped RW at `PHYS_MAP_BASE + paddr` (write-back, as the boot region
+    // touches no 2 MiB page the direct map maps uncached; a plain access
+    // would be correct uncached too), outside the kernel image: checked
+    // above. That they are BootInfo's frames in the boot region, which no
+    // untyped covers and nothing but boot touches, is the caller's word, so
+    // no slot or other kernel data lies there and no other reference to
+    // them exists; `TAKEN` hands this one out once. Every field of
+    // `BootInfo` is a plain integer, so any contents, here zeros, are a
+    // valid value.
     unsafe { &mut *(phys_to_virt(paddr) as *mut BootInfo) }
 }
 
@@ -113,11 +131,14 @@ impl SlotMemory for Objects {
         self.check(at.get(), SLOT_SIZE, "slot");
         // SAFETY: core's invariants make every `SlotAddr` a slot of a CNode
         // or TCB whose memory has not been reset (from M7 also an IRQ-node
-        // slot): 32-byte aligned, in RAM below the direct map's end, so
-        // mapped RW and write-back at `PHYS_MAP_BASE + addr`; debug builds
-        // check the memory map. Slot memory is plain words, so any contents
-        // are a valid `[u64; 4]`, and no Rust reference to it exists: only
-        // this type reads and writes it, by value.
+        // slot): 32-byte aligned, in a RAM untyped or the boot region below
+        // the direct map's end, so mapped RW at `PHYS_MAP_BASE + addr`. It
+        // is write-back there, as no RAM untyped and no boot region lies in
+        // a 2 MiB page the direct map maps uncached; a plain access would be
+        // correct uncached too. Debug builds check the memory map, not the
+        // cache type. Slot memory is plain words, so any contents are a
+        // valid `[u64; 4]`, and no Rust reference to it exists: only this
+        // type reads and writes it, by value.
         let words = unsafe { ptr::read(phys_to_virt(at.get()) as *const [u64; 4]) };
         Slot::from_words(words)
     }
@@ -202,12 +223,13 @@ impl Kernel for Objects {
 
     fn zero(&mut self, paddr: u64, len: u64) {
         self.check(paddr, len, "zeroed range");
-        // SAFETY: core zeroes only untyped RAM below the watermark during a
+        // SAFETY: core zeroes only RAM untyped below the watermark during a
         // reset (and boot step 6 zeroes the boot region the same way): no
         // live object lies there, so nothing refers to it, and it lies
-        // below the direct map's end, mapped RW and write-back; debug builds
-        // check the memory map and that the range is outside the kernel
-        // image.
+        // below the direct map's end, mapped RW (write-back, as in `load`;
+        // plain stores would be correct uncached too). Debug builds check
+        // the memory map and that the range is outside the kernel image,
+        // not the cache type.
         unsafe { ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, len as usize) };
     }
 
@@ -396,11 +418,17 @@ mod polls {
 /// Self-test helpers over memory kernel objects may occupy.
 #[cfg(feature = "selftest")]
 impl Objects {
-    /// Fills `len` bytes at `paddr` with `byte`.
+    /// Fills `len` bytes at `paddr` with `byte`. The self-tests call it only
+    /// on objects that hold no slots and whose memory the kernel does not
+    /// read before M5 (endpoints, notifications, frames, paging structures,
+    /// a TCB past its slots).
     pub fn fill(&mut self, paddr: u64, len: u64, byte: u8) {
         assert!(self.memory.contains(paddr, len), "fill outside object RAM");
-        // SAFETY: as in `zero`; the self-test that calls this owns the
-        // range, which no object or capability covers.
+        // SAFETY: the range is RAM below the direct map's end, outside the
+        // kernel image (checked above), mapped RW. No Rust reference to it
+        // exists: only this type reaches object memory, by value. That it
+        // holds no slot, so that `core`'s state stays sound, is the
+        // caller's word (above).
         unsafe { ptr::write_bytes(phys_to_virt(paddr) as *mut u8, byte, len as usize) };
     }
 

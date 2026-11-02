@@ -37,14 +37,15 @@ jobs:
           name: microl4-vhdx
           path: target/xtask/image/disk.vhdx
           if-no-files-found: error
-      # The M3 Hyper-V check (tools/hyperv/README.md): one boot dumps the
-      # ACPI tables, prints the boot summary and times ten timer ticks.
-      - name: Build the M3 check image
-        run: cargo xtask image --cmdline "acpidump test=ticks"
-      - name: Upload the M3 check VHDX
+      # The optional M4 Hyper-V check (tools/hyperv/README.md): one boot
+      # prints the BootInfo summary and runs the retype, revoke and retype
+      # self-test, with its restarts and the longest stretch between polls.
+      - name: Build the M4 check image
+        run: cargo xtask image --cmdline "test=retype"
+      - name: Upload the M4 check VHDX
         uses: actions/upload-artifact@v4
         with:
-          name: microl4-vhdx-m3-check
+          name: microl4-vhdx-m4-check
           path: target/xtask/image/disk.vhdx
           if-no-files-found: error
 
