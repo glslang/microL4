@@ -165,6 +165,8 @@ pub fn yield_now() {
 /// The root task's IPC buffer, set by `_start` from BootInfo.
 static ROOT_IPC_BUFFER: AtomicPtr<IpcBuffer> = AtomicPtr::new(core::ptr::null_mut());
 
+// `_start` is built only for the user target.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
 pub(crate) fn set_root_ipc_buffer(buffer: *mut IpcBuffer) {
     ROOT_IPC_BUFFER.store(buffer, Ordering::Relaxed);
 }
