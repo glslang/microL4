@@ -1029,8 +1029,7 @@ impl Gen<'_> {
         };
         let mut mrs = Vec::new();
         let invoked;
-        let extra;
-        if label == RETYPE {
+        let extra = if label == RETYPE {
             invoked = self
                 .slot_where(|n| n.cap.cap_type() == CapType::Untyped)
                 .map_or(rs(S_UT), |n| n.slot);
@@ -1069,7 +1068,7 @@ impl Gen<'_> {
                 node
             };
             mrs.extend([ty, size, node.0, node.1, offset, count]);
-            extra = vec![self.root_slot()];
+            vec![self.root_slot()]
         } else {
             invoked = self.root_slot();
             match label {
@@ -1099,8 +1098,8 @@ impl Gen<'_> {
                     mrs.extend([d.0, d.1, dd, p.0, p.1, pd, s.0, s.1]);
                 }
             }
-            extra = vec![self.root_slot(), self.root_slot()];
-        }
+            vec![self.root_slot(), self.root_slot()]
+        };
         if self.rng.chance(1, 30) {
             let n = self.rng.below(mrs.len() as u64 + 1) as usize;
             mrs.truncate(n);
