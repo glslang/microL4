@@ -20,9 +20,11 @@ expect: cmdline: "test=threads"
 expect: root: microL4 root task
 expect: root: cmdline "test=threads"
 expect: threads: threads A and B at priority 100, below the root task's 255
-# A runs first: Resume appends to the priority's queue (ADR 0013).
-expect: threads: A line 1 of 8
-expect: threads: B line 1 of 8
+# Either thread may print first: a tick that falls due while the kernel
+# dispatches A charges A a whole slice before it reaches the print lock
+# (ADR 0013), so the scenario expects no order. The root task's verdict
+# needs no order either: the busy loops make no system call, so only the
+# timer can let the other thread run.
 expect: threads: thread A was preempted
 expect: times with the other thread running in between
 expect: threads: the preemptions in the order the threads saw them:
