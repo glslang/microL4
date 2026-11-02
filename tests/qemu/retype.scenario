@@ -8,8 +8,10 @@
 # can delete, the untyped made from U is retyped too, and three calls fail
 # as they must. Every slot is recorded, the objects are filled, U is
 # revoked, and the same calls run again: the record must match and the
-# objects read zero. After each revoke every slot the test filled is empty,
-# the boot capabilities are roots without links again, and every slot
+# objects read zero, or as retype makes them. After each revoke every slot
+# the test filled is empty,
+# the boot capabilities are roots without links again (but for the root
+# TCB's copies of root slots 2, 3 and 10), and every slot
 # passes cdt::check_slot. The kernel waits for a timer interrupt before
 # run 1, so the first reset of U is preempted by it at its first poll;
 # injected preemptions hit both runs and both revokes. Every call restarts
@@ -25,10 +27,10 @@ expect: retype: an interrupt is pending, so run 1's reset of U is preempted by i
 expect: retype: run 1: U into a 1 MiB untyped preempted by an interrupt at poll 1 (attempt 1)
 expect: retype: run 1 done:
 expect: retype: run 1: preempted
-expect: retype: revoke 1 done: the 26 slots the test filled are empty, C's copies of root slots 9 and 2 included; U and the boot capabilities are as run 1 left them, roots without links
+expect: retype: revoke 1 done: the 26 slots the test filled are empty, C's copies of root slots 9 and 2 included; U and the boot capabilities are as run 1 left them, roots without links but the root TCB's copies
 expect: retype: revoke 1: preempted
 expect: retype: run 2 done: the same
-expect: its objects' 2098 KiB read zero
+expect: its objects' 2067 KiB read zero, or as retype makes them # frames, TCBs' registers and XSAVE areas, PML4s' upper back-references
 expect: retype: run 2: preempted
 expect: retype: revoke 2 done: the 26 slots the test filled are empty, C's copies of root slots 9 and 2 included
 expect: retype: revoke 2: preempted

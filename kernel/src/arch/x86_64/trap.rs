@@ -334,8 +334,9 @@ pub fn idle() -> ! {
 
 /// The interrupt path for an interrupt taken in the idle loop, at the top of
 /// the kernel stack with interrupts off. After the interrupt, the resume
-/// hook a self-test installed, if any, runs; it restarts the operation an
-/// interrupt preempted, as a thread's restarted `syscall` will from M5.
+/// hook an M4 self-test installed, if any, runs, and restarts the operation
+/// an interrupt preempted; otherwise the scheduler runs, and a thread the
+/// interrupt woke, or one preempted in a system call, goes on.
 extern "C" fn interrupt_from_idle(vector: u64) -> ! {
     #[cfg(feature = "selftest")]
     let (rsp, rflags) = (selftest::rsp(), selftest::rflags());
@@ -348,9 +349,8 @@ extern "C" fn interrupt_from_idle(vector: u64) -> ! {
             resume()
         }
     }
-    // M5: `schedule()` picks a thread here and exits to it, or idles; it
-    // replaces the resume hook.
-    idle()
+    // The scheduler picks a thread and exits to it, or idles again.
+    super::thread::exit_to_scheduled()
 }
 
 /// The test hooks (`tests/qemu/`), with `selftest` only.

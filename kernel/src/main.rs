@@ -3,8 +3,9 @@
 //! The loader enters [`arch`] at `_start`, which sets up a stack, zeroes BSS
 //! and calls [`kmain`]. The kernel checks the CPU, copies what the loader
 //! handed over, moves onto its own descriptor tables and page tables (M3),
-//! prints a boot summary, runs the test named on the command line, if any,
-//! and stops. The tests exist only in a kernel built with the `selftest`
+//! prints a boot summary, builds the root task (M4, M5), and runs the
+//! kernel self-test the command line names, or else the root task. The
+//! self-tests exist only in a kernel built with the `selftest`
 //! feature, as xtask builds every image.
 
 #![no_std]
@@ -27,6 +28,7 @@ mod debug;
 #[allow(unsafe_code)]
 mod arch;
 mod boot;
+mod dispatch;
 #[cfg(feature = "selftest")]
 mod rootimage;
 #[cfg(feature = "selftest")]
@@ -35,6 +37,7 @@ mod selftest;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use l4core::bootinfo::BootInfo;
 use l4core::cmdline;
 use l4core::handoff::{self, RegionKind};
 
@@ -56,17 +59,16 @@ fn kmain(handoff_phys: u64) -> ! {
     print_boot_info(boot);
     let facts = arch::init(boot);
     arch::print_cpu_state();
-    // Steps 6, 7 and 9 (M4); 8 and 10 enter the root task from M5.
-    let root = boot::make_root_space(boot, facts);
-    boot::print_root_space(root);
+    // Steps 6 to 9 (M4, M5): the boot region, the root CNode, the root
+    // task and BootInfo.
+    let (root, bi) = boot::make_root_space(boot, facts);
+    boot::print_root_space(root, bi);
 
+    // A `test=` the kernel knows runs instead of the root task; any other
+    // command line, a `test=` for the root task included, runs step 10.
     match cmdline::value(boot.cmdline(), "test") {
-        None => {
-            kprintln!("hello from microL4");
-            kprintln!("nothing more to do; halting");
-            arch::halt()
-        }
-        Some(name) => run_test(name, boot, facts, root),
+        Some(name) => run_test(name, boot, facts, root, bi),
+        None => boot::start_root_task(root),
     }
 }
 
@@ -77,6 +79,7 @@ fn run_test(
     boot: &'static BootState,
     facts: &'static BootFacts,
     root: &'static RootSpace,
+    bi: &'static BootInfo,
 ) -> ! {
     match name {
         "hello" => {
@@ -111,28 +114,30 @@ fn run_test(
             panic!("the stack never overflowed (depth {depth})")
         }
         // Kernel objects and BootInfo (M4).
-        "bootinfo" => selftest::bootinfo(boot, facts, root),
-        "retype" => selftest::retype(root),
+        "bootinfo" => selftest::bootinfo(boot, facts, root, bi),
+        "retype" => selftest::retype(root, bi),
         // Threads, address spaces and the root task (M5).
-        "rootimage" => rootimage::test(boot, root),
-        "ring3" => arch::test_ring3(root),
+        "rootimage" => rootimage::test(boot, root, bi),
+        "ring3" => arch::test_ring3(root, bi),
+        "vspace" => arch::test_vspace(root, bi),
         other => {
-            kprintln!("TEST FAIL: unknown test {other:?}");
-            arch::exit(arch::ExitCode::Failure)
+            kprintln!("test={other}: not a kernel self-test; the root task runs it");
+            boot::start_root_task(root)
         }
     }
 }
 
-/// Without `selftest` there are no tests: says so and fails the run.
+/// Without `selftest` the kernel knows no test: the root task runs it.
 #[cfg(not(feature = "selftest"))]
 fn run_test(
     name: &str,
     _boot: &'static BootState,
     _facts: &'static BootFacts,
-    _root: &'static RootSpace,
+    root: &'static RootSpace,
+    _bi: &'static BootInfo,
 ) -> ! {
-    kprintln!("test={name}: this kernel has no self-tests (built without the `selftest` feature)");
-    arch::exit(arch::ExitCode::Failure)
+    kprintln!("test={name}: this kernel has no self-tests; the root task runs it");
+    boot::start_root_task(root)
 }
 
 /// Recurses until the kernel stack runs into its guard page, for the

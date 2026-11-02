@@ -21,15 +21,9 @@ mod paging;
 mod pic;
 #[cfg(feature = "selftest")]
 mod ring3;
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        dead_code,
-        reason = "boot step 8 takes the root image from M5's integration"
-    )
-)]
 mod rootimage;
 pub mod serial;
+mod thread;
 mod timer;
 mod trap;
 
@@ -44,18 +38,14 @@ use crate::boot::BootState;
 
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
-pub use objects::{Objects, bootinfo_frames};
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        unused_imports,
-        reason = "boot step 8 takes the root image from M5's integration"
-    )
-)]
+#[cfg(feature = "debug")]
+pub use objects::for_each_tcb;
+pub use objects::{Objects, bootinfo_frames, set_invoked_by_call};
 pub use rootimage::take_rootimage;
+pub use thread::exit_to_scheduled;
 #[cfg_attr(
     not(feature = "selftest"),
-    expect(unused_imports, reason = "M5's scheduler idles through it")
+    expect(unused_imports, reason = "only the self-tests idle through `arch`")
 )]
 pub use trap::idle;
 
@@ -64,7 +54,9 @@ pub use apic::test_nmi_stack;
 #[cfg(feature = "selftest")]
 pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]
-pub use paging::{direct_map_page, test_lowmem, test_paging};
+pub use paging::{
+    direct_map_page, test_lowmem, test_paging, test_vspace, translate as kernel_translation,
+};
 #[cfg(feature = "selftest")]
 pub use ring3::test_ring3;
 #[cfg(feature = "selftest")]
@@ -220,8 +212,8 @@ const DEBUG_EXIT_PORT: u16 = 0xF4;
 #[repr(u32)]
 pub enum ExitCode {
     #[cfg_attr(
-        not(feature = "selftest"),
-        expect(dead_code, reason = "a passing self-test, and from M5 `DebugHalt(0)`")
+        not(feature = "debug"),
+        expect(dead_code, reason = "a passing self-test, and `DebugHalt(0)`")
     )]
     Success = 0x10,
     Failure = 0x11,

@@ -1,6 +1,6 @@
 //! The interrupt path (`docs/design.md`, "Vector map", "Timer tick", "Idle
 //! thread"): what the kernel does with an interrupt, a vector of 32 or
-//! more, taken in the idle loop.
+//! more, taken in the idle loop or in ring 3.
 //!
 //! - `0xFD`, the local APIC timer: EOI, then the tick.
 //! - `0xFE`, the local APIC error: read and clear ESR, log, EOI.
@@ -14,11 +14,12 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use l4core::apic::needs_eoi;
+use l4core::sched;
 use l4core::trap::{self, Kind};
 
 #[cfg(feature = "selftest")]
 use super::StaticCell;
-use super::apic;
+use super::{Objects, apic};
 
 /// Timer ticks since the periodic timer started.
 static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -26,8 +27,8 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "selftest")]
 static TICK_HOOK: StaticCell<fn(u64)> = StaticCell::new();
 
-/// Handles interrupt `vector`, taken in the idle loop. Runs with interrupts
-/// off, at the top of the kernel stack; the idle loop resumes afterwards.
+/// Handles interrupt `vector`, taken in the idle loop or in ring 3. Runs
+/// with interrupts off; the caller schedules afterwards.
 pub fn handle(vector: u8) {
     let kind = trap::kind(vector);
     let in_service = match kind {
@@ -64,8 +65,10 @@ pub fn handle(vector: u8) {
     }
 }
 
-/// The timer tick, after its EOI. M5's `sched::tick()` is called here.
+/// The timer tick, after its EOI: the current thread's slice shrinks, and
+/// at its end the thread goes to the tail of its queue (`sched::tick`).
 fn tick() {
+    sched::tick(&mut Objects::begin());
     let n = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     #[cfg(feature = "selftest")]
     if let Some(hook) = TICK_HOOK.get() {

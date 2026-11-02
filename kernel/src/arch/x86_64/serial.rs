@@ -59,6 +59,16 @@ fn write_byte(b: u8) {
     unsafe { outb(DATA, b) };
 }
 
+/// Writes one byte to COM1, `\n` as `\r\n`: `DebugPutChar`, whose byte
+/// need not be UTF-8.
+#[cfg(feature = "debug")]
+pub fn put_byte(b: u8) {
+    if b == b'\n' {
+        write_byte(b'\r');
+    }
+    write_byte(b);
+}
+
 /// Writes to COM1, turning `\n` into `\r\n`.
 pub struct Writer;
 

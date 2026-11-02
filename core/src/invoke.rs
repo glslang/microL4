@@ -48,6 +48,7 @@ use crate::error::{LookupFailure, SyscallError};
 use crate::kernel::{Kernel, Preempted};
 use crate::slot::{SlotAddr, SlotMemory};
 use crate::untyped::{self, RetypeArgs, RetypeError};
+use crate::vspace::{self, PagingStore};
 
 /// Invocation labels decoded here (`docs/abi.md`, "Invocation label index").
 /// Untyped's are `0x01` to `0x0F`, CNode's `0x10` to `0x1F`; any label the
@@ -162,9 +163,12 @@ impl From<RetypeError> for InvokeError {
 /// Decodes and performs the invocation `msg` of the capability in `slot`.
 ///
 /// An empty slot or a Zombie is `InvalidCapability` 0. An Untyped decodes
-/// `Untyped_Retype`, a CNode its methods; any other label, and every other
-/// capability type until its milestone, is `IllegalOperation`.
-pub fn invoke<K: Kernel + crate::tcb::Threads + ?Sized>(
+/// `Untyped_Retype`, a CNode its methods, a TCB its methods
+/// ([`crate::tcb::invoke`]), a Frame or a PDPT, page directory or page
+/// table its map and unmap methods ([`vspace::invoke`]); any other label,
+/// and every other capability type until its milestone, is
+/// `IllegalOperation`.
+pub fn invoke<K: Kernel + PagingStore + crate::tcb::Threads + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     msg: &Message<'_>,
@@ -175,6 +179,9 @@ pub fn invoke<K: Kernel + crate::tcb::Threads + ?Sized>(
         CapType::Untyped => untyped_invocation(k, slot, msg),
         CapType::CNode => cnode_invocation(k, cap, msg),
         CapType::Tcb => crate::tcb::invoke(k, slot, msg),
+        CapType::Frame | CapType::PageTable | CapType::PageDirectory | CapType::Pdpt => {
+            vspace::invoke(k, slot, msg)
+        }
         _ => Err(SyscallError::IllegalOperation.into()),
     }
 }

@@ -1,30 +1,32 @@
-# The root image pipeline (docs/design.md, "Root-task image and address
-# space"): xtask builds user/root, strips it, checks it with
-# l4core::boot::image and embeds it in .rootimage. The kernel finds the
-# section through the linker's symbols, page-aligned at the end of its
-# read-only data and holding exactly the file, runs the boot checks on it,
-# makes the boot plan the root task's needs give on this machine, and lists
-# the VSpace boot step 8 would build: the paging structures, then the image
-# frames by permission, the IPC buffer and BootInfo's two frames, each slot
-# checked against the capability boot puts there.
+# What boot step 8 made of the root image (M5). `cargo xtask build` built
+# user/root, stripped and checked it, and the kernel embedded it in
+# .rootimage; step 8 copied it into the root task's frames, mapped its
+# VSpace, made its TCB and unmapped .rootimage. The test finds .rootimage
+# gone from the kernel window and covered by RAM untyped, BootInfo naming
+# the image, every image page of the root VSpace mapped to a frame that
+# holds what the ELF says with its segment's permissions (a hash step 8
+# made from the ELF, against the frames read through a walk of the root
+# PML4), the IPC buffer and BootInfo after it, and the root TCB ready to
+# run as docs/abi.md says.
 cmdline: test=rootimage
 exit: success
 expect: microL4 kernel
 expect: cmdline: "test=rootimage"
-expect: rootimage: .rootimage
-expect: rootimage: at physical
-expect: rootimage: the root ELF passes the boot checks: entry 0x400000, image 0x400000-
-expect: rootimage: IPC buffer at
-expect: rootimage: needs a TCB, a PML4, 1 PDPT, 1 PD, 1 PT and
-expect: rootimage: boot region
-expect: rootimage: slot 17: Pdpt at
-expect: rootimage: slot 18: PageDirectory at
-expect: rootimage: slot 19: PageTable at
-expect: map 0x400000- # the text frames
-expect: RX,
-expect: RW, NX, 0 file bytes # the stack, above an unmapped guard page
-expect: rootimage: slots 10-10: 1 frame at # the IPC buffer
-expect: rootimage: slots 9-9: 1 frame at # BootInfo's first frame
-expect: rootimage: slots 16-16: 1 frame at # and its second
-expect: rootimage: every slot holds the capability boot step 8 maps
+expect: boot: root task: image 0x400000-
+expect: rootimage: .rootimage was 0xffffffff8
+expect: rootimage: unmapped from the kernel window;
+expect: RAM untyped cover its
+expect: rootimage: its direct-map alias is writable: zeroed through it
+expect: rootimage: the root ELF's image 0x400000-
+expect: , entry 0x400000; IPC buffer at
+expect: rootimage: 0x400000- # the text frames
+expect: , RX
+expect: , RW, NX # the data, then the stack above an unmapped guard page
+expect: rootimage: its
+expect: image pages hold what the ELF says, with its segments' permissions
+expect: maps the IPC buffer and BootInfo's two frames, RW, NX
+expect: rootimage: the root TCB at
+expect: is Running at 0x400000 with rdi
+expect: RFLAGS 0x202, priority and MCP 255, its IPC buffer at
+expect: its slots hold copies of root slots 2, 3 and 10
 expect: TEST PASS
