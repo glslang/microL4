@@ -1273,3 +1273,56 @@ fn configure_then_read_back_a_whole_thread() {
     );
     assert_eq!(buffer_word(&w.k, d, 1, true), Some(F + 0x400 + 8));
 }
+
+#[test]
+fn the_invocation_dispatch_reaches_the_tcb_decoder() {
+    let mut w = World::new();
+    let call = |w: &mut World, slot: SlotAddr, label: u64, mrs: &[u64], extra: &[u64]| {
+        let caps: Vec<ExtraCap> = extra.iter().map(|&i| ExtraCap::load(&w.k, rs(i))).collect();
+        let msg = Message {
+            label,
+            mrs,
+            extra_caps: &caps,
+        };
+        crate::invoke::invoke(&mut w.k, slot, &msg)
+    };
+    assert_eq!(
+        call(&mut w, rs(S_B), label::SET_PRIORITY, &[7], &[S_A]),
+        Ok(Reply::EMPTY)
+    );
+    assert_eq!(w.k.priority(t(TB)), 7);
+    assert_eq!(
+        call(&mut w, rs(S_B), label::READ_REGISTERS, &[0, 21], &[]),
+        Err(InvokeError::Error(range(1, 20)))
+    );
+    // TCB labels on other capabilities, and other labels on a TCB.
+    assert_eq!(
+        call(&mut w, rs(S_X), label::SUSPEND, &[], &[]),
+        Err(InvokeError::Error(ILLEGAL))
+    );
+    assert_eq!(
+        call(
+            &mut w,
+            rs(S_B),
+            crate::invoke::label::CNODE_COPY,
+            &[0; 5],
+            &[S_X]
+        ),
+        Err(InvokeError::Error(ILLEGAL))
+    );
+    // An empty slot or a Zombie is InvalidCapability 0, whatever the label.
+    assert_eq!(
+        call(&mut w, rs(S_FREE), label::SUSPEND, &[], &[]),
+        Err(InvokeError::Error(SyscallError::InvalidCapability(0)))
+    );
+    w.put(
+        S_FREE,
+        Cap::zombie(TD, TCB_BITS, 5, true),
+        Node::new(true, 0, 0),
+    );
+    assert_eq!(
+        call(&mut w, rs(S_FREE), label::RESUME, &[], &[]),
+        Err(InvokeError::Error(SyscallError::InvalidCapability(0)))
+    );
+    assert_eq!(w.k.state(t(TD)), ThreadState::Inactive);
+}
