@@ -32,6 +32,7 @@ pub mod error;
 pub mod handoff;
 pub mod hpet;
 pub mod hyperv;
+pub mod invoke;
 pub mod kernel;
 pub mod objmem;
 pub mod slot;
