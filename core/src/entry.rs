@@ -289,10 +289,31 @@ pub fn exit_frame(regs: &Regs) -> (TrapFrame, Exit) {
 /// Whether a ring-0 trap is the single-step `#DB` a `syscall` executed
 /// with TF set may raise on the first instruction of `syscall_entry`, at
 /// `syscall_entry`, before its `swapgs` ("NMI, double fault, machine check
-/// and debug"). Such a trap returns at once; every other ring-0 `#DB`
+/// and debug"). Such a trap returns at once, as does
+/// [`single_step_into_breakpoint_stub`]'s; every other ring-0 `#DB`
 /// panics.
 pub fn single_step_into_syscall_entry(frame: &TrapFrame, syscall_entry: u64) -> bool {
     frame.vector == u64::from(trap::DEBUG) && frame.ring() == 0 && frame.rip == syscall_entry
+}
+
+/// Whether a ring-0 trap is the single-step `#DB` that a thread's `mov ss`
+/// or `pop ss` with TF set defers past a following `int3`: the CPU
+/// delivers the `#BP` first, pushing its frame on the kernel stack and
+/// clearing TF, then the `#DB` on the first instruction of the `#BP` stub,
+/// `stubs[BREAKPOINT]` (CVE-2018-8897's mechanism;
+/// `docs/redteam/m5-movss-db.md`). Such a trap returns at once, as at
+/// `syscall_entry`, with its saved state unchanged: the `#BP` stub then
+/// runs as if no trap had been taken, on its own frame, whose ring-3 CS
+/// gives it its `swapgs`.
+///
+/// `#BP` is the only gate with DPL 3, so it is the only stub an instruction
+/// after `mov ss` can enter directly; a ring-0 `#DB` on any other stub
+/// panics. The `#DB` stub's own above all: a nested `#DB` there is
+/// delivered on IST4, over the frame of the `#DB` it interrupted.
+pub fn single_step_into_breakpoint_stub(frame: &TrapFrame, stubs: &[u64; 256]) -> bool {
+    frame.vector == u64::from(trap::DEBUG)
+        && frame.ring() == 0
+        && frame.rip == stubs[usize::from(trap::BREAKPOINT)]
 }
 
 #[cfg(test)]
@@ -595,6 +616,53 @@ mod tests {
         let mut user = f;
         user.cs = USER_CS.into();
         assert!(!single_step_into_syscall_entry(&user, ENTRY));
+    }
+
+    #[test]
+    fn single_step_into_breakpoint_stub_needs_db_ring_0_and_vector_3s_stub() {
+        const ENTRY: u64 = 0xFFFF_FFFF_8000_1000;
+        // Distinct stub addresses, 16 bytes apart as the kernel's are.
+        let stubs: [u64; 256] = core::array::from_fn(|v| 0xFFFF_FFFF_8000_2000 + 16 * v as u64);
+        let bp = stubs[usize::from(trap::BREAKPOINT)];
+        // As the CPU leaves it: on the #BP frame at the top of the kernel
+        // stack, with the null SS of a ring change.
+        let mut f = user_frame(u64::from(trap::DEBUG), bp);
+        f.cs = trap::KERNEL_CS.into();
+        f.rsp = 0xFFFF_FFFF_8010_0000 - 40;
+        f.ss = 0;
+        assert!(single_step_into_breakpoint_stub(&f, &stubs));
+        // Only vector 3's stub: never the #DB stub's own, whose IST4 frame
+        // the nested #DB overwrote, nor #GP's, nor any other.
+        for (v, &stub) in stubs.iter().enumerate() {
+            let at = TrapFrame { rip: stub, ..f };
+            assert_eq!(
+                single_step_into_breakpoint_stub(&at, &stubs),
+                v == usize::from(trap::BREAKPOINT),
+                "a ring-0 #DB on vector {v}'s stub"
+            );
+        }
+        for rip in [bp - 1, bp + 1, bp + 2, ENTRY] {
+            let at = TrapFrame { rip, ..f };
+            assert!(
+                !single_step_into_breakpoint_stub(&at, &stubs),
+                "rip {rip:#x}"
+            );
+        }
+        // Only a #DB, and only from ring 0.
+        for vector in (0..=255).filter(|&v| v != u64::from(trap::DEBUG)) {
+            let other = TrapFrame { vector, ..f };
+            assert!(
+                !single_step_into_breakpoint_stub(&other, &stubs),
+                "vector {vector}"
+            );
+        }
+        let user = TrapFrame {
+            cs: USER_CS.into(),
+            ..f
+        };
+        assert!(!single_step_into_breakpoint_stub(&user, &stubs));
+        // The syscall_entry rule does not take the stub either.
+        assert!(!single_step_into_syscall_entry(&f, ENTRY));
     }
 
     #[test]

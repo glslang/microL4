@@ -30,8 +30,9 @@ relies on register sanitising for RCX (`src/arch/x86/64/traps.S`,
 - IST1 #DF, IST2 NMI, IST3 #MC, IST4 #DB, each 8 KiB above an unmapped guard
   page, as is the kernel stack ([ADR 0004](0004-privilege-features.md)). NMI,
   #DF and #MC are fatal from any ring; #DB from ring 0 returns only when the
-  saved RIP is exactly `syscall_entry`, and otherwise panics. None of them
-  reads GS.
+  saved RIP is exactly `syscall_entry` or, since the M5 red team's
+  `mov ss; int3` finding (`docs/redteam/m5-movss-db.md`), the first
+  instruction of the #BP stub, and otherwise panics. None of them reads GS.
 - Only vector 3 has DPL 3. Vectors that cannot occur here (9, 15, 17,
   20 to 31) panic from either ring; 17, 21, 29 and 30 use the
   no-error-code stub so an injected MSI cannot make the kernel misread a

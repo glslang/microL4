@@ -462,7 +462,10 @@ pub fn save_user_bases(regs: &mut Regs) {
 /// the frame is on, with no `swapgs`: for the single-step `#DB` at the
 /// first instruction of `syscall_entry` (`l4core::entry::
 /// single_step_into_syscall_entry`), whose frame is on IST4 and which
-/// returns to `syscall_entry` before its `swapgs`, with the user's RSP.
+/// returns to `syscall_entry` before its `swapgs`, with the user's RSP;
+/// and for the one at the first instruction of the `#BP` stub
+/// (`single_step_into_breakpoint_stub`), which returns to the stub with
+/// RSP on the `#BP` frame at the top of the kernel stack.
 ///
 /// # Safety
 ///
@@ -474,7 +477,7 @@ pub unsafe fn return_to_kernel(frame: &TrapFrame) -> ! {
     selftest::count_single_step();
     // SAFETY: the caller vouches for the frame; the stub pops it and
     // returns to the trapped instruction in ring 0 with its RFLAGS, in
-    // which IA32_FMASK cleared TF and IF.
+    // which IA32_FMASK, or the `#BP` gate, cleared TF and IF.
     unsafe {
         asm!(
             "jmp {stub}",
@@ -508,7 +511,7 @@ mod selftest {
 
     /// The last exit's path: 0 for none yet, else 1 + `Exit as u8`.
     static LAST_EXIT: AtomicU8 = AtomicU8::new(0);
-    /// Single-step `#DB`s at `syscall_entry` returned from.
+    /// Ring-0 single-step `#DB`s returned from.
     static SINGLE_STEPS: AtomicU64 = AtomicU64::new(0);
 
     pub fn record_exit(path: Exit) {
@@ -528,8 +531,8 @@ mod selftest {
         SINGLE_STEPS.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// How many single-step `#DB`s at `syscall_entry` have been returned
-    /// from.
+    /// How many ring-0 single-step `#DB`s, at `syscall_entry` or the `#BP`
+    /// stub, have been returned from.
     pub fn ring0_single_steps() -> u64 {
         SINGLE_STEPS.load(Ordering::Relaxed)
     }

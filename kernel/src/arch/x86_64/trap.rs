@@ -19,9 +19,10 @@
 //!
 //! No handler returns. A ring-0 trap is a kernel bug and panics with one
 //! report, except an interrupt taken in the idle loop, which runs the
-//! interrupt path and idles again on a fresh stack, and the single-step
-//! `#DB` a `syscall` with TF set may raise at `syscall_entry`, which
-//! returns to it at once.
+//! interrupt path and idles again on a fresh stack, and two single-step
+//! `#DB`s a thread with TF set can raise in ring 0, which return at once:
+//! a `syscall`'s at `syscall_entry`, and the one `mov ss` defers past an
+//! `int3`, on the first instruction of the `#BP` stub.
 //!
 //! With `selftest`, the test hooks of `tests/qemu/` live here too: the
 //! traps a `test=` raises, the idle and fatal-handler tests, and the resume
@@ -213,12 +214,17 @@ extern "C" fn trap_from_kernel(frame: *const TrapFrame) -> ! {
     // initialised, and not referred to by anything else. Nothing writes it
     // while this reference lives.
     let frame = unsafe { &*frame };
-    if l4core::entry::single_step_into_syscall_entry(frame, entry::syscall_entry_addr()) {
+    if l4core::entry::single_step_into_syscall_entry(frame, entry::syscall_entry_addr())
+        || l4core::entry::single_step_into_breakpoint_stub(frame, stubs())
+    {
         // SAFETY: a `#DB` on IST4 at the first instruction of
-        // `syscall_entry`, before its `swapgs`: the frame is the one
-        // `trap_common_entry` pushed, nothing has been done since but read
-        // CR2, and `syscall_entry` runs from its start as if no trap had
-        // been taken.
+        // `syscall_entry`, before its `swapgs`, or of the `#BP` stub, whose
+        // frame from ring 3 the CPU had just pushed at the top of the
+        // kernel stack: the frame is the one `trap_common_entry` pushed,
+        // nothing has been done since but read CR2, and either entry runs
+        // from its start as if no trap had been taken. The `#BP` frame is
+        // on the kernel stack, which this handler did not touch, not on
+        // IST4, so the `#DB` overwrote nothing.
         unsafe { entry::return_to_kernel(frame) }
     }
     match t::kernel_trap(frame, &idle_range()) {
@@ -245,7 +251,8 @@ extern "C" fn trap_from_user(frame: *const TrapFrame) -> ! {
     if frame.vector == u64::from(t::DEBUG) {
         // SAFETY: the thread was in ring 3, so the kernel stack holds
         // nothing; the frame stays on IST4, which only a `#DB` uses, and
-        // none can be raised in ring 0 but at `syscall_entry`.
+        // none can be raised in ring 0 but at `syscall_entry` or the `#BP`
+        // stub, neither of which runs before this frame is read.
         unsafe { on_fresh_stack(debug_from_user, frame as *const TrapFrame as u64) }
     }
     entry::from_user(frame, l4core::entry::classify(frame, cr2))

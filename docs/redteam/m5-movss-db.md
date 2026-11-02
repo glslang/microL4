@@ -5,8 +5,12 @@ It cannot run code in ring 0 or read kernel memory.
 
 **Where:** on hardware and on Hyper-V. QEMU 8.2 TCG does not reproduce it.
 
-**Status:** not proven. The test passes on QEMU. It needs the Hyper-V run
-below.
+**Status:** fixed for `int3` in the M5 fix round ([The fix](#the-fix)):
+the kernel returns from a ring-0 `#DB` on the first instruction of the
+`#BP` stub. Not proven on a real CPU either way: the test passes on QEMU
+before and after the fix. The `int n` and `int1` variants below are
+judged not real and stay unfixed; the M5 Hyper-V check settles all three
+([What stays to be confirmed on Hyper-V](#what-stays-to-be-confirmed-on-hyper-v)).
 
 ## What breaks
 
@@ -44,7 +48,8 @@ not stop it.
 `l4core::trap::kernel_trap` returns `Fatal`, and the kernel panics with
 `fatal trap`. With `int 0x80`, or any `int n` whose gate has DPL 0, the
 `#DB` arrives in the `#GP` stub instead. Any `int n` (a DPL-0 gate gives
-`#GP`) or `int3` works.
+`#GP`) or `int3` works (the `int n` case is contested; see
+[Proposed fix (red team)](#proposed-fix-red-team)).
 
 `mov ss; int1` (ICEBP) with TF set adds a second problem. The ICEBP `#DB`
 from ring 3 enters `trap_vector_01` on IST4, and a deferred single step
@@ -62,14 +67,17 @@ with TF set, followed by `syscall` (Yield), `int3`, `int 0x80`, `int1` and
 - **On QEMU 8.2 TCG:** the scenario passes. QEMU raises the `#DB` in ring 3
   right after `mov ss`, at the next instruction, with nothing deferred. The
   log shows `label 3, 0x1/0x0` for every probe.
-- **On Hyper-V or bare metal:** expected to stop at probe 1 with
-  `panic: ... fatal trap: ... vector 1 ...`, RIP on `trap_vector_03`. Probe
-  0, the `syscall` case, should be the one ring-0 `#DB` the kernel already
-  returns from, if the CPU defers it to `syscall_entry`.
+- **On Hyper-V or bare metal, before the fix:** expected to stop at probe
+  1 with `panic: ... fatal trap: ... vector 1 ...`, RIP on
+  `trap_vector_03`. Probe 0, the `syscall` case, should be the one ring-0
+  `#DB` the kernel already returns from, if the CPU defers it to
+  `syscall_entry`.
+- **After the fix:** see
+  [What stays to be confirmed on Hyper-V](#what-stays-to-be-confirmed-on-hyper-v).
 
-To run it on Hyper-V, build the image with `cargo xtask image`, set
-`\cmdline.txt` to `test=redteam-movss`, or use CI's VHDX check with that
-`test=`, and boot it with `tools/hyperv/`.
+To run it on Hyper-V, boot the `redteam-movss` VHDX of CI's
+`microl4-vhdx-m5-check` artifact with `tools/hyperv/Test-L4Vhdx.ps1`
+(`tools/hyperv/README.md`, "At the M5 check").
 
 ## How sure
 
@@ -81,31 +89,63 @@ dropped, comes from that text and from memory: Linux's
 `tools/testing/selftests/x86/mov_ss_trap.c` single-steps
 `MOV SS; SYSENTER`. Running the test on Hyper-V would settle it.
 
-## Proposed fix
+## Proposed fix (red team)
 
-A ring-0 `#DB` with DR7 at its reset value can only be a single step
-deferred from ring 3. Treat it as such wherever it lands:
+The red team proposed accepting a ring-0 `#DB` on the first instruction of
+every IDT stub but vector 1's, and settling `int1` on Hyper-V. The M5
+kernel reviewer agreed with the `int3` case only: `#BP` is the only gate
+with DPL 3, `int n` on a DPL-0 gate raises `#GP`, which drops the pending
+single step, and `mov ss; int1` gives one `#DB` (the notes in Linux's
+`mov_ss_trap.c`; moderate confidence). Accepting a `#DB` on stubs no
+instruction can reach would widen the rule for nothing, so the fix below
+accepts only the `#BP` stub.
 
-1. In `trap_from_kernel`, accept a ring-0 `#DB` whose saved RIP is
-   `syscall_entry`, or the first instruction of any IDT stub other than
-   vector 1's (`trap::stubs()[v]` for `v != 1`). Clear DR6 and return
-   through `entry::return_to_kernel`, as for `syscall_entry` today. The
-   interrupted stub then runs as if nothing had happened: its own frame is
-   on RSP0, and its saved CS still says ring 3, so its `swapgs` is right.
-   Generalise `l4core::entry::single_step_into_syscall_entry` to take the
-   set of entry addresses, and host-test it.
-2. For vector 1's own stub, a nested `#DB` on IST4 may have overwritten the
-   outer frame. Either:
-   - Move ring-3 `#DB`s off IST4 before anything else runs. This is not
-     possible here, because the nested `#DB` fires on the stub's first
-     instruction.
-   - Or confirm, in the same Hyper-V run, that the CPU merges ICEBP's `#DB`
-     with the pending single step into one `#DB` (DR6.BS set alongside it),
-     as the SDM's description of pending debug exceptions suggests. Then
-     only the first point is needed.
-3. Record the rule in `docs/design.md` (NMI, double fault, machine check
-   and debug, and Invariants), and add `mov ss; int3` to the M10
-   entry/exit brief.
+## The fix
+
+M5 fix round, in `kernel/src/arch/x86_64/trap.rs` and `core/src/entry.rs`:
+
+- `trap_from_kernel` returns from a ring-0 `#DB` whose saved RIP is
+  `syscall_entry` (as before) or the first instruction of the `#BP` stub,
+  `trap::stubs()[3]` (`l4core::entry::single_step_into_breakpoint_stub`).
+  As at `syscall_entry`, it `iretq`s at once through
+  `entry::return_to_kernel`, with the saved state unchanged: the single
+  step is dropped. The `#BP` stub then runs as if nothing had happened: the
+  `#BP` frame the CPU pushed is at the top of the kernel stack (RSP0, not
+  IST4, so the `#DB` overwrote nothing), and its saved CS says ring 3, so
+  the stub's `swapgs` is right. The thread gets UserException 3, with
+  `rip` past its `int3`.
+- Every other ring-0 `#DB` panics as before: on the `#GP` stub, and on the
+  `#DB` stub's own first instruction above all, whose IST4 frame a nested
+  `#DB` would have overwritten.
+- Host test `single_step_into_breakpoint_stub_needs_db_ring_0_and_vector_3s_stub`
+  beside `single_step_into_syscall_entry`'s: a ring-0 `#DB` on each of the
+  256 stubs is accepted only on vector 3's, never on a neighbouring
+  address, another vector, or from ring 3.
+- `docs/design.md` ("NMI, double fault, machine check and debug", Faults,
+  the vector map, Invariants, Open questions) and ADR 0008 state the rule.
+- Not done: adding `mov ss` with TF before each kernel entry to M10's
+  entry-and-exit red-team brief, `PLAN.md` M10 item 5, is left to the lead.
+
+## What stays to be confirmed on Hyper-V
+
+QEMU cannot show any of this: it raises the `#DB` in ring 3 after
+`mov ss`. The M5 Hyper-V check boots `test=redteam-movss`, which must
+reach `TEST PASS` without a panic. Each probe line reads
+`label 3, <vector>/<error code>`:
+
+- Probe 0 (`syscall`): `0x1`. If the CPU defers the step to
+  `syscall_entry`, the kernel returns from it, and `sysretq` restores TF.
+- Probe 1 (`int3`): `0x3` if the CPU defers the step past `int3`, as the
+  finding says: the fix's path, which confirms it. `0x1` if it does not.
+  A `fatal trap` at `trap_vector_03` would mean the fix is not in place.
+- Probe 2 (`int 0x80`): `0x1` or `0xd`. A `fatal trap` with RIP on
+  `trap_vector_0d` would mean `#GP` keeps the pending step after all, and
+  the `#GP` stub must be accepted as well.
+- Probe 3 (`int1`): `0x1`. A `fatal trap` with RIP on `trap_vector_01`
+  would mean the CPU raises a second `#DB` over the first one's IST4
+  frame; that needs a design change (no IST for `#DB`, or a stack switch
+  the nested `#DB` cannot overwrite), not a wider rule.
+- Probe 4 (`ud2`): `0x1` or `0x6`.
 
 ## What held (M5 red team)
 
