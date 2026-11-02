@@ -139,6 +139,22 @@ pub fn clippy() -> Result<()> {
             "warnings",
         ])
         .current_dir(root()))?;
+    // The user crates' libraries and their tests on the host, where those
+    // tests run (`cargo xtask test`).
+    run(Command::new(cargo())
+        .args([
+            "clippy",
+            "--package",
+            "libsys",
+            "--package",
+            "root",
+            "--lib",
+            "--tests",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .current_dir(root()))?;
     // The user crates for their target, then root's image, which the kernel
     // needs to compile.
     run(user_cargo("clippy", USER_CRATES, Profile::Dev)?.args(["--", "-D", "warnings"]))?;
