@@ -37,7 +37,7 @@ Plain `cargo test` and `cargo build` cover only the host crates (`core`,
 
 | Path | What |
 | --- | --- |
-| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader and the kernel (handoff ABI, ELF parser, command line; from M2 the capability core; from M3 the CPU feature check, ACPI parser, page-table builder, trap decoding, APIC, HPET, Hyper-V and timer arithmetic) |
+| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader and the kernel (handoff ABI, ELF parser, command line; from M2 the capability core; from M3 the CPU feature check, ACPI parser, page-table builder, trap decoding, APIC, HPET, Hyper-V and timer arithmetic; from M4 BootInfo, the boot plan and untyped with checks of their invariants, the Untyped and CNode invocation decoder, and the memory kernel objects may occupy) |
 | `kernel/` | the kernel, `x86_64-unknown-none`, linked at `0xFFFF_FFFF_8000_0000` by `kernel/linker.ld` |
 | `loader/` | the UEFI loader, `x86_64-unknown-uefi`, with its own minimal UEFI bindings |
 | `xtask/` | build, image, QEMU runner and scenario harness |
@@ -50,8 +50,10 @@ Plain `cargo test` and `cargo build` cover only the host crates (`core`,
 - Put logic that can run on the host in `core/` and test it there; it also
   runs under Miri in CI. Add a QEMU scenario only for what needs the machine.
 - A scenario picks a kernel test with `cmdline: test=<name>`, which the kernel
-  reads from `\cmdline.txt` on the ESP. A passing test prints `TEST PASS` and
-  exits with `ExitCode::Success`; every boot has a 60-second limit.
+  reads from `\cmdline.txt` on the ESP. Test code builds only with the
+  kernel's `selftest` feature, which xtask always enables; a kernel without it
+  fails any `test=`. A passing test prints `TEST PASS` and exits with
+  `ExitCode::Success`; every boot has a 60-second limit.
 - When a scenario fails, xtask prints the tail of COM1 and keeps the full log
   in `target/xtask/scenarios/<name>/serial.log`.
 - Unstable cargo flags live only in `.cargo/build-std.toml`, which xtask uses
