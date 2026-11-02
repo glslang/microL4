@@ -1,0 +1,20 @@
+# M5 red team, finding docs/redteam/m5-movss-db.md: a ring-3 thread sets
+# TF with popfq, then runs `mov ss, eax` and a control transfer into the
+# kernel: syscall, int3, int 0x80, int1 or ud2. MOV SS defers the single
+# step past the next instruction (SDM vol. 3A, 6.8.3; CVE-2018-8897), so on
+# hardware, and on Hyper-V, which runs guest code on the CPU, the #DB
+# arrives in ring 0 at the first instruction of the #BP or #GP stub, which
+# the kernel panics on ("fatal trap"). QEMU 8.2 TCG does not defer it: it
+# raises the #DB in ring 3 right after `mov ss`, so this scenario passes
+# here. Run it on Hyper-V (test=redteam-movss) to see the finding.
+cmdline: test=redteam-movss
+exit: success
+expect: microL4 kernel
+expect: root: cmdline "test=redteam-movss"
+expect: redteam: movss: 5 probes in thread
+expect: probe 0 (mov ss; syscall (Yield) with TF): label 3, 0x1/0x0
+expect: probe 1 (mov ss; int3 with TF): label 3, 0x1/0x0
+expect: probe 2 (mov ss; int 0x80 with TF): label 3, 0x1/0x0
+expect: redteam: movss: all 5 probes ended in their own fault
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
