@@ -1,0 +1,25 @@
+# M5 review (reviewer K): docs/design.md's "Every change to a present user
+# entry is followed by its flush before the next user instruction", from
+# ring 3 (user/root/src/tlb.rs). test=vspace checks mappings by walking the
+# tables, never through the TLB. Thread T shares the root task's VSpace, so
+# no CR3 write separates them and only each invocation's own flush can drop
+# a translation already used. T reads a frame, the root unmaps it, and T's
+# next read must fault; T writes it, the root remaps it read-only, and T's
+# next write must fault; T reads a second frame, the root unmaps its page
+# table, and T's next read must fault. After each fault the root maps the
+# page back and the access restarts.
+cmdline: test=tlb
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=tlb"
+expect: root: microL4 root task
+expect: root: cmdline "test=tlb"
+expect: tlb: T shares the root task's VSpace
+expect: tlb: 1 T read F1
+expect: tlb: 2 T's next read of 0x1000000 faulted
+expect: tlb: 3 T wrote F1
+expect: tlb: 4 T's next write to 0x1000000 faulted
+expect: tlb: 5 T read F2
+expect: tlb: 6 T's next read of 0x1200000 faulted
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

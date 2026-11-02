@@ -10,7 +10,11 @@
 //! - `test=threads`: two threads at one priority interleave their output
 //!   under preemption ([`threads`]);
 //! - `test=fault`: a page fault reaches the faulting thread's fault
-//!   handler, which kills it ([`fault`]).
+//!   handler, which kills it ([`fault`]);
+//! - `test=isolation`: two threads switched by the scheduler keep their
+//!   x87, SSE, FS and GS base and general registers ([`isolation`]);
+//! - `test=tlb`: no translation survives the unmap or remap that removed
+//!   it, in a VSpace two threads share ([`tlb`]).
 //!
 //! Every test ends the run with `DebugHalt`: 0 after `TEST PASS`, 1 after a
 //! `TEST FAIL` line. With no `test=` the root task halts with 0 after the
@@ -20,8 +24,10 @@
 #![no_main]
 
 mod fault;
+mod isolation;
 mod spawn;
 mod threads;
+mod tlb;
 
 use libsys::bootinfo::{CAP_INIT_CNODE, SlotRegion};
 use libsys::ipc::word;
@@ -53,6 +59,8 @@ fn main(bi: &'static BootInfo) -> ! {
         }
         Some("threads") => threads::run(bi),
         Some("fault") => fault::run(bi),
+        Some("isolation") => isolation::run(bi),
+        Some("tlb") => tlb::run(bi),
         Some(other) => fail!("unknown test {other:?}"),
     }
 }
