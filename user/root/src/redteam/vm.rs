@@ -407,17 +407,23 @@ fn own_vspace(ipc: Ipc, bi: &BootInfo, ut: CPtr, next: &mut CPtr) -> CPtr {
     map_table(ipc, pd, PD_MAP, first, pml4);
     let mut pt_base = u64::MAX;
     let frames = bi.user_image_frames;
-    // Every page is covered but the guard page below the 64 KiB libsys
-    // stack (`user/link.ld`); the thread needs only the pages below it.
+    // Every page is covered but the guard pages below the two thread
+    // stacks and below the 64 KiB libsys stack (`user/link.ld`); the
+    // thread needs only the pages below the last. Image frame `i` holds
+    // the `i`th covered page.
     let pages = (bi.user_image_end - first) / 0x1000;
-    if pages != frames.len() + 1 || pages < 17 {
+    let libsys_guard = bi.user_image_end - 17 * 0x1000;
+    let guards = [STACKS[0].guard(), STACKS[1].guard(), libsys_guard];
+    if pages != frames.len() + guards.len() as u64 || pages < 17 {
         fail!(
-            "{pages} image pages and {} frames: not one guard page",
+            "{pages} image pages and {} frames: not the three guard pages",
             frames.len()
         );
     }
-    for (i, frame) in (frames.start..frames.start + pages - 17).enumerate() {
-        let at = first + 0x1000 * i as u64;
+    let covered = (first..libsys_guard)
+        .step_by(0x1000)
+        .filter(|at| !guards.contains(at));
+    for (at, frame) in covered.zip(frames.start..) {
         if at >> 21 != pt_base {
             let pt = alloc(next, ObjectType::PageTable);
             map_table(ipc, pt, PT_MAP, at, pml4);

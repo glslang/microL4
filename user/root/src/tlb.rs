@@ -71,7 +71,7 @@ const WENT_ON: u64 = 0x57A1E;
 /// What T writes in phase 1.
 const MAGIC: u64 = 0x7EB_5EED;
 /// What the root task writes in the page under the new page table.
-const TABLE_MAGIC: u64 = 0x7AB1E_5EED;
+const TABLE_MAGIC: u64 = 0x0007_AB1E_5EED;
 
 /// Page-fault error code bits.
 const PF_PRESENT: u64 = 1 << 0;
@@ -193,7 +193,7 @@ pub fn run(bi: &BootInfo) -> ! {
     let t = Thread {
         tcb,
         fault_ep: ep,
-        stack: &STACKS[0],
+        stack: STACKS[0],
         entry: worker,
         args: [0, caps[0], ep, 0],
     };
