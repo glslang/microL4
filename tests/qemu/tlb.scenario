@@ -8,7 +8,10 @@
 # PageTable_Unmap (a CR3 reload). Each second access must fault; a kernel
 # that skips the flush lets it through a stale translation, T reports that,
 # and the test fails. No other scenario sees a missing flush: test=vspace
-# checks the entries by walking the tables.
+# checks the entries by walking the tables. After each fault the root task
+# undoes the change and replies, and the restarted access must find the
+# page's word (from reviewer K's test=tlb: no other scenario restarts an
+# access after a VMFault reply).
 cmdline: test=tlb
 exit: success
 expect: microL4 kernel
@@ -18,9 +21,12 @@ expect: root: cmdline "test=tlb"
 expect: tlb: page 0x500000 mapped read-write; a new page table maps page 0x600000
 expect: tlb: ok   phase 1, Frame_Remap to read-only (invlpg): the access after it faulted at 0x500000
 expect: fsr 0x7
+expect: tlb: ok   phase 1: Frame_Remap read-write, then the fault reply: the access restarted and found 0xfffffffff814a112
 expect: tlb: ok   phase 2, Frame_Unmap (invlpg): the access after it faulted at 0x500000
 expect: fsr 0x4
+expect: tlb: ok   phase 2: Frame_Map, then the fault reply: the access restarted and found 0xfffffffff814a112
 expect: tlb: ok   phase 3, PageTable_Unmap (CR3 reload): the access after it faulted at 0x600000
 expect: fsr 0x4
+expect: tlb: ok   phase 3: PageTable_Map and Frame_Map, then the fault reply: the access restarted and found 0x7ab1e5eed
 expect: TEST PASS
 expect: DEBUG HALT 0 from TCB

@@ -22,8 +22,13 @@
 //!    reload): T reads the page, unmaps the table, and reads again.
 //!
 //! T's faults go to E, where the root task waits and checks each
-//! `VMFault`; it then points T at the next phase with
-//! `TCB_WriteRegisters`, which resumes it and deletes the reply capability.
+//! `VMFault`. It then undoes the phase's change (`Frame_Remap` back to
+//! read-write, `Frame_Map`, or `PageTable_Map` and `Frame_Map`) and
+//! replies, which restarts the faulting access: T must then reach the
+//! frame, see what was written there before the change, and report the
+//! word on E. (Folded in from reviewer K's `test=tlb`: no other scenario
+//! restarts an access after a `VMFault` reply.) The root task then points
+//! T at the next phase with `TCB_WriteRegisters`.
 
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering::Relaxed;
@@ -33,7 +38,7 @@ use libsys::fault_label::VM_FAULT;
 use libsys::invoke::{invoke, tcb_set_priority, tcb_write_registers};
 use libsys::{
     BootInfo, CPtr, Ipc, Message, MessageInfo, ObjectAlloc, ObjectType, Registers, Rights, UserReg,
-    println, recv, send, yield_now,
+    println, recv, reply, send, yield_now,
 };
 
 use crate::fail;
@@ -65,6 +70,8 @@ const PRIORITY: u64 = 100;
 const WENT_ON: u64 = 0x57A1E;
 /// What T writes in phase 1.
 const MAGIC: u64 = 0x7EB_5EED;
+/// What the root task writes in the page under the new page table.
+const TABLE_MAGIC: u64 = 0x7AB1E_5EED;
 
 /// Page-fault error code bits.
 const PF_PRESENT: u64 = 1 << 0;
@@ -75,12 +82,15 @@ const PF_LOW_BITS: u64 = 0x1F;
 /// The value T read or wrote last, so the accesses are not optimised away.
 static SEEN: AtomicU64 = AtomicU64::new(0);
 
-/// One phase: what T does, which page it touches, and the fault the second
-/// access must raise.
+/// One phase: what T does, which page it touches, the fault the second
+/// access must raise, what undoes the change, and the word T must find in
+/// the page once its access restarts.
 struct Phase {
     name: &'static str,
     page: u64,
     fsr: u64,
+    undo: &'static str,
+    word: u64,
 }
 
 const PHASES: [Phase; 3] = [
@@ -88,16 +98,24 @@ const PHASES: [Phase; 3] = [
         name: "Frame_Remap to read-only (invlpg)",
         page: PAGE,
         fsr: PF_PRESENT | PF_WRITE | PF_USER,
+        undo: "Frame_Remap read-write",
+        // T's restarted write.
+        word: !MAGIC,
     },
     Phase {
         name: "Frame_Unmap (invlpg)",
         page: PAGE,
         fsr: PF_USER,
+        undo: "Frame_Map",
+        // Phase 1's write, which the frame kept while unmapped.
+        word: !MAGIC,
     },
     Phase {
         name: "PageTable_Unmap (CR3 reload)",
         page: TABLE_PAGE,
         fsr: PF_USER,
+        undo: "PageTable_Map and Frame_Map",
+        word: TABLE_MAGIC,
     },
 ];
 
@@ -107,6 +125,18 @@ fn must(ipc: Option<Ipc>, cap: CPtr, label: u64, args: &[u64], caps: &[CPtr], wh
     if let Err(e) = invoke(ipc, cap, label, args, caps) {
         fail!("tlb: {what}: {e}")
     }
+}
+
+/// `Frame_Map` of `frame` at `page`, read-write, in the root task's VSpace.
+fn map(ipc: Ipc, frame: CPtr, page: u64, what: &str) {
+    must(
+        Some(ipc),
+        frame,
+        FRAME_MAP,
+        &[page, READ_WRITE, RAM],
+        &[CAP_INIT_VSPACE],
+        what,
+    );
 }
 
 pub fn run(bi: &BootInfo) -> ! {
@@ -154,6 +184,7 @@ pub fn run(bi: &BootInfo) -> ! {
         &[CAP_INIT_VSPACE],
         "Frame_Map of the page under the new page table",
     );
+    write(TABLE_PAGE, TABLE_MAGIC);
     println!(
         "tlb: page {PAGE:#x} mapped read-write; a new page table maps page {TABLE_PAGE:#x}; thread T in the root task's VSpace touches them"
     );
@@ -172,7 +203,8 @@ pub fn run(bi: &BootInfo) -> ! {
     let entry: spawn::Entry = worker;
     for (i, phase) in PHASES.iter().enumerate() {
         // Phase 0 starts T where `prepare` left it; the later ones restart
-        // it, blocked on its last fault, at the worker's entry again.
+        // it, spinning in `yield_now` after its report, at the worker's
+        // entry again.
         let regs = Registers::ZERO
             .with(UserReg::Rip, entry as usize as u64)
             .with(UserReg::Rsp, STACKS[0].top() - 8)
@@ -214,6 +246,48 @@ pub fn run(bi: &BootInfo) -> ! {
             i + 1,
             phase.name
         );
+
+        match i {
+            0 => must(
+                Some(ipc),
+                frame,
+                FRAME_REMAP,
+                &[READ_WRITE, RAM],
+                &[],
+                phase.undo,
+            ),
+            1 => map(ipc, frame, PAGE, phase.undo),
+            _ => {
+                must(
+                    Some(ipc),
+                    table,
+                    PAGE_TABLE_MAP,
+                    &[TABLE_PAGE],
+                    &[CAP_INIT_VSPACE],
+                    phase.undo,
+                );
+                map(ipc, table_frame, TABLE_PAGE, phase.undo);
+            }
+        }
+        // Label 0 restarts the faulting access.
+        reply(&Message::EMPTY);
+        let r = recv(ep).msg;
+        let [n, word, ..] = r.mr;
+        if r.info.label() != WENT_ON || n != i as u64 || word != phase.word {
+            fail!(
+                "tlb: phase {}: after {} and the fault reply, label {:#x}, MR0 to MR3 {:#x?}; want T's report of phase {i} with {:#x}",
+                i + 1,
+                phase.undo,
+                r.info.label(),
+                r.mr,
+                phase.word
+            );
+        }
+        println!(
+            "tlb: ok   phase {}: {}, then the fault reply: the access restarted and found {word:#x}",
+            i + 1,
+            phase.undo
+        );
     }
     println!("TEST PASS");
     libsys::debug_halt(0)
@@ -224,42 +298,50 @@ pub fn run(bi: &BootInfo) -> ! {
 fn read(addr: u64) -> u64 {
     // SAFETY: `addr` is page-aligned in the root task's own VSpace; the
     // read either finds the frame the test mapped there or faults, and the
-    // fault goes to the root task, which never lets this thread go on.
+    // fault goes to the root task, which maps the frame back before the
+    // read restarts.
     unsafe { core::ptr::read_volatile(addr as *const u64) }
 }
 
 /// Writes `value` to the word at `addr`, likewise.
 fn write(addr: u64, value: u64) {
-    // SAFETY: as in `read`; the frame holds nothing but what this thread
+    // SAFETY: as in `read`; the frames hold nothing but what this test
     // writes.
     unsafe { core::ptr::write_volatile(addr as *mut u64, value) }
 }
 
 /// Thread T, phase `phase` (0 to 2): an access that loads the TLB, the
 /// invocation of `cap` that changes the entry, and the access that must
-/// fault. Reports on `ep` if it does not.
+/// fault. Then, once the root task's fault reply has restarted that access,
+/// or at once if it did not fault, reports on `ep` with the page's word.
 extern "C" fn worker(phase: u64, cap: CPtr, ep: CPtr, _: u64) -> ! {
-    match phase {
+    let page = match phase {
         0 => {
             write(PAGE, MAGIC);
             SEEN.store(read(PAGE), Relaxed);
             must(None, cap, FRAME_REMAP, &[READ, RAM], &[], "Frame_Remap");
             write(PAGE, !MAGIC);
+            PAGE
         }
         1 => {
             SEEN.store(read(PAGE), Relaxed);
             must(None, cap, FRAME_UNMAP, &[], &[], "Frame_Unmap");
             SEEN.store(read(PAGE), Relaxed);
+            PAGE
         }
         _ => {
             SEEN.store(read(TABLE_PAGE), Relaxed);
             must(None, cap, PAGE_TABLE_UNMAP, &[], &[], "PageTable_Unmap");
             SEEN.store(read(TABLE_PAGE), Relaxed);
+            TABLE_PAGE
         }
-    }
+    };
     send(
         ep,
-        &Message::new(MessageInfo::new(WENT_ON, 0, 0, 1), [phase, 0, 0, 0]),
+        &Message::new(
+            MessageInfo::new(WENT_ON, 0, 0, 2),
+            [phase, read(page), 0, 0],
+        ),
     );
     loop {
         yield_now();
