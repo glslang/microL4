@@ -45,7 +45,7 @@ pub use apic::test_nmi_stack;
 #[cfg(feature = "selftest")]
 pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]
-pub use paging::{test_lowmem, test_paging};
+pub use paging::{direct_map_page, test_lowmem, test_paging};
 #[cfg(feature = "selftest")]
 pub use timer::start_ticks_test;
 #[cfg(feature = "selftest")]
@@ -169,6 +169,24 @@ pub fn kernel_memory(boot: &BootState) -> [Option<(&'static str, Range<u64>)>; 1
         *slot = paging::translate(boot, page..page + 4096).map(|p| ("a device-window page", p));
     }
     out
+}
+
+/// Spins with interrupts off until the preemption point's poll sees an
+/// interrupt pending, for at most `ns` nanoseconds by the TSC; whether one
+/// did. For `test=retype`, whose first call must be preempted by a real
+/// interrupt on any host.
+#[cfg(feature = "selftest")]
+pub fn wait_interrupt_pending(ns: u64) -> bool {
+    let hz = FACTS.get().map_or(0, |f| f.tsc_hz);
+    let limit = (u128::from(ns) * u128::from(hz) / 1_000_000_000) as u64;
+    let start = cpu::rdtsc();
+    while !apic::interrupt_pending() {
+        if cpu::rdtsc().wrapping_sub(start) > limit {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    true
 }
 
 /// QEMU's `isa-debug-exit` device, configured by `cargo xtask` at this port.

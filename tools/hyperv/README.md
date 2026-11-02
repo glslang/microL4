@@ -67,47 +67,47 @@ TEST PASS
 The kernel halts after `TEST PASS` on Hyper-V, since there is no
 `isa-debug-exit` device; the script turns the VM off.
 
-## At the M3 check
+## Optional: the M4 check
 
-CI builds a second image for this check, the `microl4-vhdx-m3-check`
-artifact. It boots `acpidump test=ticks`: the loader prints every ACPI table
-to COM1, the kernel prints its boot summary, then it times ten ticks of the
-100 Hz timer against the Hyper-V reference counter. The dump takes a few
-seconds over COM1, so allow two minutes:
+CI builds a second image, the `microl4-vhdx-m4-check` artifact. It boots
+`test=retype`, M4's done-when self-test: the kernel prints its boot summary
+with the BootInfo lines, then retypes the largest RAM untyped into every
+object type, works the CNode operations on the results, revokes it, does
+it all again, and checks that both runs give the same result. M4 does not
+need this check, but its numbers are the first from real hardware:
 
 ```powershell
-.\Test-L4Vhdx.ps1 -VhdxPath .\microl4-vhdx-m3-check\disk.vhdx -TimeoutSeconds 120 `
-    -LogPath m3-check.log -Expect 'acpidump: rsdp', 'acpidump: end', `
-    'cpu: features NX PGE PAT SMEP SMAP XSAVE', 'cpu: hypervisor Hyper-V', `
-    'hyperv: ', 'timer: calibrating against the Hyper-V reference counter', `
-    'timer: periodic at 100 Hz', 'cpu: meltdown:', `
-    'ticks: within 100000 us within 1%'
+.\Test-L4Vhdx.ps1 -VhdxPath .\microl4-vhdx-m4-check\disk.vhdx -TimeoutSeconds 120 `
+    -LogPath m4-check.log -Expect 'cpu: hypervisor Hyper-V', `
+    'cpu: physical address width', 'bootinfo: boot region', 'bootinfo: slots', `
+    'retype: U is root slot', 'retype: an interrupt is pending', `
+    'retype: run 1 done:', 'retype: revoke 1 done:', 'retype: run 2 done: the same', `
+    'retype: revoke 2 done:', 'restarts from the idle path after', `
+    'retype: the longest stretch between two polls:'
 ```
 
-Paste `m3-check.log` into the PR. These lines are what the check is for:
+If you run it, paste `m4-check.log` into the PR. These lines are what the
+check is for:
 
 | Line | What it shows |
 | --- | --- |
-| `cpu: features ...` | SMEP, SMAP and XSAVE are passed through; without them the boot stops at `CPU lacks` |
-| `cpu: meltdown: ...` | recorded in `STATUS.md` |
-| `apic: IA32_APIC_BASE ... at handover` | whether the firmware left x2APIC on; QEMU never does, so that path first runs here |
-| `hyperv: ...` | the TLFS interface and privileges, each firmware overlay found and switched off, the hypercall MSR and whether it is locked, the frequency MSRs |
-| `acpi: ...` | the tables, the I/O APIC, COM1's route (GSI 4, edge, active high expected) and no HPET |
-| `pic: ...`, `ioapic: ...` | the 8259 and every I/O APIC pin masked |
-| `timer: ...` | the calibration against the reference counter, and its agreement with the frequency MSRs |
-| `ticks: ...` | ten ticks within 1% of 100 ms |
+| `cpu: physical address width ...` | the width BootInfo reports; no untyped reaches `2^width` |
+| `bootinfo: boot region ...` | where the root CNode, the IPC buffer and BootInfo went: the top of the highest usable range |
+| `bootinfo: N untyped: ...` | the untyped count, under BootInfo's 448, and the RAM and device bytes |
+| `bootinfo: framebuffer ...` | the GOP framebuffer's device untyped, or the warning and its reason when it gets none |
+| `bootinfo: slots ...` | each slot region of the root CNode |
+| `retype: U is root slot ...` | the untyped the test retypes, and its size |
+| `retype: run 1 done: N slots recorded ...`, `run 2 done: the same N slots ...` | the record of every slot after each run; N moves with the untyped count |
+| `retype: revoke 1 done: ...`, `revoke 2 done: ...` | the revoke emptied every slot the test filled |
+| `retype: run 1: preempted ...` and the other phases' lines | each phase's preemptions by the timer and by injection, and the stretches between its preemption points: the longest and the mean |
+| `retype: N restarts from the idle path ...` | every preempted call restarted from the idle path |
+| `retype: the longest stretch between two polls: ...` | the longest time the kernel ran between two preemption points in each phase, which answers whether clearing 4 KiB between them is right |
 
-A session (or you) then turns the ACPI part of the log into the Hyper-V
-test tables:
-
-```sh
-cargo xtask acpidump --from-log m3-check.log --out core/tests/acpi/hyperv-gen2.dump
-```
-
-That checks the dump is whole, prints what the parser makes of it (the
-tables, the I/O APIC, each ISA route, the HPET, the ECAM ranges) and writes
-the file to commit, with a host test that reads it. The log may have `\r\n`
-line ends and other lines between the dump lines.
+The M3 check passed on 2026-10-30; its results are in `STATUS.md`. To run
+it again, build its image with `cargo xtask image --cmdline "acpidump
+test=ticks"`; `cargo xtask acpidump --from-log <log> --out
+core/tests/acpi/hyperv-gen2.dump` turns its log into the Hyper-V test
+tables.
 
 ## The pieces
 

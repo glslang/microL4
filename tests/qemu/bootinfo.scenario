@@ -4,7 +4,9 @@
 # arch code finds it from the CPU's registers, the linker's symbols and
 # the live page tables: the kernel image and what lies in it, the device
 # window's pages, the boot region, the MSI window and the low 1 MiB. Every
-# RAM untyped is RAM the kernel hands out.
+# RAM untyped is RAM the kernel hands out. A walk of the live direct map
+# finds every RAM untyped mapped write-back and no device untyped in a
+# write-back page (ADR 0004).
 cmdline: test=bootinfo
 exit: success
 expect: microL4 kernel
@@ -19,4 +21,5 @@ expect: bootinfo: the kernel stack at
 expect: bootinfo: the PML4 in CR3 at
 expect: are clear of the kernel image, its 12 parts above, 3 device-window pages, the boot region, the MSI window and [0, 1 MiB)
 expect: bootinfo: every RAM untyped is RAM the kernel hands out
+expect: bootinfo: the live direct map maps every RAM untyped write-back and no device untyped write-back
 expect: TEST PASS
