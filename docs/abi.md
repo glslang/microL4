@@ -1952,7 +1952,7 @@ physical. Slot regions are `SlotRegion { start: u64, end: u64 }`: slots
 | 64 | `user_image_paging` | `SlotRegion` | paging structures |
 | 80 | `extra_bootinfo_frames` | `SlotRegion` | BootInfo frames after the first |
 | 96 | `untyped` | `SlotRegion` | every untyped |
-| 112 | `framebuffer_untyped` | `SlotRegion` | the leading part of `untyped` that covers the framebuffer exactly, page-rounded; empty if there is no framebuffer, or if any 2 MiB page it touches is write-back in the direct map (a debug kernel warns) |
+| 112 | `framebuffer_untyped` | `SlotRegion` | the leading part of `untyped` that covers the framebuffer exactly, page-rounded; empty if there is no framebuffer, or if the kernel cannot hand it out whole: any 2 MiB page it touches is write-back in the direct map, it reaches below 1 MiB or past `2^phys_addr_bits`, or it overlaps memory no untyped may cover ([ADR 0024](adr/0024-framebuffer-untyped-rejections.md)); a debug kernel warns with the reason, and `framebuffer` keeps the handoff's values |
 | 128 | `user_image_start` | u64 | first byte of the first image page |
 | 136 | `user_image_end` | u64 | one past the last image page |
 | 144 | `framebuffer` | `Framebuffer` | 32 bytes, the handoff's [layout](#handoff-structure), physical `base`; all zero if there is none |
