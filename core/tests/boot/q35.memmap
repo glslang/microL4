@@ -1,0 +1,32 @@
+# The kernel's memory-map lines from the M3 `hello` boot under QEMU: xtask's
+# machine (q35, OVMF, -cpu max,la57=off, 256 MiB), copied from its COM1 log.
+# core/src/boot/tests.rs reads them; the framebuffer's size is
+# stride * height * 4.
+kernel: 600 KiB at phys 0xdead000, virt 0xffffffff80000000
+memory: 25 regions, 247 MiB usable, direct map covers 4 GiB
+  0x000000000000-0x0000000a0000 usable
+  0x000000100000-0x000000800000 usable
+  0x000000800000-0x000000808000 acpi-nvs
+  0x000000808000-0x00000080b000 usable
+  0x00000080b000-0x00000080c000 acpi-nvs
+  0x00000080c000-0x000000810000 usable
+  0x000000810000-0x000000900000 acpi-nvs
+  0x000000900000-0x00000de9d000 usable
+  0x00000de9d000-0x00000e12b000 loader
+  0x00000e12b000-0x00000e133000 usable
+  0x00000e133000-0x00000e137000 loader
+  0x00000e137000-0x00000e3d1000 usable
+  0x00000e3d1000-0x00000e3d2000 loader
+  0x00000e3d2000-0x00000f010000 usable
+  0x00000f010000-0x00000f0d1000 firmware
+  0x00000f0d1000-0x00000f8ed000 usable
+  0x00000f8ed000-0x00000faed000 firmware
+  0x00000faed000-0x00000fb6d000 reserved
+  0x00000fb6d000-0x00000fb7f000 acpi-reclaimable
+  0x00000fb7f000-0x00000fbff000 acpi-nvs
+  0x00000fbff000-0x00000fef4000 usable
+  0x00000fef4000-0x00000ff78000 firmware
+  0x00000ff78000-0x000010000000 acpi-nvs
+  0x0000e0000000-0x0000f0000000 reserved
+  0x00fd00000000-0x010000000000 reserved
+framebuffer: 1280x800, stride 1280, BGR at 0x80000000
