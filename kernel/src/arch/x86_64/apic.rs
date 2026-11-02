@@ -134,13 +134,6 @@ pub fn requested(vector: u8) -> bool {
 /// The preemption point's poll (`docs/design.md`, "Vector map"): whether
 /// any vector `0x30`-`0xFE` is pending in the IRR. Never enables
 /// interrupts.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        dead_code,
-        reason = "only `Objects::preempt` polls it, and boot steps 6, 7 and 9 (M4) will use `Objects`"
-    )
-)]
 pub fn interrupt_pending() -> bool {
     a::PREEMPT_IRR_WORDS
         .into_iter()

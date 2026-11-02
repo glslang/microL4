@@ -19,7 +19,7 @@ use super::cpu;
 use crate::boot::BootState;
 
 #[cfg(feature = "selftest")]
-pub use self::selftest::{test_lowmem, test_paging};
+pub use self::selftest::{tables_virt, test_lowmem, test_paging, translate};
 
 const CR0_WP: u64 = 1 << 16;
 const CR4_PGE: u64 = 1 << 7;
@@ -223,6 +223,40 @@ mod selftest {
         // them again: not the kernel, and not the CPU, since every kernel entry
         // has Accessed, and every writable leaf Dirty, already set.
         (pml4 != 0).then(|| (unsafe { &*TABLES.0.get() }, pml4))
+    }
+
+    /// The physical range the live kernel tables map the virtual range
+    /// `virt` to, for `test=bootinfo`; `None` if a page of it is unmapped.
+    /// Panics if it is not physically contiguous.
+    pub fn translate(
+        boot: &BootState,
+        virt: core::ops::Range<u64>,
+    ) -> Option<core::ops::Range<u64>> {
+        let Some((tables, _)) = built() else {
+            panic!("the kernel's tables are not loaded");
+        };
+        let tables_phys = kernel_layout(&boot.handoff).virt_to_phys(&raw const *tables as u64);
+        let phys = |v: u64| match tables.walk(tables_phys, v) {
+            Ok(t) => t.map(|t| t.phys),
+            Err(e) => panic!("{v:#x} does not translate: {e:?}"),
+        };
+        let mut v = virt.start;
+        let start = phys(v)?;
+        while v < virt.end {
+            assert_eq!(
+                phys(v)?,
+                start + (v - virt.start),
+                "{v:#x} breaks contiguity"
+            );
+            v = (v | 0xFFF) + 1;
+        }
+        Some(start..start + (virt.end - virt.start))
+    }
+
+    /// The kernel's page tables, as a virtual range.
+    pub fn tables_virt() -> core::ops::Range<u64> {
+        let start = TABLES.0.get() as u64;
+        start..start + size_of::<KernelTables>() as u64
     }
 
     /// Records one check of `test=paging`; returns whether it held.

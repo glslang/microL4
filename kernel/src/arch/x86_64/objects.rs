@@ -16,14 +16,10 @@
 //!   stretch between two, and can be told to report a preemption with no
 //!   interrupt pending.
 
-// Only the self-tests make an `Objects` until boot steps 6, 7 and 9 do.
-#![cfg_attr(
-    not(feature = "selftest"),
-    expect(dead_code, reason = "boot steps 6, 7 and 9 (M4) will use it")
-)]
-
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use l4core::bootinfo::{BOOTINFO_SIZE, BootInfo};
 use l4core::cap::{Cap, CapType, SLOT_SIZE};
 use l4core::kernel::{Kernel, Preempted};
 use l4core::objmem::ObjectMemory;
@@ -33,7 +29,7 @@ use super::{BootFacts, StaticCell, apic, phys_to_virt};
 use crate::boot::BootState;
 
 #[cfg(feature = "selftest")]
-pub use self::polls::{inject_preemption, poll_stats};
+pub use self::polls::{inject_preemption, poll_stats, reset_stretches};
 
 /// The memory kernel objects may occupy, for the debug checks.
 static MEMORY: StaticCell<ObjectMemory> = StaticCell::new();
@@ -52,6 +48,31 @@ pub fn init(boot: &BootState, facts: &BootFacts) {
         None => ObjectMemory::new(boot.memory_map(), boot.handoff.direct_map_end(), &[image]),
     };
     MEMORY.init(memory);
+}
+
+/// Boot step 9: BootInfo's two frames at physical `paddr`, in the boot
+/// region step 6 zeroed, as one `BootInfo` for boot to fill. Once per boot.
+pub fn bootinfo_frames(paddr: u64) -> &'static mut BootInfo {
+    static TAKEN: AtomicBool = AtomicBool::new(false);
+    assert!(
+        !TAKEN.swap(true, Ordering::Relaxed),
+        "BootInfo's frames taken twice"
+    );
+    let memory = MEMORY
+        .get()
+        .expect("kernel objects exist only after arch::init");
+    assert!(
+        paddr.is_multiple_of(4096) && memory.contains(paddr, BOOTINFO_SIZE as u64),
+        "BootInfo's frames at {paddr:#x} are not page-aligned RAM for kernel objects"
+    );
+    // SAFETY: the two frames are page-aligned RAM below the direct map's end,
+    // mapped RW and write-back at `PHYS_MAP_BASE + paddr`, outside the kernel
+    // image (checked above). They lie in the boot region, which no untyped
+    // covers and only boot uses, and hold no slot, so nothing else reads or
+    // writes them and no other reference to them exists; `TAKEN` hands this
+    // one out once. Every field of `BootInfo` is a plain integer, so any
+    // contents, here zeros, are a valid value.
+    unsafe { &mut *(phys_to_virt(paddr) as *mut BootInfo) }
 }
 
 /// The kernel's [`SlotMemory`] and [`Kernel`]: `l4core`'s view of kernel
@@ -256,6 +277,12 @@ mod polls {
             }
         }
 
+        fn reset(&self) {
+            for c in [&self.count, &self.total, &self.longest, &self.longest_at] {
+                c.store(0, Ordering::Relaxed);
+            }
+        }
+
         fn record(&self, tsc: u64, poll: u64) {
             self.count.fetch_add(1, Ordering::Relaxed);
             self.total.fetch_add(tsc, Ordering::Relaxed);
@@ -272,12 +299,10 @@ mod polls {
                     .map_or(0, |ns| ns as u64)
             };
             let count = self.count.load(Ordering::Relaxed);
-            let longest_tsc = self.longest.load(Ordering::Relaxed);
             let total = self.total.load(Ordering::Relaxed);
             StretchStats {
                 count,
-                longest_tsc,
-                longest_ns: ns(longest_tsc),
+                longest_ns: ns(self.longest.load(Ordering::Relaxed)),
                 longest_at: self.longest_at.load(Ordering::Relaxed),
                 mean_ns: ns(total.checked_div(count).unwrap_or(0)),
             }
@@ -314,6 +339,13 @@ mod polls {
         pending || injected
     }
 
+    /// Forgets the stretches measured so far, so that [`poll_stats`] times
+    /// only what follows; the poll and preemption counts go on.
+    pub fn reset_stretches() {
+        BETWEEN.reset();
+        FIRST.reset();
+    }
+
     /// Makes the `n`th preemption point from now (1: the next) report a
     /// preemption even with no interrupt pending. 0 cancels.
     pub fn inject_preemption(n: u64) {
@@ -341,9 +373,8 @@ mod polls {
     pub struct StretchStats {
         /// How many.
         pub count: u64,
-        /// The longest, in TSC ticks and in nanoseconds at the calibrated
-        /// TSC rate, and the poll that ended it, counting from 1 at boot.
-        pub longest_tsc: u64,
+        /// The longest, in nanoseconds at the calibrated TSC rate, and the
+        /// poll that ended it, counting from 1 at boot.
         pub longest_ns: u64,
         pub longest_at: u64,
         /// The mean, in nanoseconds.
@@ -371,6 +402,11 @@ impl Objects {
         // SAFETY: as in `zero`; the self-test that calls this owns the
         // range, which no object or capability covers.
         unsafe { ptr::write_bytes(phys_to_virt(paddr) as *mut u8, byte, len as usize) };
+    }
+
+    /// Whether `len` bytes at `paddr` are RAM kernel objects may occupy.
+    pub fn is_object_memory(&self, paddr: u64, len: u64) -> bool {
+        self.memory.contains(paddr, len)
     }
 
     /// The first non-zero byte in `len` bytes at `paddr`, if any.

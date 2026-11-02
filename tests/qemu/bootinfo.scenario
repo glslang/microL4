@@ -1,0 +1,22 @@
+# Boot steps 6, 7 and 9 (docs/design.md, "Boot"): the boot plan, the
+# untyped, BootInfo and the root CNode pass l4core::boot::check's checks,
+# and every untyped descriptor is clear of kernel memory as the kernel's
+# arch code finds it from the CPU's registers, the linker's symbols and
+# the live page tables: the kernel image and what lies in it, the device
+# window's pages, the boot region, the MSI window and the low 1 MiB. Every
+# RAM untyped is RAM the kernel hands out.
+cmdline: test=bootinfo
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=bootinfo"
+expect: bootinfo: boot region
+expect: bootinfo: check_plan: ok
+expect: bootinfo: check_untyped: ok
+expect: bootinfo: check_bootinfo: ok
+expect: bootinfo: check_root_cnode: ok
+expect: bootinfo: the kernel image is
+expect: bootinfo: the kernel stack at
+expect: bootinfo: the PML4 in CR3 at
+expect: are clear of the kernel image, its 12 parts above, 3 device-window pages, the boot region, the MSI window and [0, 1 MiB)
+expect: bootinfo: every RAM untyped is RAM the kernel hands out
+expect: TEST PASS
