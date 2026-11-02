@@ -65,12 +65,7 @@ pub fn retype<K: Kernel + ?Sized>(
 ) -> Result<(), RetypeError> {
     let ut = k.load(untyped).cap;
     debug_assert!(ut.cap_type() == CapType::Untyped);
-    let ty = ObjectType::from_number(args.object_type).ok_or(SyscallError::InvalidArgument(0))?;
-    let size_bits = match ty {
-        ObjectType::Untyped => in_range(args.size_bits, MIN_UNTYPED_BITS, MAX_UNTYPED_BITS)?,
-        ObjectType::CNode => in_range(args.size_bits, MIN_CNODE_RADIX, MAX_CNODE_RADIX)?,
-        _ => 0,
-    };
+    let (ty, size_bits) = check_object(args.object_type, args.size_bits)?;
     if dest.cap_type() != CapType::CNode {
         return Err(SyscallError::FailedLookup {
             source: false,
@@ -147,6 +142,21 @@ pub fn retype<K: Kernel + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// The first two argument checks of `Untyped_Retype`: `object_type` (MR0)
+/// must be an object type number, and `size_bits` (MR1) in range for an
+/// Untyped or a CNode. They come before the destination lookup, so the
+/// decoder runs them first (`l4core::invoke`); [`retype`] runs them again.
+/// Returns the type and its size argument, 0 for fixed-size types.
+pub fn check_object(object_type: u64, size_bits: u64) -> Result<(ObjectType, u32), SyscallError> {
+    let ty = ObjectType::from_number(object_type).ok_or(SyscallError::InvalidArgument(0))?;
+    let size_bits = match ty {
+        ObjectType::Untyped => in_range(size_bits, MIN_UNTYPED_BITS, MAX_UNTYPED_BITS)?,
+        ObjectType::CNode => in_range(size_bits, MIN_CNODE_RADIX, MAX_CNODE_RADIX)?,
+        _ => 0,
+    };
+    Ok((ty, size_bits))
 }
 
 /// Clears the untyped in `untyped` below its watermark, from the top down in
