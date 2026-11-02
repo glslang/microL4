@@ -1,5 +1,5 @@
-//! Threads in the root task's own CSpace and VSpace, on stacks in its
-//! `.bss`.
+//! Threads in the root task's own CSpace and VSpace, on two stacks of its
+//! image, each above an unmapped guard page.
 
 use core::cell::UnsafeCell;
 
@@ -39,7 +39,15 @@ impl Stack {
 }
 
 /// The stacks. A test gives each to at most one thread.
-pub static STACKS: [Stack; 2] = [Stack::new(), Stack::new()];
+pub static STACKS: [&Stack; 2] = [&STACK0, &STACK1];
+
+// Each in a segment of its own above an unmapped guard page
+// (`user/link.ld`), so an overflow faults instead of running into `.bss`
+// or the other stack.
+#[unsafe(link_section = ".thread_stack.0")]
+static STACK0: Stack = Stack::new();
+#[unsafe(link_section = ".thread_stack.1")]
+static STACK1: Stack = Stack::new();
 
 /// A thread's entry point. It takes four words, in `rdi`, `rsi`, `rdx` and
 /// `rcx`, and never returns.

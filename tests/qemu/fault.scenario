@@ -3,14 +3,16 @@
 # (user/root/src/fault.rs). The kernel starts the root task with
 # test=fault. It retypes two endpoints, E for faults and D for reports, and
 # two TCBs: the handler H at priority 200, with an IPC buffer in the second
-# KiB of the root task's buffer frame (TCB_SetIPCBuffer), and F at 100,
-# whose fault endpoint is a copy of E with only Write and GrantReply. H
-# waits on E; F reads 0xdeadbee8, which nothing maps. H checks the VMFault
-# message word by word (ip on F's one-instruction read, the address, no
-# fetch, a user-mode read of a page not present), reads F's registers
-# through its own buffer, and kills F with TCB_Suspend, which cancels the
-# fault IPC and deletes the reply capability: H's Reply with label 0 then
-# restarts nothing. The root reads F's registers again, drops below F's
+# KiB of the root task's buffer frame (TCB_SetIPCBuffer), and F at 210,
+# above H, whose fault endpoint is a copy of E with only Write and
+# GrantReply. F runs first and reads 0xdeadbee8, which nothing maps; its
+# fault waits on E, and H, below F, runs only because F is blocked. H
+# receives the fault, checks the VMFault message word by word (ip on F's
+# one-instruction read, the address, no fetch, a user-mode read of a page
+# not present), reads F's registers through its own buffer, has the kernel
+# dump every thread (F BlockedOnReply, at its faulting read), and kills F
+# with TCB_Suspend, which cancels the fault IPC and deletes the reply
+# capability: H's Reply with label 0 then restarts nothing. The root reads F's registers again, drops below F's
 # priority and spins for 50 ms: F must stay stopped, or it would fault
 # again and H would fail the test.
 cmdline: test=fault
@@ -22,16 +24,18 @@ expect: root: cmdline "test=fault"
 expect: fault: handler thread H (TCB slot
 expect: priority 200, IPC buffer at
 expect: fault: thread F (TCB slot
-expect: priority 100) has fault endpoint slot
+expect: priority 210) has fault endpoint slot
 expect: a copy with Write and GrantReply
 expect: fault: thread F reads 0xdeadbee8, which nothing maps
 expect: fault: handler received VMFault from thread F: ip 0x4 # root_fault_read moves with the image
 expect: addr 0xdeadbee8, prefetch 0, fsr 0x4 (a user-mode read of a page not present)
 expect: fault: handler read thread F's registers: rip 0x4
 expect: is the faulting instruction, rdi 0xdeadbee8
+expect: fault: handler runs below thread F's priority 210, so F is blocked; every thread before the kill:
+expect: BlockedOnReply, priority 210, at 0x4 # F, at root_fault_read
 expect: fault: handler killed thread F with TCB_Suspend
 expect: fault: root read thread F's registers after the kill: rip 0x4
 expect: still the faulting read, rdi 0xdeadbee8
-expect: fault: thread F stayed stopped for 50 ms with the root task at priority 50, below its 100
+expect: fault: thread F stayed stopped for 50 ms with the root task at priority 50, below its 210
 expect: TEST PASS
 expect: DEBUG HALT 0 from TCB

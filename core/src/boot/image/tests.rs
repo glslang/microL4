@@ -207,20 +207,8 @@ fn a_typical_image() {
             hypervisor: None,
         }
     );
-    let r = image.entry_regs();
-    assert_eq!((r.next_ip, r.rdi, r.rflags), (0x40_0010, 0x40_9000, 0x202));
-    assert_eq!(r.exit(), crate::regs::Exit::Iret);
-    assert_eq!(
-        Regs {
-            next_ip: 0,
-            rdi: 0,
-            rflags: 0,
-            exit: 0,
-            ..r
-        },
-        Regs::default(),
-        "every other register is 0"
-    );
+    // The entry registers come from `tcb::init_root`, tested there.
+    assert_eq!((image.entry(), image.bootinfo()), (0x40_0010, 0x40_9000));
 }
 
 #[test]

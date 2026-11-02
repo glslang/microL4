@@ -372,11 +372,26 @@ fn a_new_tcb_and_the_root_task() {
     assert!(!w.k.queued(d));
     init_root(&mut w.k, d, 0x40_1000, 0x80_3000);
     let r = w.k.regs(d);
+    // docs/abi.md, "Root-task entry state": `rip` the entry, `rdi`
+    // BootInfo, RFLAGS 0x202, every other register 0, the first exit an
+    // `iretq`.
     assert_eq!(
         (r.next_ip, r.fault_ip, r.rdi, r.rflags, r.rsp),
         (0x40_1000, 0x40_1000, 0x80_3000, 0x202, 0)
     );
     assert_eq!(r.exit(), Exit::Iret);
+    assert_eq!(
+        Regs {
+            next_ip: 0,
+            fault_ip: 0,
+            rdi: 0,
+            rflags: 0,
+            exit: 0,
+            ..r
+        },
+        Regs::default(),
+        "every other register is 0"
+    );
     assert_eq!(w.k.state(d), ThreadState::Running);
     assert_eq!((w.k.priority(d), w.k.mcp(d)), (255, 255));
     // Boot makes it runnable and the scheduler picks it over A.

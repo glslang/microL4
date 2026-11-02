@@ -5,20 +5,24 @@
  * map each with its permissions (RX, R, RW and NX) and no page holds two.
  * The ELF and program headers are in no segment.
  *
- * The stack, libsys's .libsys_stack, is a segment of its own one page above
- * the end of .bss: no segment covers the page between them, so nothing maps
- * there, and a stack overflow faults instead of overwriting .bss. The image
- * ends at the top of the stack; the kernel maps the IPC buffer and BootInfo
- * right after it.
+ * Stacks follow .bss, each a segment of its own above an unmapped guard
+ * page that no segment covers, so an overflow faults instead of
+ * overwriting what lies below: two thread stacks, .thread_stack.0 and
+ * .thread_stack.1 (the root task's spawn.rs; a program without them gets
+ * empty segments, which the kernel ignores), then libsys's .libsys_stack.
+ * The image ends at the top of the libsys stack; the kernel maps the IPC
+ * buffer and BootInfo right after it.
  */
 ENTRY(_start)
 
 PHDRS
 {
-    text   PT_LOAD FLAGS(5);   /* R X */
-    rodata PT_LOAD FLAGS(4);   /* R   */
-    data   PT_LOAD FLAGS(6);   /* R W */
-    stack  PT_LOAD FLAGS(6);   /* R W */
+    text    PT_LOAD FLAGS(5);   /* R X */
+    rodata  PT_LOAD FLAGS(4);   /* R   */
+    data    PT_LOAD FLAGS(6);   /* R W */
+    thread0 PT_LOAD FLAGS(6);   /* R W */
+    thread1 PT_LOAD FLAGS(6);   /* R W */
+    stack   PT_LOAD FLAGS(6);   /* R W */
 }
 
 SECTIONS
@@ -51,7 +55,23 @@ SECTIONS
         *(COMMON)
     } :data
 
-    /* The guard page. */
+    /* A guard page below each stack. */
+    . = ALIGN(4K) + 4K;
+
+    .thread_stack0 (NOLOAD) : ALIGN(4K)
+    {
+        KEEP(*(.thread_stack.0))
+        . = ALIGN(4K);
+    } :thread0
+
+    . = ALIGN(4K) + 4K;
+
+    .thread_stack1 (NOLOAD) : ALIGN(4K)
+    {
+        KEEP(*(.thread_stack.1))
+        . = ALIGN(4K);
+    } :thread1
+
     . = ALIGN(4K) + 4K;
 
     .stack (NOLOAD) : ALIGN(4K)

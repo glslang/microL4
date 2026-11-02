@@ -879,7 +879,12 @@ x87 and SSE only (XCR0 = `0x3`). FCW `0x037F` (every x87 exception masked,
 64-bit precision, round to nearest), FSW 0, all x87 registers empty, MXCSR
 `0x1F80` (every SIMD exception masked, round to nearest), all x87, MMX and XMM
 registers 0. AVX and later instructions raise #UD. User code may read XCR0
-with XGETBV. (Field meanings from memory; check in M5.)
+with XGETBV. (Checked in M5 on QEMU by `test=ring3`: a new thread reads FCW
+`0x037F` and MXCSR `0x1F80`, a new TCB's saved state has every x87 register
+empty and XMM0 0, and clearing FCW bit 2 or MXCSR bit 9 unmasks a divide by
+zero; `test=isolation` keeps FCW and MXCSR per thread. The precision and
+rounding fields, the #UD and XGETBV in ring 3 follow the SDM and are not
+tested.)
 
 ### User register set
 
@@ -910,7 +915,9 @@ instruction, which runs again if the thread is resumed. Writing any register
 makes the thread return to user mode through `iretq`, so `rcx` and `r11` are
 restored exactly. CS and SS are not part of the set and cannot be changed.
 User code cannot write FS or GS base itself (CR4.FSGSBASE is clear); loading a
-segment selector resets the base to 0 (from memory; check in M5).
+segment selector resets the base to 0 (checked in M5 on QEMU: `test=ring3`
+loads the user data selector `0x1B` into FS and GS in ring 3 and finds both
+bases 0).
 
 ### TCB invocations
 

@@ -3,15 +3,19 @@
 //!
 //! The root task retypes two endpoints, E for faults and D for reports to
 //! itself, and two TCBs: the handler H, at priority 200 with an IPC buffer,
-//! and the faulting thread F, at 100, whose fault endpoint is a copy of E
+//! and the faulting thread F, at 210, whose fault endpoint is a copy of E
 //! with only Write and GrantReply, as much as `docs/abi.md` asks of a fault
-//! endpoint. H's own faults, if any, go to D. H waits on E; F reads
-//! [`FAULT_ADDR`], which nothing maps, with the one instruction of
-//! [`root_fault_read`].
+//! endpoint. H's own faults, if any, go to D. F, above H, runs first and
+//! reads [`FAULT_ADDR`], which nothing maps, with the one instruction of
+//! [`root_fault_read`]; its fault waits on E. H runs only once F is
+//! blocked: were F left runnable, it would run again, above H, and H would
+//! never receive the fault.
 //!
-//! H checks the message is the `VMFault` that read raises
-//! ([`root::check::vm_fault`]), reads F's registers to see `rip` on the
-//! same instruction, prints both, and kills F with `TCB_Suspend`. Suspend,
+//! H receives the fault on E, checks the message is the `VMFault` that
+//! read raises ([`root::check::vm_fault`]), reads F's registers to see `rip`
+//! on the same instruction, prints both, has the kernel print every
+//! thread's state (`DebugDumpScheduler`: F is `BlockedOnReply`, which the
+//! scenario checks), and kills F with `TCB_Suspend`. Suspend,
 //! not deleting F's TCB capability, because it is the kill `docs/abi.md`
 //! defines for a thread blocked on a fault: F becomes `Inactive`, the
 //! fault IPC is cancelled and the reply capability in H's caller slot is
@@ -51,8 +55,8 @@ use crate::spawn::{self, STACKS, Thread};
 const FAULT_ADDR: u64 = 0xDEAD_BEE8;
 /// H's priority, and its MCP.
 const HANDLER_PRIORITY: u64 = 200;
-/// F's priority.
-const FAULTER_PRIORITY: u64 = 100;
+/// F's priority, above H's, so F runs and faults first.
+const FAULTER_PRIORITY: u64 = 210;
 /// The root task's priority while it waits to see F stays stopped.
 const ROOT_SETTLE_PRIORITY: u64 = 50;
 /// How long it waits: five time slices.
@@ -172,7 +176,8 @@ pub fn run(bi: &BootInfo) -> ! {
         .and_then(|()| tcb_resume(faulter))
         .unwrap_or_else(|e| fail!("resuming the threads: {e}"));
 
-    // H runs first and waits on E, then F faults, then H reports.
+    // F runs first and faults; H, below it, runs once F is blocked,
+    // receives the fault on E and reports.
     let r = recv(report_ep);
     if r.msg.info.label() != REPORT {
         fail!(
@@ -273,6 +278,11 @@ extern "C" fn handler_main(fault_ep: CPtr, faulter: CPtr, report: CPtr, buffer: 
         regs.get(UserReg::Rsp)
     );
 
+    // F is above H, so H runs only while F is blocked; the dump shows how.
+    println!(
+        "fault: handler runs below thread F's priority {FAULTER_PRIORITY}, so F is blocked; every thread before the kill:"
+    );
+    libsys::debug_dump_scheduler();
     tcb_suspend(faulter).unwrap_or_else(|e| fail!("the handler's TCB_Suspend on F: {e}"));
     println!("fault: handler killed thread F with TCB_Suspend");
     // F's reply capability went with the kill: this reply, which would

@@ -932,9 +932,12 @@ largest and the highest image, a gap between segments, and random images
 
 The kernel gives the root task no stack. As in seL4, root's `_start` in
 `libsys` switches to a stack of its own: 64 KiB in `.libsys_stack`, which
-`user/link.ld` makes a segment of its own one page above the end of `.bss`.
-No segment covers that page, so nothing maps it, and a stack overflow faults
-instead of overwriting `.bss`. The image ends at the top of the stack.
+`user/link.ld` makes a segment of its own one page above the segment below
+it. No segment covers that page, so nothing maps it, and a stack overflow
+faults instead of overwriting what lies below. Between `.bss` and it lie the
+root task's two 16 KiB thread stacks (`.thread_stack.0` and `.1`,
+`user/root/src/spawn.rs`), each a segment above a guard page in the same way.
+The image ends at the top of the libsys stack.
 
 ### Initial CSpace and BootInfo
 
@@ -2385,7 +2388,10 @@ TCB capability resumes it (it re-executes the faulting instruction) or
 suspends it. If the fault endpoint is deleted, threads queued on it restart,
 fault again, find no endpoint and become `Inactive`.
 
-`test=fault` shows the handler's side on QEMU: the handler reads the faulting
+`test=fault` shows the handler's side on QEMU. The faulting thread runs above
+its handler, so the handler runs only once the fault has blocked the thread,
+and a `DebugDumpScheduler` before the kill shows it `BlockedOnReply`. The
+handler reads the faulting
 thread's registers, whose `rip` is the faulting instruction, kills it with
 `TCB_Suspend`, which cancels its fault IPC and deletes the reply capability,
 and then replies with label 0 through an empty caller slot, which does

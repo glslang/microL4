@@ -32,6 +32,13 @@ macro_rules! root_image_path {
 const ROOT_IMAGE_LEN: usize = include_bytes!(root_image_path!()).len();
 
 /// The file, as xtask packed it.
+///
+/// Nothing may read this static, by name or through any reference, after
+/// boot step 8: [`RootImageSection::unmap`] then takes its pages out of the
+/// kernel window and hands them to the root task as RAM untyped, though it
+/// stays a Rust static over them. Its only reader is
+/// [`RootImageSection::bytes`], whose borrow ends before that unmap. It is
+/// named here only so `#[used]` keeps it in `.rootimage`.
 #[used]
 #[unsafe(link_section = ".rootimage")]
 static ROOT_IMAGE: [u8; ROOT_IMAGE_LEN] = *include_bytes!(root_image_path!());
