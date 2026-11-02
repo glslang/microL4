@@ -10,7 +10,10 @@
 //! - `test=threads`: two threads at one priority interleave their output
 //!   under preemption ([`threads`]);
 //! - `test=fault`: a page fault reaches the faulting thread's fault
-//!   handler, which kills it ([`fault`]).
+//!   handler, which kills it ([`fault`]);
+//! - `test=tlb`: a page's translation is gone from the TLB as soon as
+//!   `Frame_Remap`, `Frame_Unmap` or `PageTable_Unmap` changes its entry
+//!   ([`tlb`]).
 //!
 //! Every test ends the run with `DebugHalt`: 0 after `TEST PASS`, 1 after a
 //! `TEST FAIL` line. With no `test=` the root task halts with 0 after the
@@ -22,6 +25,7 @@
 mod fault;
 mod spawn;
 mod threads;
+mod tlb;
 
 use libsys::bootinfo::{CAP_INIT_CNODE, SlotRegion};
 use libsys::ipc::word;
@@ -53,6 +57,7 @@ fn main(bi: &'static BootInfo) -> ! {
         }
         Some("threads") => threads::run(bi),
         Some("fault") => fault::run(bi),
+        Some("tlb") => tlb::run(bi),
         Some(other) => fail!("unknown test {other:?}"),
     }
 }
