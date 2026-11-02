@@ -163,11 +163,12 @@ impl From<RetypeError> for InvokeError {
 /// Decodes and performs the invocation `msg` of the capability in `slot`.
 ///
 /// An empty slot or a Zombie is `InvalidCapability` 0. An Untyped decodes
-/// `Untyped_Retype`, a CNode its methods, a Frame or a PDPT, page directory
-/// or page table its map and unmap methods ([`vspace::invoke`]); any other
-/// label, and every other capability type until its milestone, is
+/// `Untyped_Retype`, a CNode its methods, a TCB its methods
+/// ([`crate::tcb::invoke`]), a Frame or a PDPT, page directory or page
+/// table its map and unmap methods ([`vspace::invoke`]); any other label,
+/// and every other capability type until its milestone, is
 /// `IllegalOperation`.
-pub fn invoke<K: Kernel + PagingStore + ?Sized>(
+pub fn invoke<K: Kernel + PagingStore + crate::tcb::Threads + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     msg: &Message<'_>,
@@ -177,6 +178,7 @@ pub fn invoke<K: Kernel + PagingStore + ?Sized>(
         CapType::Null | CapType::Zombie => Err(SyscallError::InvalidCapability(0).into()),
         CapType::Untyped => untyped_invocation(k, slot, msg),
         CapType::CNode => cnode_invocation(k, cap, msg),
+        CapType::Tcb => crate::tcb::invoke(k, slot, msg),
         CapType::Frame | CapType::PageTable | CapType::PageDirectory | CapType::Pdpt => {
             vspace::invoke(k, slot, msg)
         }
