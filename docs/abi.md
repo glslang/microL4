@@ -870,7 +870,8 @@ thread goes to the tail of its priority's queue, with its remaining slice, and
 the highest-priority runnable thread runs, which may be the caller again.
 
 Every thread may read the time-stamp counter with `rdtsc` and `rdtscp`:
-the kernel keeps CR4.TSD clear. BootInfo's `tsc_hz` converts its ticks to
+the kernel keeps CR4.TSD clear, and sets `IA32_TSC_AUX`, which `rdtscp`
+and `rdpid` return, to 0. BootInfo's `tsc_hz` converts its ticks to
 time ([ADR 0025](adr/0025-user-tsc.md)).
 
 ### Initial FP state
