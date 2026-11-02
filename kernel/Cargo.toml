@@ -14,3 +14,11 @@ bench = false
 
 [dependencies]
 l4core = { path = "../core" }
+
+[features]
+# Kernel console output, the boot summary and, from M5, the debug system
+# calls (ADR 0021). It gates nothing until M7 builds a kernel without it.
+debug = []
+# The in-kernel self-tests a `test=` on the command line picks (ADR 0003),
+# and every hook only they use. xtask builds every image with it.
+selftest = ["debug"]

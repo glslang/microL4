@@ -9,6 +9,10 @@ use crate::{Result, cargo, root, run, target_dir};
 /// SSE registers; the kernel's own `compile_error!` checks back this up.
 pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
 pub const LOADER_TARGET: &str = "x86_64-unknown-uefi";
+/// The kernel features every image is built with: the self-tests, which
+/// scenarios pick with `test=`, and with them `debug` (ADR 0021). M7 adds a
+/// build without `debug`.
+pub const KERNEL_FEATURES: &str = "selftest";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
@@ -33,7 +37,13 @@ pub struct Artifacts {
 pub fn build(profile: Profile) -> Result<Artifacts> {
     // M5 adds the user crates here, packed into the boot image the kernel
     // embeds, before the kernel itself is built.
-    cargo_for("build", KERNEL_TARGET, "kernel", profile, &[])?;
+    cargo_for(
+        "build",
+        KERNEL_TARGET,
+        "kernel",
+        profile,
+        &["--features", KERNEL_FEATURES],
+    )?;
     cargo_for("build", LOADER_TARGET, "loader", profile, &[])?;
     let out = |target: &str, file: &str| target_dir().join(target).join(profile.dir()).join(file);
     Ok(Artifacts {
@@ -58,12 +68,21 @@ pub fn clippy() -> Result<()> {
             "warnings",
         ])
         .current_dir(root()))?;
+    // The kernel twice, so that every `cfg` compiles both ways: as images
+    // are built, and with no features at all.
     cargo_for(
         "clippy",
         KERNEL_TARGET,
         "kernel",
         Profile::Dev,
-        &["--", "-D", "warnings"],
+        &["--features", KERNEL_FEATURES, "--", "-D", "warnings"],
+    )?;
+    cargo_for(
+        "clippy",
+        KERNEL_TARGET,
+        "kernel",
+        Profile::Dev,
+        &["--no-default-features", "--", "-D", "warnings"],
     )?;
     cargo_for(
         "clippy",

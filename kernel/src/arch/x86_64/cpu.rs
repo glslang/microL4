@@ -38,6 +38,30 @@ pub fn cpuid_count(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     (eax, ebx, ecx, edx)
 }
 
+/// The CPU's physical address width, CPUID `0x8000_0008` EAX bits 0 to 7:
+/// no physical address reaches `2^phys_addr_bits` (BootInfo's
+/// `phys_addr_bits`). A CPU without the leaf has 36, as the SDM says for
+/// one with PAE; every CPU that passes `check_cpu` has it.
+pub fn phys_addr_bits() -> u32 {
+    let (max_ext, ..) = cpuid(0x8000_0000);
+    if max_ext >= 0x8000_0008 {
+        cpuid(0x8000_0008).0 & 0xFF
+    } else {
+        36
+    }
+}
+
+/// Reads the time-stamp counter.
+pub fn rdtsc() -> u64 {
+    let (lo, hi): (u32, u32);
+    // SAFETY: `rdtsc` reads the time-stamp counter; it touches no memory.
+    // CR4.TSD is clear, and the kernel runs in ring 0 regardless.
+    unsafe {
+        asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags))
+    };
+    u64::from(hi) << 32 | u64::from(lo)
+}
+
 /// The CPUID words the feature check reads; a leaf above the CPU's maximum
 /// reads as zero.
 pub fn cpuid_features() -> Cpuid {
@@ -113,6 +137,7 @@ pub fn read_cr2() -> u64 {
 }
 
 /// Reads CR3.
+#[cfg(feature = "selftest")]
 pub fn read_cr3() -> u64 {
     let v;
     // SAFETY: reading CR3 has no side effects.
@@ -186,6 +211,18 @@ impl Hypervisor {
     /// Whether QEMU's `isa-debug-exit` device can be expected.
     pub fn is_qemu(self) -> bool {
         matches!(self, Self::QemuTcg | Self::QemuKvm)
+    }
+
+    /// BootInfo's `hypervisor_vendor` (`docs/abi.md`, "BootInfo"): 0 none,
+    /// 1 QEMU TCG, 2 QEMU KVM, 3 Hyper-V, 4 any other.
+    pub fn vendor(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::QemuTcg => 1,
+            Self::QemuKvm => 2,
+            Self::HyperV => 3,
+            Self::Other(_) => 4,
+        }
     }
 }
 

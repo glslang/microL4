@@ -4,7 +4,8 @@
 //! and calls [`kmain`]. The kernel checks the CPU, copies what the loader
 //! handed over, moves onto its own descriptor tables and page tables (M3),
 //! prints a boot summary, runs the test named on the command line, if any,
-//! and stops.
+//! and stops. The tests exist only in a kernel built with the `selftest`
+//! feature, as xtask builds every image.
 
 #![no_std]
 #![no_main]
@@ -26,6 +27,8 @@ mod debug;
 #[allow(unsafe_code)]
 mod arch;
 mod boot;
+#[cfg(feature = "selftest")]
+mod selftest;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +36,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use l4core::cmdline;
 use l4core::handoff::{self, RegionKind};
 
+use arch::BootFacts;
 use boot::BootState;
 
 /// The kernel proper, called once by `arch` on the kernel stack with
@@ -48,7 +52,7 @@ fn kmain(handoff_phys: u64) -> ! {
     arch::check_cpu();
     let boot = boot::take_handoff(handoff_phys);
     print_boot_info(boot);
-    arch::init(boot);
+    let facts = arch::init(boot);
     arch::print_cpu_state();
 
     match cmdline::value(boot.cmdline(), "test") {
@@ -57,47 +61,65 @@ fn kmain(handoff_phys: u64) -> ! {
             kprintln!("nothing more to do; halting");
             arch::halt()
         }
-        Some("hello") => {
+        Some(name) => run_test(name, boot, facts),
+    }
+}
+
+/// Runs the self-test `test=` names (ADR 0003), which ends the run.
+#[cfg(feature = "selftest")]
+fn run_test(name: &str, boot: &'static BootState, facts: &'static BootFacts) -> ! {
+    match name {
+        "hello" => {
             kprintln!("hello from microL4");
             kprintln!("TEST PASS");
             arch::exit(arch::ExitCode::Success)
         }
-        Some("panic") => panic!("deliberate panic requested by the command line"),
+        "panic" => panic!("deliberate panic requested by the command line"),
         // Ring-0 traps and the idle loop's interrupt path (M3).
-        Some("page_fault") => arch::provoke(arch::Provoke::PageFault),
-        Some("double_fault") => arch::provoke(arch::Provoke::DoubleFault),
-        Some("df_stack") => arch::provoke(arch::Provoke::DoubleFaultStack),
-        Some("trap_breakpoint") => arch::provoke(arch::Provoke::Breakpoint),
-        Some("trap_general_protection") => arch::provoke(arch::Provoke::GeneralProtection),
-        Some("trap_nmi") => arch::provoke(arch::Provoke::Nmi),
-        Some("trap_machine_check") => arch::provoke(arch::Provoke::MachineCheck),
-        Some("trap_debug") => arch::provoke(arch::Provoke::Debug),
-        Some("trap_cannot_occur") => arch::provoke(arch::Provoke::CannotOccur),
-        Some("trap_irq_outside_idle") => arch::provoke(arch::Provoke::InterruptOutsideIdle),
-        Some("idle_irq") => arch::idle_self_test(),
-        Some("paging") => arch::test_paging(boot),
-        Some("lowmem") => arch::test_lowmem(),
+        "page_fault" => arch::provoke(arch::Provoke::PageFault),
+        "double_fault" => arch::provoke(arch::Provoke::DoubleFault),
+        "df_stack" => arch::provoke(arch::Provoke::DoubleFaultStack),
+        "trap_breakpoint" => arch::provoke(arch::Provoke::Breakpoint),
+        "trap_general_protection" => arch::provoke(arch::Provoke::GeneralProtection),
+        "trap_nmi" => arch::provoke(arch::Provoke::Nmi),
+        "trap_machine_check" => arch::provoke(arch::Provoke::MachineCheck),
+        "trap_debug" => arch::provoke(arch::Provoke::Debug),
+        "trap_cannot_occur" => arch::provoke(arch::Provoke::CannotOccur),
+        "trap_irq_outside_idle" => arch::provoke(arch::Provoke::InterruptOutsideIdle),
+        "idle_irq" => arch::idle_self_test(),
+        "paging" => arch::test_paging(boot),
+        "lowmem" => arch::test_lowmem(),
         // The interrupt controllers and the timer (M3).
-        Some("ticks") => {
+        "ticks" => {
             arch::start_ticks_test();
             arch::idle()
         }
-        Some("nmi_stack") => arch::test_nmi_stack(),
-        Some("stack_overflow") => {
+        "nmi_stack" => arch::test_nmi_stack(),
+        "stack_overflow" => {
             kprintln!("recursing until the kernel stack overflows");
             let depth = overflow_stack(0);
             panic!("the stack never overflowed (depth {depth})")
         }
-        Some(other) => {
+        // Kernel objects (M4).
+        "preempt" => selftest::preempt(boot, facts),
+        other => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)
         }
     }
 }
 
+/// Without `selftest` there are no tests: says so and fails the run.
+#[cfg(not(feature = "selftest"))]
+fn run_test(name: &str, _boot: &'static BootState, _facts: &'static BootFacts) -> ! {
+    kprintln!("test={name}: this kernel has no self-tests (built without the `selftest` feature)");
+    arch::exit(arch::ExitCode::Failure)
+}
+
 /// Recurses until the kernel stack runs into its guard page, for the
 /// `stack_overflow` scenario. Each frame holds 512 bytes the optimiser
 /// cannot drop, so the 64 KiB stack is gone after about 128 calls.
+#[cfg(feature = "selftest")]
 fn overflow_stack(depth: u64) -> u64 {
     let frame = core::hint::black_box([depth; 64]);
     if depth == u64::MAX {
@@ -155,6 +177,7 @@ fn panic(info: &PanicInfo) -> ! {
             ),
             None => kprintln!("KERNEL PANIC: {}", info.message()),
         }
+        #[cfg(feature = "selftest")]
         arch::print_stack_use();
     }
     arch::exit(arch::ExitCode::Failure)

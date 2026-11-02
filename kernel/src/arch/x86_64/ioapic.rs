@@ -54,8 +54,9 @@ impl IoApic {
 }
 
 /// Masks every pin of every I/O APIC the MADT lists, and prints each one
-/// and where COM1's IRQ lands.
-pub fn init(p: &Platform) {
+/// and where COM1's IRQ lands. Returns each I/O APIC's pin count, read from
+/// its version register, in MADT order; 0 past the last.
+pub fn init(p: &Platform) -> [u16; MAX_IOAPICS] {
     let mut pins = [0u16; MAX_IOAPICS];
     for (i, io) in p.ioapics.iter().enumerate() {
         let ioapic = IoApic::new(i, io.address);
@@ -90,4 +91,5 @@ pub fn init(p: &Platform) {
         },
         None => kprintln!("ioapic: COM1 has no ISA route"),
     }
+    pins
 }
