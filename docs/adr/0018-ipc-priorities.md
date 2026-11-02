@@ -2,6 +2,11 @@
 
 Status: accepted, M1 (2026-10-29)
 
+M5 (2026-11-02): `IpcEnv` extends `Threads`, which can set priorities, so
+the Consequences' "checked by the type" no longer holds; host tests check
+after every step that IPC changed no priority instead
+([Priorities](../design.md#priorities)).
+
 ## Context
 
 PLAN.md's Scheduling row gives 256 fixed priorities with round-robin within
