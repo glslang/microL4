@@ -24,7 +24,7 @@ guest on the owner's machine.
 | `cargo xtask test` | host tests (the host crates, then the user crates' libraries), then every QEMU scenario in `tests/qemu/` (`cargo xtask test hello` runs one) |
 | `cargo xtask clippy` | clippy with `-D warnings` on every crate, each for its own target; the user crates also on the host, with their tests |
 | `cargo fmt --all` | format; CI runs `cargo fmt --all --check` |
-| `cargo xtask build` | build the kernel and the loader |
+| `cargo xtask build` | build the user crates, the root image, the kernel and the loader |
 | `cargo xtask image` | build `target/xtask/image/disk.img` and `disk.vhdx`, with `test=hello` |
 | `cargo xtask run [--cmdline "..."]` | boot under OVMF with COM1 on the terminal; Ctrl-A X quits |
 | `cargo xtask gdb` | boot paused with GDB attached |
@@ -51,11 +51,14 @@ Plain `cargo test` and `cargo build` cover only the host crates (`core`,
 - Put logic that can run on the host in `core/` and test it there; it also
   runs under Miri in CI. Add a QEMU scenario only for what needs the machine.
 - A scenario picks a kernel test with `cmdline: test=<name>`, which the kernel
-  reads from `\cmdline.txt` on the ESP. Test code builds only with the
-  kernel's `selftest` feature, which xtask always enables; a kernel without it
-  fails any `test=`. A passing test prints `TEST PASS` and exits with
-  `ExitCode::Success`; every boot has a 60-second limit.
+  reads from `\cmdline.txt` on the ESP. Kernel test code builds only with the
+  kernel's `selftest` feature, which xtask always enables; a `test=` the
+  kernel does not know, or any `test=` in a kernel without `selftest`, goes
+  to the root task, which runs its own tests (`user/root/`). A passing test
+  prints `TEST PASS` and exits with `ExitCode::Success`; every boot has a
+  60-second limit.
 - When a scenario fails, xtask prints the tail of COM1 and keeps the full log
-  in `target/xtask/scenarios/<name>/serial.log`.
+  in `target/xtask/scenarios/<name>/serial.log`, beside its `disk.img`; a
+  scenario that passes keeps its log but not its 64 MiB disk image.
 - Unstable cargo flags live only in `.cargo/build-std.toml`, which xtask uses
   when rustup cannot install a target (see `docs/adr/0001-toolchain.md`).

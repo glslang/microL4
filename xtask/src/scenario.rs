@@ -3,6 +3,9 @@
 //! A scenario boots the image with a given kernel command line, reads COM1,
 //! and passes when every `expect:` line appears in order and the guest exits
 //! through `isa-debug-exit` with the expected status, all within the timeout.
+//! Each runs in `target/xtask/scenarios/<name>/`: the COM1 log stays there,
+//! and so does the 64 MiB `disk.img` if the scenario fails; a pass deletes
+//! the image.
 //!
 //! ```text
 //! # Comments start with '#'.
@@ -337,7 +340,12 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
 
     let mut report = String::new();
     match &failure {
-        None => writeln!(report, "PASS {} ({elapsed:.1} s)", sc.name)?,
+        None => {
+            // 64 MiB per scenario adds up to gigabytes per run; a failure
+            // keeps its image beside the log, to boot again by hand.
+            fs::remove_file(&disk)?;
+            writeln!(report, "PASS {} ({elapsed:.1} s)", sc.name)?
+        }
         Some(why) => {
             writeln!(report, "FAIL {} ({elapsed:.1} s): {why}", sc.name)?;
             writeln!(report, "  last serial lines (full log: {}):", rel(&log))?;
