@@ -11,10 +11,12 @@
 //!   under preemption ([`threads`]);
 //! - `test=fault`: a page fault reaches the faulting thread's fault
 //!   handler, which kills it ([`fault`]);
-//! - `test=redteam-*`: the M5 red-team tests ([`redteam`]).
+//! - `test=isolation`: two threads switched by the scheduler keep their
+//!   x87, SSE, FS and GS base and general registers ([`isolation`]);
 //! - `test=tlb`: a page's translation is gone from the TLB as soon as
 //!   `Frame_Remap`, `Frame_Unmap` or `PageTable_Unmap` changes its entry
-//!   ([`tlb`]).
+//!   ([`tlb`]);
+//! - `test=redteam-*`: the M5 red-team tests ([`redteam`]).
 //!
 //! Every test ends the run with `DebugHalt`: 0 after `TEST PASS`, 1 after a
 //! `TEST FAIL` line. With no `test=` the root task halts with 0 after the
@@ -24,6 +26,7 @@
 #![no_main]
 
 mod fault;
+mod isolation;
 mod redteam;
 mod spawn;
 mod threads;
@@ -59,6 +62,7 @@ fn main(bi: &'static BootInfo) -> ! {
         }
         Some("threads") => threads::run(bi),
         Some("fault") => fault::run(bi),
+        Some("isolation") => isolation::run(bi),
         Some("tlb") => tlb::run(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
