@@ -227,7 +227,9 @@ fn run_probes(bi: &BootInfo, name: &str, entry: u64, resume: &[u64], probes: &[P
         "redteam: {name}: {} probes in thread {tcb} at priority {PROBER_PRIORITY}, the root task its fault handler",
         probes.len()
     );
-    start(ipc, tcb, entry, STACKS[0].top() - 8, [0; 3]);
+    // 64 bytes above `rsp` for the probes that read there (65's
+    // misaligned read); the stack's top is a guard page's start.
+    start(ipc, tcb, entry, STACKS[0].top() - 72, [0; 3]);
 
     let mut failures = 0;
     let mut next = 0;
