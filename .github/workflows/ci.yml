@@ -63,11 +63,21 @@ jobs:
       - run: cargo xtask clippy
 
   miri:
-    name: Miri on core
+    # Two shards, so each stays well inside the time limit as tests grow:
+    # the M5 thread, IPC and address-space modules, and everything else.
+    name: Miri on core (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: threads, IPC and paging
+            args: "ipc:: syscall:: tcb:: sched:: regs:: vspace::"
+          - shard: the rest
+            args: "--skip ipc:: --skip syscall:: --skip tcb:: --skip sched:: --skip regs:: --skip vspace::"
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly with Miri
         run: rustup toolchain install nightly --profile minimal --component miri
-      - run: cargo +nightly miri test --package l4core
+      - run: cargo +nightly miri test --package l4core -- ${{ matrix.args }}
