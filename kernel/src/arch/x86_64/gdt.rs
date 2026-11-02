@@ -215,3 +215,34 @@ fn load_gdt(gdt: &'static Gdt) {
         );
     }
 }
+
+/// Where the CPU finds the descriptor tables and the per-CPU area, as
+/// virtual ranges read from its registers (`sgdt`, `sidt`, `IA32_GS_BASE`)
+/// and, for the TSS, from the static its descriptor names: for
+/// `test=bootinfo`, which checks that no untyped covers them.
+#[cfg(feature = "selftest")]
+pub fn tables_in_use() -> [(&'static str, core::ops::Range<u64>); 4] {
+    let mut gdtr = DescriptorPointer { limit: 0, base: 0 };
+    let mut idtr = DescriptorPointer { limit: 0, base: 0 };
+    // SAFETY: `sgdt` and `sidt` store the 10-byte register image into their
+    // operand, which is exactly a `DescriptorPointer` on this stack frame.
+    unsafe {
+        asm!("sgdt [{}]", in(reg) &raw mut gdtr, options(nostack, preserves_flags));
+        asm!("sidt [{}]", in(reg) &raw mut idtr, options(nostack, preserves_flags));
+    }
+    let range = |p: &DescriptorPointer| {
+        let (base, limit) = (p.base, p.limit);
+        base..base + u64::from(limit) + 1
+    };
+    let tss = TSS.get().map_or(0, |t| t as *const TssCell as u64);
+    let per_cpu = cpu::read_msr(IA32_GS_BASE);
+    [
+        ("the GDT", range(&gdtr)),
+        ("the IDT", range(&idtr)),
+        ("the TSS", tss..tss + size_of::<TssCell>() as u64),
+        (
+            "the per-CPU area",
+            per_cpu..per_cpu + size_of::<PerCpu>() as u64,
+        ),
+    ]
+}

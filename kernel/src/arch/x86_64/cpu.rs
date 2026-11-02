@@ -4,6 +4,9 @@
 use core::arch::asm;
 use core::fmt;
 
+use l4core::bootinfo::{
+    HYPERVISOR_HYPERV, HYPERVISOR_NONE, HYPERVISOR_OTHER, HYPERVISOR_QEMU_KVM, HYPERVISOR_QEMU_TCG,
+};
 use l4core::cpu::{Cpuid, Meltdown};
 
 /// `IA32_ARCH_CAPABILITIES`; bit 0 is `RDCL_NO` (`docs/design.md`, H14).
@@ -213,15 +216,14 @@ impl Hypervisor {
         matches!(self, Self::QemuTcg | Self::QemuKvm)
     }
 
-    /// BootInfo's `hypervisor_vendor` (`docs/abi.md`, "BootInfo"): 0 none,
-    /// 1 QEMU TCG, 2 QEMU KVM, 3 Hyper-V, 4 any other.
+    /// BootInfo's `hypervisor_vendor` (`docs/abi.md`, "BootInfo").
     pub fn vendor(self) -> u32 {
         match self {
-            Self::None => 0,
-            Self::QemuTcg => 1,
-            Self::QemuKvm => 2,
-            Self::HyperV => 3,
-            Self::Other(_) => 4,
+            Self::None => HYPERVISOR_NONE,
+            Self::QemuTcg => HYPERVISOR_QEMU_TCG,
+            Self::QemuKvm => HYPERVISOR_QEMU_KVM,
+            Self::HyperV => HYPERVISOR_HYPERV,
+            Self::Other(_) => HYPERVISOR_OTHER,
         }
     }
 }

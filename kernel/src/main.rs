@@ -37,7 +37,7 @@ use l4core::cmdline;
 use l4core::handoff::{self, RegionKind};
 
 use arch::BootFacts;
-use boot::BootState;
+use boot::{BootState, RootSpace};
 
 /// The kernel proper, called once by `arch` on the kernel stack with
 /// interrupts off, with the physical address of the loader's handoff.
@@ -54,6 +54,9 @@ fn kmain(handoff_phys: u64) -> ! {
     print_boot_info(boot);
     let facts = arch::init(boot);
     arch::print_cpu_state();
+    // Steps 6, 7 and 9 (M4); 8 and 10 enter the root task from M5.
+    let root = boot::make_root_space(boot, facts);
+    boot::print_root_space(root);
 
     match cmdline::value(boot.cmdline(), "test") {
         None => {
@@ -61,13 +64,18 @@ fn kmain(handoff_phys: u64) -> ! {
             kprintln!("nothing more to do; halting");
             arch::halt()
         }
-        Some(name) => run_test(name, boot, facts),
+        Some(name) => run_test(name, boot, facts, root),
     }
 }
 
 /// Runs the self-test `test=` names (ADR 0003), which ends the run.
 #[cfg(feature = "selftest")]
-fn run_test(name: &str, boot: &'static BootState, facts: &'static BootFacts) -> ! {
+fn run_test(
+    name: &str,
+    boot: &'static BootState,
+    facts: &'static BootFacts,
+    root: &'static RootSpace,
+) -> ! {
     match name {
         "hello" => {
             kprintln!("hello from microL4");
@@ -100,8 +108,9 @@ fn run_test(name: &str, boot: &'static BootState, facts: &'static BootFacts) -> 
             let depth = overflow_stack(0);
             panic!("the stack never overflowed (depth {depth})")
         }
-        // Kernel objects (M4).
-        "preempt" => selftest::preempt(boot, facts),
+        // Kernel objects and BootInfo (M4).
+        "bootinfo" => selftest::bootinfo(boot, facts, root),
+        "retype" => selftest::retype(root),
         other => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)
@@ -111,7 +120,12 @@ fn run_test(name: &str, boot: &'static BootState, facts: &'static BootFacts) -> 
 
 /// Without `selftest` there are no tests: says so and fails the run.
 #[cfg(not(feature = "selftest"))]
-fn run_test(name: &str, _boot: &'static BootState, _facts: &'static BootFacts) -> ! {
+fn run_test(
+    name: &str,
+    _boot: &'static BootState,
+    _facts: &'static BootFacts,
+    _root: &'static RootSpace,
+) -> ! {
     kprintln!("test={name}: this kernel has no self-tests (built without the `selftest` feature)");
     arch::exit(arch::ExitCode::Failure)
 }

@@ -1,0 +1,31 @@
+# M4's done-when test: a self-test that retypes, revokes and retypes again
+# gets the same result both times. Every call goes through l4core::invoke
+# with CPtrs into the root CNode, as the root task will make them: the
+# largest RAM untyped U is retyped into every object type, the CNode
+# methods move capabilities between the root CNode and a new CNode (through
+# its own capability and guarded copies), the untyped made from U is
+# retyped too, and three calls fail as they must. Every slot is recorded,
+# the objects are filled, U is revoked, and the same calls run again: the
+# record must match and the objects read zero. Calls are preempted by the
+# timer during the first reset of U and by injected preemptions, and
+# restart from the idle path each time; the kernel counts and checks them.
+# Each phase reports its preemptions and the stretches between its polls.
+cmdline: test=retype
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=retype"
+expect: bootinfo: boot region
+expect: retype: U is root slot
+expect: retype: run 1: U into a 1 MiB untyped preempted by
+expect: retype: run 1 done:
+expect: retype: run 1: preempted
+expect: retype: revoke 1 done: the 24 slots U's descendants held are empty, U and the boot capabilities unchanged
+expect: retype: revoke 1: preempted
+expect: retype: run 2 done: the same
+expect: its objects' 2098 KiB read zero
+expect: retype: run 2: preempted
+expect: retype: revoke 2 done: the 24 slots U's descendants held are empty
+expect: retype: revoke 2: preempted
+expect: restarts from the idle path after
+expect: retype: the longest stretch between two polls:
+expect: TEST PASS

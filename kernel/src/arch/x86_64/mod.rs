@@ -33,11 +33,7 @@ use crate::boot::BootState;
 
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(unused_imports, reason = "boot steps 6, 7 and 9 (M4) will use it")
-)]
-pub use objects::Objects;
+pub use objects::{Objects, bootinfo_frames};
 #[cfg_attr(
     not(feature = "selftest"),
     expect(unused_imports, reason = "M5's scheduler idles through it")
@@ -47,7 +43,7 @@ pub use trap::idle;
 #[cfg(feature = "selftest")]
 pub use apic::test_nmi_stack;
 #[cfg(feature = "selftest")]
-pub use objects::{inject_preemption, poll_stats};
+pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]
 pub use paging::{test_lowmem, test_paging};
 #[cfg(feature = "selftest")]
@@ -66,10 +62,6 @@ global_asm!(
 
 /// What steps 2 to 5 found that the boot plan, the untyped and BootInfo
 /// need (M4), collected once at the end of [`init`].
-#[expect(
-    dead_code,
-    reason = "M4's boot steps 6, 7 and 9 read the fields not read yet"
-)]
 pub struct BootFacts {
     /// The CPU's physical address width, CPUID `0x8000_0008`: no untyped
     /// reaches `2^phys_addr_bits`.
@@ -88,8 +80,8 @@ pub struct BootFacts {
     /// The hypercall page the firmware locked enabled, if any: kept out of
     /// every untyped and the boot region.
     pub locked_hypercall_page: Option<u64>,
-    /// BootInfo's `hypervisor_vendor`: 0 none, 1 QEMU TCG, 2 QEMU KVM,
-    /// 3 Hyper-V, 4 other.
+    /// BootInfo's `hypervisor_vendor`, one of `l4core::bootinfo`'s
+    /// `HYPERVISOR_*` numbers.
     pub hypervisor_vendor: u32,
     /// The kernel image, physical: `[kernel_phys_base, + kernel_size)`.
     pub kernel_image: Range<u64>,
@@ -136,6 +128,47 @@ pub fn init(boot: &'static BootState) -> &'static BootFacts {
     kprintln!("cpu: physical address width {} bits", facts.phys_addr_bits);
     objects::init(boot, facts);
     facts
+}
+
+/// Kernel memory as `arch` sees it, for `test=bootinfo`: physical ranges
+/// found from the CPU's registers (GDTR, IDTR, `IA32_GS_BASE`, CR3), the
+/// linker's stack symbols and statics, translated through the live page
+/// tables, and the pages the device window maps. None of it comes from the
+/// boot plan. `None` for a device-window page not in use.
+#[cfg(feature = "selftest")]
+pub fn kernel_memory(boot: &BootState) -> [Option<(&'static str, Range<u64>)>; 18] {
+    use l4core::vspace::ADDR_4K;
+    use l4core::window::{self, DeviceWindow};
+
+    let mut out = [const { None }; 18];
+    let s = gdt::stack_layout();
+    let [ist1, ist2, ist3, ist4] = s.ist;
+    let state = boot as *const BootState as u64;
+    let virt = [
+        ("the kernel stack", s.kernel),
+        ("IST1", ist1),
+        ("IST2", ist2),
+        ("IST3", ist3),
+        ("IST4", ist4),
+        ("the kernel page tables", paging::tables_virt()),
+        (
+            "BootState",
+            state..state + core::mem::size_of::<BootState>() as u64,
+        ),
+    ];
+    let pml4 = cpu::read_cr3() & ADDR_4K;
+    let all = virt.into_iter().chain(gdt::tables_in_use());
+    for (slot, (name, v)) in out.iter_mut().zip(all) {
+        let phys = paging::translate(boot, v.clone())
+            .unwrap_or_else(|| panic!("{name} at {:#x} is not mapped", v.start));
+        *slot = Some((name, phys));
+    }
+    out[11] = Some(("the PML4 in CR3", pml4..pml4 + 4096));
+    for (i, slot) in out[12..12 + window::PAGES].iter_mut().enumerate() {
+        let page = DeviceWindow::virt(i);
+        *slot = paging::translate(boot, page..page + 4096).map(|p| ("a device-window page", p));
+    }
+    out
 }
 
 /// QEMU's `isa-debug-exit` device, configured by `cargo xtask` at this port.

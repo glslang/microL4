@@ -1,7 +1,9 @@
 # The kernel boots on QEMU, reports what the loader handed over, the
-# interrupt controllers, the HPET and the timer it calibrated, and the CPU
-# state it set up, and says hello. The CI-built VHDX runs the same command
-# line on Hyper-V.
+# interrupt controllers, the HPET and the timer it calibrated, the CPU
+# state it set up, and the BootInfo summary of boot steps 6, 7 and 9 (the
+# boot region, the untyped, the framebuffer's untyped and the slot
+# regions), and says hello. The CI-built VHDX runs the same command line
+# on Hyper-V.
 cmdline: test=hello
 exit: success
 expect: loader: microL4 loader
@@ -27,5 +29,17 @@ expect: cpu: physical address width 40 bits
 expect: cpu: CR0 0x80010033 CR4 0x300ee8 EFER 0xd00
 expect: cpu: IA32_APIC_BASE
 expect: cpu: meltdown:
+expect: bootinfo: boot region 0xfec0000-0xfee3000, 140 KiB: root CNode at 0xfec0000, IPC buffer at 0xfee0000, BootInfo at 0xfee1000
+expect: bootinfo:  # the untyped count, which moves with the loader's allocations
+expect: untyped:
+expect: KiB of RAM,
+expect: MiB of device memory, below 2^40
+expect: bootinfo: framebuffer 0x80000000-0x803e8000: 6 device untyped, listed first
+expect: bootinfo: slots 16-16: extra_bootinfo_frames, 1 slot
+expect: bootinfo: slots 17-
+expect: : untyped,
+expect: bootinfo: slots 17-22: framebuffer_untyped, 6 slots
+expect: bootinfo: slots
+expect: -4095: empty,
 expect: hello from microL4
 expect: TEST PASS
