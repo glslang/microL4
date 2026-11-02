@@ -36,6 +36,7 @@ pub mod invoke;
 pub mod kernel;
 pub mod objmem;
 pub mod regs;
+pub mod sched;
 pub mod slot;
 pub mod tcb;
 pub mod timer;
