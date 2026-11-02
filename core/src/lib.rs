@@ -31,6 +31,7 @@ pub mod handoff;
 pub mod hpet;
 pub mod hyperv;
 pub mod kernel;
+pub mod objmem;
 pub mod slot;
 pub mod timer;
 pub mod trap;
