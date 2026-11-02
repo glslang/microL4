@@ -1,0 +1,26 @@
+# The kernel's TLB maintenance seen from ring 3 (user/root/src/tlb.rs;
+# docs/design.md, "TLB maintenance"). The root task maps a page read-write
+# under its own page table, and a new page table with a page under it. A
+# thread T in the root task's VSpace, alone at its priority while the root
+# task waits on T's fault endpoint, loads a translation into the TLB with
+# an access, changes the entry with an invocation, and accesses the page
+# again: after Frame_Remap to read-only (invlpg), Frame_Unmap (invlpg) and
+# PageTable_Unmap (a CR3 reload). Each second access must fault; a kernel
+# that skips the flush lets it through a stale translation, T reports that,
+# and the test fails. No other scenario sees a missing flush: test=vspace
+# checks the entries by walking the tables.
+cmdline: test=tlb
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=tlb"
+expect: root: microL4 root task
+expect: root: cmdline "test=tlb"
+expect: tlb: page 0x500000 mapped read-write; a new page table maps page 0x600000
+expect: tlb: ok   phase 1, Frame_Remap to read-only (invlpg): the access after it faulted at 0x500000
+expect: fsr 0x7
+expect: tlb: ok   phase 2, Frame_Unmap (invlpg): the access after it faulted at 0x500000
+expect: fsr 0x4
+expect: tlb: ok   phase 3, PageTable_Unmap (CR3 reload): the access after it faulted at 0x600000
+expect: fsr 0x4
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
