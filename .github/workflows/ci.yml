@@ -37,23 +37,23 @@ jobs:
           name: microl4-vhdx
           path: target/xtask/image/disk.vhdx
           if-no-files-found: error
-      # The M5 Hyper-V check (tools/hyperv/README.md): M5's two done-when
-      # tests, one image each. The root task runs both in ring 3.
-      - name: Build the M5 threads image
-        run: cargo xtask image --cmdline "test=threads"
-      - name: Upload the M5 threads VHDX
+      # The M5 Hyper-V check (tools/hyperv/README.md, "At the M5 check"):
+      # one VHDX per test, each in a folder named after it. threads and
+      # fault are M5's done-when; ring3, tlb, isolation and redteam-movss
+      # show what QEMU cannot: TF at syscall_entry, #XM, UMIP, a real TLB,
+      # XSAVE switching, and the #DB a mov ss defers into ring 0.
+      - name: Build the M5 check images
+        run: |
+          for test in threads fault ring3 tlb isolation redteam-movss; do
+            cargo xtask image --cmdline "test=$test"
+            mkdir -p "target/xtask/m5-check/$test"
+            mv target/xtask/image/disk.vhdx "target/xtask/m5-check/$test/disk.vhdx"
+          done
+      - name: Upload the M5 check VHDXs
         uses: actions/upload-artifact@v4
         with:
-          name: microl4-vhdx-m5-threads
-          path: target/xtask/image/disk.vhdx
-          if-no-files-found: error
-      - name: Build the M5 fault image
-        run: cargo xtask image --cmdline "test=fault"
-      - name: Upload the M5 fault VHDX
-        uses: actions/upload-artifact@v4
-        with:
-          name: microl4-vhdx-m5-fault
-          path: target/xtask/image/disk.vhdx
+          name: microl4-vhdx-m5-check
+          path: target/xtask/m5-check
           if-no-files-found: error
 
   lint:
