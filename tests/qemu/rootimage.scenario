@@ -28,5 +28,5 @@ expect: maps the IPC buffer and BootInfo's two frames, RW, NX
 expect: rootimage: the root TCB at
 expect: is Running at 0x400000 with rdi
 expect: RFLAGS 0x202, priority and MCP 255, its IPC buffer at
-expect: its slots hold copies of root slots 2, 3 and 10
+expect: its slots hold copies of root slots 2, 3 and 10, and its master reply capability
 expect: TEST PASS

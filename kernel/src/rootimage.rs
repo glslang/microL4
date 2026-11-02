@@ -17,7 +17,10 @@
 use core::fmt;
 
 use l4core::bootinfo::{BootInfo, CAP_INIT_CNODE, CAP_INIT_IPC_BUFFER, CAP_INIT_VSPACE};
-use l4core::cap::{CapType, TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_VSPACE};
+use l4core::cap::{
+    Cap, CapType, TCB_SLOT_CALLER, TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_REPLY,
+    TCB_SLOT_VSPACE,
+};
 use l4core::handoff::KERNEL_VIRT_BASE;
 use l4core::regs::Exit;
 use l4core::slot::SlotMemory;
@@ -242,13 +245,26 @@ pub fn test(boot: &BootState, root: &RootSpace, bi: &BootInfo) -> ! {
             slot.cap
         );
     }
+    // Its master reply capability, a derivation root with nothing derived
+    // from it, and an empty caller slot.
+    let master = k.load(t.slot(TCB_SLOT_REPLY));
+    ensure!(
+        master.cap == Cap::reply(t.get(), true, true)
+            && master.node.original()
+            && master.node.depth() == 0
+            && master.node.prev().is_none()
+            && master.node.next().is_none()
+            && k.load(t.slot(TCB_SLOT_CALLER)).cap.is_null(),
+        "TCB slot 3 holds {:x?}, not the TCB's master reply capability",
+        master
+    );
     ensure!(
         k.ipc_buffer(t) == after(0),
         "the root TCB's IPC buffer is {:#x}",
         k.ipc_buffer(t)
     );
     kprintln!(
-        "rootimage: the root TCB at {:#x} is Running at {:#x} with rdi {:#x}, RFLAGS 0x202, priority and MCP 255, its IPC buffer at {:#x}; its slots hold copies of root slots 2, 3 and 10",
+        "rootimage: the root TCB at {:#x} is Running at {:#x} with rdi {:#x}, RFLAGS 0x202, priority and MCP 255, its IPC buffer at {:#x}; its slots hold copies of root slots 2, 3 and 10, and its master reply capability",
         t.get(),
         regs.next_ip,
         regs.rdi,

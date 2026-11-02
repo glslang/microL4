@@ -150,8 +150,12 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
 }
 
 fn test(profile: compile::Profile, only: &[String]) -> Result<ExitCode> {
-    // Host tests first: they are fast and catch most mistakes.
+    // Host tests first: they are fast and catch most mistakes. The user
+    // crates' libraries have host tests too, which need no kernel.
     run(Command::new(cargo()).arg("test").current_dir(root()))?;
+    run(Command::new(cargo())
+        .args(["test", "--package", "libsys", "--package", "root", "--lib"])
+        .current_dir(root()))?;
     source::check_kernel(&root().join("kernel"))?;
 
     let mut scenarios = scenario::load_dir(&root().join("tests/qemu"))?;

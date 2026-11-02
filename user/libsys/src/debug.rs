@@ -5,7 +5,9 @@
 //! handler that replies to one must leave the registers as they were.
 
 use core::fmt::{self, Write};
+#[cfg(target_os = "none")]
 use core::panic::PanicInfo;
+#[cfg(target_os = "none")]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::syscall::{Message, number, syscall};
@@ -71,6 +73,8 @@ macro_rules! println {
     };
 }
 
+// Only on the user target: a host build, for the unit tests, has std's.
+#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     // A panic while printing a panic would recurse forever; stop instead.
