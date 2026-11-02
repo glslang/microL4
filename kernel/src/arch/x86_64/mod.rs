@@ -8,6 +8,7 @@ mod apic;
 mod cell;
 mod cpu;
 mod entry;
+mod fpu;
 mod gdt;
 mod hpet;
 mod hyperv;
@@ -18,6 +19,8 @@ mod irq;
 mod objects;
 mod paging;
 mod pic;
+#[cfg(feature = "selftest")]
+mod ring3;
 #[cfg_attr(
     not(feature = "selftest"),
     expect(
@@ -62,6 +65,8 @@ pub use apic::test_nmi_stack;
 pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]
 pub use paging::{direct_map_page, test_lowmem, test_paging};
+#[cfg(feature = "selftest")]
+pub use ring3::test_ring3;
 #[cfg(feature = "selftest")]
 pub use timer::start_ticks_test;
 #[cfg(feature = "selftest")]

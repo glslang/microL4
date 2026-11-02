@@ -1,0 +1,76 @@
+# The paths between ring 3 and the kernel (M5), proved before any real
+# thread exists. The self-test retypes ten frames and two TCBs from a RAM
+# untyped through l4core::invoke, writes a throwaway address space into the
+# frames by hand (the kernel's upper half, a code page, a data and stack
+# page, and the last page below 2^47), copies a ring-3 code blob in, and
+# drops to ring 3 by iretq. Every later entry from ring 3 reaches the
+# test's hook through entry::from_user, which checks GS, the kernel's
+# RFLAGS, the frame's place and the last exit's path at each one. The
+# thread checks registers on its side too and reports a mismatch through
+# DebugHalt. Interrupts taken in ring 3 go through irq::handle and back by
+# iretq at any step.
+cmdline: test=ring3
+exit: success
+expect: microL4 kernel
+expect: entry: syscall_entry at 0xffffffff8 # its address moves with the image
+expect: , IA32_STAR 0x13000800000000, IA32_FMASK 0x257fd5, EFER.SCE on, IA32_SYSENTER_CS 0
+expect: fpu: XCR0 0x3 of
+expect: supported, XSAVE area 576 bytes of the TCB's 1024
+expect: cpu: CR0 0x80010033 CR4 0x340ee8 EFER 0xd01
+expect: ring3: from the 64 KiB untyped in root slot
+expect: ring3: dropping to ring 3 at 0x400000 by iretq
+# The thread's first state: the user selectors, RFLAGS 0x202, the initial
+# FP state read with fnstcw and stmxcsr, FS and GS bases through fs:[0] and
+# gs:[0]; every other register 0.
+expect: ring3:  1 first entry, by iretq to 0x400000: CS 0x23, SS 0x1b, RFLAGS 0x202, FCW 0x37f, MXCSR 0x1f80, FS and GS bases in place
+# The thread prints this line itself, one DebugPutChar per byte, each back
+# by sysretq.
+expect: ring3: hello from ring 3, one DebugPutChar and one sysretq per byte
+expect: ring3:  2 68 DebugPutChar calls, each back by sysretq; every register but RCX and R11 reached the kernel
+expect: ring3:  3 syscall with DF, NT and AC set: RFLAGS 0x44646 saved, IA32_FMASK cleared them in ring 0; back with DF and AC, without NT
+expect: ring3:  4 RCX and R11 written after a syscall: back by iretq with them
+expect: ring3:  5
+expect: BP breakpoint (vector 3) from ring 3: error 0x0, RIP 0x4
+expect: all 15 registers and DF and AC reached the kernel, which ran with them clear
+# XMM0, XMM15, ST0, ST1 and MXCSR across a switch to another TCB's
+# initial state and back, checked in the XSAVE areas and by the thread.
+expect: ring3:  6 XSAVE64 into the thread's area: XMM0 0xfedcba9876543210:0x123456789abcdef, XMM15 swapped, ST0 1.0, ST1 pi, MXCSR 0x3f80, XSTATE_BV 0x3; XRSTOR64 of the other TCB's initial state, and back
+expect: ring3:  7 an unmasked x87 divide by zero pending (FCW 0x37b, FSW 0xb8a4) across XSAVE64 and XRSTOR64: nothing raised in ring 0
+expect: ring3:  8
+expect: MF x87 floating-point error (vector 16) from ring 3: error 0x0
+# QEMU's TCG raises no SIMD exception, so step 9's #XM is skipped there.
+expect: ring3: 10 MXCSR 0x1d84: divsd by zero set ZE with ZM clear
+expect: ring3: 11 an interrupt taken in ring 3 at 0x4
+expect: ring3: 12 syscall with TF set: 0
+expect: DB at syscall_entry (the CPU checks TF after IA32_FMASK cleared it); back by sysretq with TF set
+expect: ring3: 13
+expect: DB debug (vector 1) from ring 3: error 0x0
+expect: on IST4, handled on the kernel stack; at the return address, before the next instruction ran; TF cleared
+expect: ring3: 14 mov fs and mov gs in ring 3 zeroed IA32_FS_BASE and IA32_KERNEL_GS_BASE; written back from the thread's registers
+expect: ring3: 15 fs:[0] and gs:[0] read the markers again; to the tail at 0x7ffffffffff9
+# A syscall in the last bytes below 2^47 leaves RCX non-canonical: the
+# exit goes by iretq to RIP 0, never by sysretq, and the fetch faults.
+expect: ring3: 16 syscall at 0x7ffffffffffe returns to 2^47: RCX 0x800000000000, so exit_frame gives RIP 0 and iretq
+expect: entry: warning: RIP 0x800000000000 at or above 2^47 exits as 0
+expect: ring3: 17
+expect: PF page fault (vector 14) from ring 3: error 0x14, CR2 0x0, RIP 0x0: the fetch at RIP 0, after the iretq exit
+expect: ring3: 18
+expect: PF page fault (vector 14) from ring 3: error 0x6, CR2 0x600008
+expect: ring3: 19
+expect: PF page fault (vector 14) from ring 3: error 0x7, CR2 0x400000
+expect: ring3: 20
+expect: UD invalid opcode (vector 6) from ring 3: error 0x0
+expect: ring3: 21
+expect: GP general protection (vector 13) from ring 3: error 0x402
+# UMIP is on under -cpu max: sgdt faults in ring 3 (H11).
+expect: ring3: 22
+expect: GP general protection (vector 13) from ring 3: error 0x0
+expect: sgdt under UMIP
+expect: ring3: 23
+expect: GP general protection (vector 13) from ring 3: error 0x0
+expect: hlt in ring 3
+expect: ring3: 24 done:
+expect: exits by sysretq and
+expect: by iretq,
+expect: FPU ownership dropped
+expect: TEST PASS
