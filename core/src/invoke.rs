@@ -164,7 +164,7 @@ impl From<RetypeError> for InvokeError {
 /// An empty slot or a Zombie is `InvalidCapability` 0. An Untyped decodes
 /// `Untyped_Retype`, a CNode its methods; any other label, and every other
 /// capability type until its milestone, is `IllegalOperation`.
-pub fn invoke<K: Kernel + ?Sized>(
+pub fn invoke<K: Kernel + crate::tcb::Threads + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     msg: &Message<'_>,
@@ -174,6 +174,7 @@ pub fn invoke<K: Kernel + ?Sized>(
         CapType::Null | CapType::Zombie => Err(SyscallError::InvalidCapability(0).into()),
         CapType::Untyped => untyped_invocation(k, slot, msg),
         CapType::CNode => cnode_invocation(k, cap, msg),
+        CapType::Tcb => crate::tcb::invoke(k, slot, msg),
         _ => Err(SyscallError::IllegalOperation.into()),
     }
 }
