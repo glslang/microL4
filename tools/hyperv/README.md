@@ -67,17 +67,42 @@ TEST PASS
 The kernel halts after `TEST PASS` on Hyper-V, since there is no
 `isa-debug-exit` device; the script turns the VM off.
 
+## At the M5 check
+
+M5's done-when test needs one Hyper-V boot of each of its two root-task
+tests. CI builds them as the `microl4-vhdx-m5-threads` and
+`microl4-vhdx-m5-fault` artifacts:
+
+```powershell
+.\Test-L4Vhdx.ps1 -VhdxPath .\microl4-vhdx-m5-threads\disk.vhdx -TimeoutSeconds 120 `
+    -LogPath m5-threads.log -Expect 'cpu: hypervisor Hyper-V', `
+    'boot: entering the root task', 'threads: thread A was preempted', `
+    'threads: the preemptions in the order', 'TEST PASS', 'DEBUG HALT 0'
+.\Test-L4Vhdx.ps1 -VhdxPath .\microl4-vhdx-m5-fault\disk.vhdx -TimeoutSeconds 120 `
+    -LogPath m5-fault.log -Expect 'cpu: hypervisor Hyper-V', `
+    'boot: entering the root task', 'fault: handler received VMFault', `
+    'fault: handler killed thread F', 'fault: thread F stayed stopped', `
+    'TEST PASS', 'DEBUG HALT 0'
+```
+
+Paste both logs into the PR. `threads` shows two ring-3 threads at the same
+priority, each preempted by the 100 Hz timer with the other running in
+between; `fault` shows a user page fault reaching its handler thread, which
+prints it and kills the faulting thread. The `fpu:` and `entry:` lines show
+XCR0, the XSAVE size and the system-call MSRs Hyper-V gives the kernel.
+
 ## Optional: the M4 check
 
-CI builds a second image, the `microl4-vhdx-m4-check` artifact. It boots
-`test=retype`, M4's done-when self-test: the kernel prints its boot summary
+The M4 self-test still runs on Hyper-V, though CI no longer uploads its
+image: build it with `cargo xtask image --cmdline "test=retype"` and boot it
+as below. It boots `test=retype`, M4's done-when self-test: the kernel prints its boot summary
 with the BootInfo lines, then retypes the largest RAM untyped into every
 object type, works the CNode operations on the results, revokes it, does
 it all again, and checks that both runs give the same result. M4 does not
 need this check, but its numbers are the first from real hardware:
 
 ```powershell
-.\Test-L4Vhdx.ps1 -VhdxPath .\microl4-vhdx-m4-check\disk.vhdx -TimeoutSeconds 120 `
+.\Test-L4Vhdx.ps1 -VhdxPath .\disk.vhdx -TimeoutSeconds 120 `
     -LogPath m4-check.log -Expect 'cpu: hypervisor Hyper-V', `
     'cpu: physical address width', 'bootinfo: boot region', 'bootinfo: slots', `
     'retype: U is root slot', 'retype: an interrupt is pending', `

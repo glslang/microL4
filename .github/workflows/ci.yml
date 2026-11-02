@@ -37,15 +37,22 @@ jobs:
           name: microl4-vhdx
           path: target/xtask/image/disk.vhdx
           if-no-files-found: error
-      # The optional M4 Hyper-V check (tools/hyperv/README.md): one boot
-      # prints the BootInfo summary and runs the retype, revoke and retype
-      # self-test, with its restarts and the longest stretch between polls.
-      - name: Build the M4 check image
-        run: cargo xtask image --cmdline "test=retype"
-      - name: Upload the M4 check VHDX
+      # The M5 Hyper-V check (tools/hyperv/README.md): M5's two done-when
+      # tests, one image each. The root task runs both in ring 3.
+      - name: Build the M5 threads image
+        run: cargo xtask image --cmdline "test=threads"
+      - name: Upload the M5 threads VHDX
         uses: actions/upload-artifact@v4
         with:
-          name: microl4-vhdx-m4-check
+          name: microl4-vhdx-m5-threads
+          path: target/xtask/image/disk.vhdx
+          if-no-files-found: error
+      - name: Build the M5 fault image
+        run: cargo xtask image --cmdline "test=fault"
+      - name: Upload the M5 fault VHDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: microl4-vhdx-m5-fault
           path: target/xtask/image/disk.vhdx
           if-no-files-found: error
 
