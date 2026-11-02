@@ -1,6 +1,7 @@
 //! x86_64 support: boot entry, port I/O, COM1, CPUID, control registers and
-//! MSRs, descriptor tables and traps, the kernel's page tables, and stopping
-//! the machine.
+//! MSRs, descriptor tables and traps, the kernel's page tables, the
+//! interrupt controllers and the timer, kernel-object memory for the
+//! capability core, and stopping the machine.
 
 mod acpi;
 mod apic;
@@ -14,6 +15,7 @@ mod idt;
 mod io;
 mod ioapic;
 mod irq;
+mod objects;
 mod paging;
 mod pic;
 pub mod serial;
@@ -21,17 +23,37 @@ mod timer;
 mod trap;
 
 use core::arch::{asm, global_asm};
+use core::ops::Range;
 
+use l4core::acpi::Platform;
 use l4core::handoff::{Handoff, MemoryRegion, PHYS_MAP_BASE};
+use l4core::window::{DeviceWindow, MAX_IOAPICS};
 
 use crate::boot::BootState;
 
-pub use apic::test_nmi_stack;
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
+#[cfg_attr(
+    not(feature = "selftest"),
+    expect(unused_imports, reason = "boot steps 6, 7 and 9 (M4) will use it")
+)]
+pub use objects::Objects;
+#[cfg_attr(
+    not(feature = "selftest"),
+    expect(unused_imports, reason = "M5's scheduler idles through it")
+)]
+pub use trap::idle;
+
+#[cfg(feature = "selftest")]
+pub use apic::test_nmi_stack;
+#[cfg(feature = "selftest")]
+pub use objects::{inject_preemption, poll_stats};
+#[cfg(feature = "selftest")]
 pub use paging::{test_lowmem, test_paging};
+#[cfg(feature = "selftest")]
 pub use timer::start_ticks_test;
-pub use trap::{Provoke, idle, idle_self_test, print_stack_use, provoke};
+#[cfg(feature = "selftest")]
+pub use trap::{Provoke, idle_self_test, print_stack_use, provoke, set_resume_hook};
 
 // The Hyper-V hypercall page (`docs/design.md`, "The kernel half"): one page
 // of the text segment of its own. M9 points `HV_X64_MSR_HYPERCALL` at it and
@@ -42,12 +64,47 @@ global_asm!(
     ".fill 4096, 1, 0xCC",
 );
 
+/// What steps 2 to 5 found that the boot plan, the untyped and BootInfo
+/// need (M4), collected once at the end of [`init`].
+#[expect(
+    dead_code,
+    reason = "M4's boot steps 6, 7 and 9 read the fields not read yet"
+)]
+pub struct BootFacts {
+    /// The CPU's physical address width, CPUID `0x8000_0008`: no untyped
+    /// reaches `2^phys_addr_bits`.
+    pub phys_addr_bits: u32,
+    /// TSC ticks per second, calibrated in step 5: BootInfo's `tsc_hz`.
+    pub tsc_hz: u64,
+    /// What ACPI described: the I/O APICs, the ISA overrides, the ECAM
+    /// ranges and the HPET, for BootInfo's `InterruptInfo`.
+    pub platform: &'static Platform,
+    /// Each I/O APIC's pin count as step 5 read it from its version
+    /// register, in MADT order; 0 past the last.
+    pub ioapic_pins: [u16; MAX_IOAPICS],
+    /// The kernel device window's pages: part of `kernel_reserved`, and
+    /// what makes a direct-map 2 MiB page uncached.
+    pub device_window: DeviceWindow,
+    /// The hypercall page the firmware locked enabled, if any: kept out of
+    /// every untyped and the boot region.
+    pub locked_hypercall_page: Option<u64>,
+    /// BootInfo's `hypervisor_vendor`: 0 none, 1 QEMU TCG, 2 QEMU KVM,
+    /// 3 Hyper-V, 4 other.
+    pub hypervisor_vendor: u32,
+    /// The kernel image, physical: `[kernel_phys_base, + kernel_size)`.
+    pub kernel_image: Range<u64>,
+}
+
+static FACTS: StaticCell<BootFacts> = StaticCell::new();
+
 /// Steps 3 to 5 of the M3 boot sequence (`docs/design.md`, "Boot
 /// sequence"), after the CPU check and the copy of the handoff into `boot`.
 /// Runs with interrupts off, on the loader's page tables until `paging`
 /// replaces them. Afterwards the timer ticks at 100 Hz, and the first tick
-/// is taken when the kernel idles.
-pub fn init(boot: &'static BootState) {
+/// is taken when the kernel idles; `USABLE`, `LOADER` and
+/// `ACPI_RECLAIMABLE` memory outside the kernel image is free, and
+/// [`Objects`] can be used. Returns what the boot steps found.
+pub fn init(boot: &'static BootState) -> &'static BootFacts {
     // Step 3: GDT, TSS, IDT, CR4.MCE, GS base, DR7.
     gdt::init();
     // Step 4: ACPI, read through the loader's direct map, then the
@@ -61,9 +118,24 @@ pub fn init(boot: &'static BootState) {
     let platform = acpi::platform();
     apic::init();
     pic::init(platform.madt.pcat_compat());
-    ioapic::init(platform);
+    let ioapic_pins = ioapic::init(platform);
     let hpet = hpet::init(platform);
-    timer::init(hv, hpet);
+    let calibration = timer::init(hv, hpet);
+
+    let h = &boot.handoff;
+    let facts = FACTS.init(BootFacts {
+        phys_addr_bits: cpu::phys_addr_bits(),
+        tsc_hz: calibration.tsc_hz,
+        platform,
+        ioapic_pins,
+        device_window: window,
+        locked_hypercall_page: hv.locked_hypercall_page,
+        hypervisor_vendor: hypervisor().vendor(),
+        kernel_image: h.kernel_phys_base..h.kernel_phys_base + h.kernel_size,
+    });
+    kprintln!("cpu: physical address width {} bits", facts.phys_addr_bits);
+    objects::init(boot, facts);
+    facts
 }
 
 /// QEMU's `isa-debug-exit` device, configured by `cargo xtask` at this port.
@@ -75,6 +147,10 @@ const DEBUG_EXIT_PORT: u16 = 0xF4;
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
 pub enum ExitCode {
+    #[cfg_attr(
+        not(feature = "selftest"),
+        expect(dead_code, reason = "a passing self-test, and from M5 `DebugHalt(0)`")
+    )]
     Success = 0x10,
     Failure = 0x11,
 }

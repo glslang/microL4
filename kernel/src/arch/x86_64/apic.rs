@@ -7,6 +7,7 @@
 //! the kernel device window, at [`LAPIC_PAGE`]; `l4core::apic` gives every
 //! register and value.
 
+#[cfg(feature = "selftest")]
 use core::hint::spin_loop;
 use core::ptr;
 
@@ -124,6 +125,7 @@ pub fn in_service(vector: u8) -> bool {
 }
 
 /// Whether `vector`'s IRR bit is set.
+#[cfg(feature = "selftest")]
 pub fn requested(vector: u8) -> bool {
     let (offset, bit) = a::vector_bit(a::IRR, vector);
     read(offset) & bit != 0
@@ -132,6 +134,13 @@ pub fn requested(vector: u8) -> bool {
 /// The preemption point's poll (`docs/design.md`, "Vector map"): whether
 /// any vector `0x30`-`0xFE` is pending in the IRR. Never enables
 /// interrupts.
+#[cfg_attr(
+    not(feature = "selftest"),
+    expect(
+        dead_code,
+        reason = "only `Objects::preempt` polls it, and boot steps 6, 7 and 9 (M4) will use `Objects`"
+    )
+)]
 pub fn interrupt_pending() -> bool {
     a::PREEMPT_IRR_WORDS
         .into_iter()
@@ -174,6 +183,7 @@ pub fn timer_start_periodic(initial_count: u32) {
 /// `test=nmi_stack`: arms the NMI handler's test-only recursion, then sends
 /// this CPU an NMI through the ICR. The handler recurses on IST2 until it
 /// runs into the guard page below, which must end in the `#DF` report.
+#[cfg(feature = "selftest")]
 pub fn test_nmi_stack() -> ! {
     let id = (read(a::ID) >> 24) as u8;
     super::trap::arm_nmi_overflow();

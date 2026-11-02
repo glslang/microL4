@@ -16,11 +16,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use l4core::apic::needs_eoi;
 use l4core::trap::{self, Kind};
 
-use super::{StaticCell, apic};
+#[cfg(feature = "selftest")]
+use super::StaticCell;
+use super::apic;
 
 /// Timer ticks since the periodic timer started.
 static TICKS: AtomicU64 = AtomicU64::new(0);
 /// Called on every tick with the tick count, if a test installed it.
+#[cfg(feature = "selftest")]
 static TICK_HOOK: StaticCell<fn(u64)> = StaticCell::new();
 
 /// Handles interrupt `vector`, taken in the idle loop. Runs with interrupts
@@ -64,13 +67,17 @@ pub fn handle(vector: u8) {
 /// The timer tick, after its EOI. M5's `sched::tick()` is called here.
 fn tick() {
     let n = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    #[cfg(feature = "selftest")]
     if let Some(hook) = TICK_HOOK.get() {
         hook(n);
     }
+    #[cfg(not(feature = "selftest"))]
+    let _ = n;
 }
 
 /// Installs `hook`, called with the tick count on every timer tick from
 /// now on. Once per boot: tests use it.
+#[cfg(feature = "selftest")]
 pub fn set_tick_hook(hook: fn(u64)) {
     TICK_HOOK.init(hook);
 }
