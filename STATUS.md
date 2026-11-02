@@ -1,46 +1,56 @@
 # Status
-Current milestone: M3 · Paging and interrupts, complete: the done-when test passed on QEMU and on the owner's Hyper-V host (2026-10-30), and the fresh reviewer signed off. Next: M4 · Kernel objects and BootInfo.
+Current milestone: M4 · Kernel objects and BootInfo, complete: the done-when test passes on QEMU, the fresh reviewer signed off, and the M4 red-team pass found nothing. Next: M5 · Threads, address spaces and the root task.
 
 ## Done
 - [x] M0 · Bootstrap and tooling (PR #1, merged 2026-10-29)
 - [x] M1 · Design and ABI (PR #2, merged 2026-10-30): `docs/design.md`, `docs/abi.md` v0 and ADRs 0004 to 0023
 - [x] M2 · Capability core and model (PR #3, merged 2026-10-30): the capability core in `l4core`, a reference model in `model/` with a 10,000-case differential proptest, and Miri clean. A fresh reviewer failed to break an invariant.
-- [x] M3 · Paging and interrupts (PR #4), the boot sequence of `docs/design.md`, "Boot":
-  - **CPU check:** `l4core::cpu`, `arch::check_cpu`. The kernel refuses to boot without NX, PGE, PAT, SMEP, SMAP and XSAVE, with one `CPU lacks` line (`cpu_refuse` boots `-cpu qemu64`). The boot summary prints the features, CR0, CR4, EFER, `IA32_APIC_BASE` and the Meltdown line.
-  - **`BootState`:** the handoff and memory map are copied out of loader memory after the ADR 0006 bounds check. The loader allocates below 64 GiB.
-  - **Descriptor tables and traps:** `l4core::trap`, `arch::{gdt,idt,trap,irq}`.
-    - The GDT, TSS, IDT and a null LDT; one stub per vector, each running `clac` and `cld` first; IST stacks for #DF, NMI, #MC and #DB.
-    - Ring-0 faults panic with a decoded report: vector, error code, CR2, RIP, RSP, every register, and which stack the frame is on.
-    - The idle loop takes interrupts.
-    - #DF's report uses 1,872 of the 8,192 bytes on IST1.
-  - **Page tables:** `l4core::vspace`, `arch::paging`.
-    - A direct map of at most 64 GiB in 2 MiB pages: write-back over RAM, uncached elsewhere and over kernel device pages.
-    - The image in 4 KiB pages, never writable and executable at once through any alias.
-    - The uncached device window; PAT, SMEP, SMAP, PGE and UMIP on, PCIDE and FSGSBASE off.
-    - A guard page under every stack; the loader's 1:1 map is gone.
-  - **ACPI:** `l4core::acpi` parses and validates the RSDP, XSDT, MADT, HPET and MCFG.
-    - Tested on QEMU's dumped tables, corrupted copies, edge cases and random bytes, under Miri too.
-    - The loader dumps the tables on `acpidump`, and `cargo xtask acpidump` turns a boot or a COM1 log into a test file.
-  - **Interrupt controllers and the timer:** `l4core::{hyperv,apic,hpet,timer,calibration}`, `arch::{hyperv,apic,pic,ioapic,hpet,timer}`.
-    - Hyper-V detection and its firmware leftovers turned off.
-    - The 8259 remapped and masked, the local APIC set up, every I/O APIC pin masked, the HPET cleaned up.
-    - Calibration against the Hyper-V reference counter or the HPET: QEMU's APIC clock comes out within about 30 ppm of 1 GHz.
-    - The LAPIC timer runs at 100 Hz on vector `0xFD`: ten ticks take 100 ms within 0.02% on QEMU.
-  - **Scenarios:** 22, covering the boot summary, eleven traps, page and double faults, overflows of the kernel, NMI and #DF stacks, the empty lower half, ACPI and its dump, ten ticks, and `hpet=off`.
-  - **Source check:** `cargo xtask test` fails if the kernel source contains `stac`.
-- [x] A fresh M3 reviewer found no kernel bug. It asked for the Hyper-V check image, a null LDT, PCIDE cleared, and a correction to the #DF-stack overflow text. All of these are done, and it signed off.
-- [x] The M3 Hyper-V check passed on the owner's host (2026-10-30, CI's `microl4-vhdx-m3-check`): ten ticks at 100.002 Hz against the reference counter and `TEST PASS`; the results are under "Hyper-V checks".
-  - Its ACPI tables are host-tested as `core/tests/acpi/hyperv-gen2.dump`, without the 123 KB DSDT the parser never reads. The test checks no HPET, no MCFG, one I/O APIC with ID 1, only the IRQ 9 override, COM1 on GSI 4, and ISA IRQ 0 on GSI 0, unlike q35. The corrupted-copy test covers these tables too.
-- [x] An M2 bug found during M3, fixed in PR #4: a revoke through two CNodes that held each other's only capability ended differently depending on where preemption fell; the cycle stop fixes it. A second shape the random test found, a revoke destroying the CNode that holds its own slot, is seL4's partial revoke, preemption-dependent as in seL4. See "Decisions" below.
+- [x] M3 · Paging and interrupts (PR #4, merged 2026-11-02): the kernel's own GDT, TSS, IDT and page tables, decoded ring-0 faults, the ACPI parser with QEMU and Hyper-V table dumps, the local APIC, PIC, I/O APIC and HPET set up, and a 100 Hz timer calibrated against the HPET or Hyper-V's reference counter. A fresh reviewer signed off.
+- [x] The M3 Hyper-V check passed on the owner's host (2026-10-30): ten ticks at 100.002 Hz against the reference counter; the results are under "Hyper-V checks".
+- [x] M4 · Kernel objects and BootInfo (PR #5): boot steps 6, 7 and 9 of `docs/design.md`, "Boot", and the first invocations.
+  - **`l4core::bootinfo`:** the BootInfo ABI types of `docs/abi.md`, with an offset assert per field, the slot constants and `InterruptInfo::from_platform`.
+  - **`l4core::boot`:** the boot region plan, the untyped computation and the slot plan, the BootInfo and root-CNode writers, and `boot::check`, the M4 invariants written apart from the planner.
+    - Host tests on the recorded QEMU and Hyper-V maps (`core/tests/boot/`): 106 to 148 and 73 to 115 untyped of 448 for physical address widths 36 to 52, each plan compared descriptor by descriptor with a second implementation.
+    - Proptest over generated maps, framebuffers, device pages and a reserved page where the boot region would go.
+  - **`l4core::invoke`:** decodes and performs `Untyped_Retype` and the CNode methods Revoke, Delete, Copy, Mint, Move, Mutate and Rotate, with errors in `docs/abi.md`'s order.
+    - Tests cover every error row, the depth limit through each path, restarts after preemption at every point, and random messages.
+    - The M4 red-team pass (`core/src/invoke/redteam.rs`) checks every slot of fake memory after each call against the guarantees. 10,000 sequences of 150 calls from depth 0, and 10,000 from depth 4092, broke nothing.
+  - **`l4core::objmem`:** the memory kernel objects may occupy, for the kernel's debug assertions.
+  - **Kernel:**
+    - the `debug` and `selftest` features, with every `test=` arm behind `selftest`;
+    - `arch::Objects`, which implements `SlotMemory` and `Kernel` over the direct map, its hooks inert until M5;
+    - the preemption poll on the IRR;
+    - a preempted call restarted from the idle path through a resume hook, which M5's `schedule()` replaces;
+    - steps 6, 7 and 9 on every boot, with the BootInfo summary in the boot log.
+  - **Scenarios:**
+    - `bootinfo` runs `boot::check` and checks every untyped against kernel memory found from the CPU's own tables, and against the cache types of the loaded direct map.
+    - `retype` is the done-when test:
+      - 27 invocations through `l4core::invoke` per run: U, the largest RAM untyped, retyped into every object type, then the CNode methods, a retyped child untyped, copies of root slots 9 and 2 in the new CNode, and three calls that must fail;
+      - then a revoke of U, and the same 25 calls again;
+      - both runs give the same slots, and the objects filled after the first run read zero after the second;
+      - capabilities that do not come from U, placed in the test CNode, are deleted only by its Zombie;
+      - after each revoke, every boot capability is a root without links and `cdt::check_slot` holds for every slot recorded;
+      - calls are preempted by the timer (the test waits until it is pending, so the first reset's first poll always is) and by injected preemptions, and restarted from the idle path.
+  - **Measured on QEMU TCG:** the steady-state stretch between preemption polls is under about 50 µs (mean 4.5 µs) with 4 KiB reset chunks. The first reset of never-touched RAM has stretches of up to about 60 ms, every 2 MiB: the host faulting guest RAM in on first touch.
+- [x] The fresh M4 reviewer found no bug and signed off. It asked for:
+  - a `retype` test that a broken Zombie would fail;
+  - cache types checked against the live tables;
+  - an ADR for the wider `framebuffer_untyped` rule.
+
+  All three are done.
+- [x] The M4 red-team pass found nothing; its tests stay as regression tests.
 
 ## Next
-- [ ] M4 · Kernel objects and BootInfo:
-  - wire `l4core` into the kernel through `SlotMemory` and `Kernel` in `arch`;
-  - make the BootInfo untyped from the memory map, keeping out `kernel_reserved`: the device-window pages, the MSI window, and `hyperv::Info.locked_hypercall_page`;
-  - decode the CNode and Untyped invocations;
-  - call `apic::interrupt_pending()` at preemption points;
-  - put the stored calibration's `tsc_hz` in BootInfo;
-  - add the retype, revoke and retype self-test.
+- [ ] M5 · Threads, address spaces and the root task:
+  - steps 8 and 10:
+    - `RootNeeds` with the TCB, PML4, paging structures and image frames;
+    - the mapping records of the frame and paging capabilities `write_root_cnode` leaves unmapped;
+    - `.rootimage` reclaimed;
+  - keep BootInfo's physical address instead of `RootSpace`'s `&'static BootInfo` before the root task can write those frames;
+  - fill the `arch::Objects` hooks: `finalise` for TCBs, Endpoints, Reply capabilities, Frames and paging structures; `init_object` for a PML4's kernel half and a TCB; `moved` for back-references;
+  - replace the idle path's resume hook with `schedule()`, and decode `syscall` into `l4core::invoke` with capability lookups from the TCB's CSpace root;
+  - let a `test=` name the kernel does not know go to the root task instead of failing;
+  - the Hyper-V check at the end of M5.
 
 ## Open issues
 - **Never run anywhere:** the x2APIC-to-xAPIC handover. Both firmwares hand over in xAPIC mode, so only a host test covers it.
@@ -53,7 +63,12 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 - **Unchecked hardware facts:** H10 (MTRR and PAT combination) is checked in M8, H11 (UMIP) in M5.
 - A partial revoke, one whose work destroys a CNode on its slot's lookup path, ends where preemption falls, as in seL4: the restart fails its lookup and the work left stays undone. Delete finishes a Zombie it leaves in a slot the user can name, and a revoke of an ancestor untyped the rest; under a boot untyped that region is dead (`docs/design.md`, Slot operations). A Delete named through a path that runs through its own slot can be cut short the same way. The harness checks that a revoke cut short left a safe state, then runs the same revoke unpreempted from the same start: the leftover's memory and back-references must equal that run's at one of its preemption points, and its hook calls must be that run's up to there. Later steps go on from the unpreempted run's end.
 - The model harness covers user operations on a Zombie only through hand-written tests. It no longer deletes the Zombies a revoke cut short leaves, so no random sequence does; `l4core`'s `a_revoke_restarted_by_looking_its_slot_up_again_is_cut_short` checks that such a Delete finishes the work.
-- `Kernel::finalise` runs with `last = true` for every deletion of an Untyped, IRQControl, IOPortControl or Hypervisor capability; the kernel's hook must ignore those (M4).
+- **Is 4 KiB the right reset chunk?** Answered on QEMU; Hyper-V is unmeasured. CI's `microl4-vhdx-m4-check` boots `test=retype`, which prints the longest stretch between polls.
+- **Until M6:** `CNode_CancelBadgedSends` (`0x12`) and `CNode_SaveCaller` (`0x18`) return `IllegalOperation`.
+- **A kernel without features** is only linted, never built into an image or booted; M7 adds that build and its scenario.
+- **The kernel's `SlotAddr` debug check** tests only that a slot lies in object memory (`l4core::objmem`), which is weaker than core's invariant; M7 must add the IRQ node's static range to it.
+- **No differential check against `model/`** of decoded invocation sequences; `l4core::invoke`'s own tests and the red-team harness cover them.
+- **M5's boot region** rounds to whole pages, so the 2 KiB after the TCB is lost; seL4 turns such slack into small untyped.
 - The optional `cargo-fuzz` target over the M2 sequences is not built.
 - Accepted risks, recorded for the M10 red team:
   - Meltdown on a vulnerable host CPU (no skim window; ADR 0004);
@@ -62,22 +77,23 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
 - PLAN.md, exported from the plan doc, still shows pre-M1 proposals where ADRs supersede them: ADRs 0010, 0011, 0016 and 0023. Re-export it when the doc is next edited.
 
 ## Decisions this milestone
-- No new ADR: M3 follows `docs/design.md` and ADRs 0004 to 0008, 0014, 0019 and 0020, and `docs/abi.md` is unchanged.
-- **Deletion and revoke are seL4's but for one cycle stop.** When a deletion's step leaves another container's Zombie in the slot being deleted, because two CNodes hold each other's last capability, the deletion ends there, before checking whether that Zombie is removable. Only a revoke gets there, from a slot that stays reachable, so its outcome must not depend on preemption; seL4's does (`docs/design.md`, Deletion and finalisation, step 3, and its seL4 table).
-  - A revoke whose work destroys a CNode on its slot's lookup path is seL4's partial revoke. The kernel restarts a call by looking its slot up again, which then fails, so the outcome depends on where preemption fell; what is left is safe and finishable (`docs/design.md`, Slot operations).
-  - 2c60870's rule, that a revoke stops after any step that destroys its own slot, preempted or not, is withdrawn after its review: the restarted lookup fails from the first such step, so the rule bought nothing, and it left containers part-cleared without preemption. The reviewer also found its `removable` check ran before the cycle check, a regression from 5211e83. Preemption points are back where seL4's `finaliseSlot` has them.
-  - The model stays atomic and decides the cycle stop from the specification. The harness restarts Delete and Revoke by looking their slots up again. A revoke cut short must stop exactly where the unpreempted revoke passed one of its preemption points, in memory, back-references and hook calls so far, as the reviewer's `a_revoke_cut_short_stops_where_the_unpreempted_revoke_passed` showed for its memory; the harness checks that, then goes on from the unpreempted run's end. This replaced deleting the leftover Zombies and, where they were not all the work left (the 266cf27d seed, which stops at point 3 of 27 with no Zombie), undoing the revoke and running it again.
-- **The boot-sequence order** is now written in `docs/design.md`:
-  - EFER.NXE and CR0.WP are checked before the PAT is written;
-  - Hyper-V's leftovers come first in step 5, since its time-unhalted timer can raise an NMI;
-  - LINT0 is masked before the PIC is reprogrammed;
-  - in-service vectors the firmware left are acknowledged.
-- **Calibration:** each reference read is bracketed by LAPIC and TSC reads. The ten-tick test dates each tick by the timer's reload, so the host's delivery delay under TCG does not count.
-- **The kernel enforces CPU state itself** where the design states it, rather than trusting the firmware: a null LDT, and CR4.PCIDE and FSGSBASE cleared.
-- **ACPI duplicates:** two MADT or HPET tables at different addresses are a panic; the same address listed twice is a warning. Unusable entries are skipped with warnings, as `docs/design.md` lists.
-- **Limits:** at most 24 HPET comparators and 120 I/O APIC pins.
-- **Kernel leaves have Accessed and Dirty set in advance**, so the CPU never writes the kernel's page tables.
-- **CI uploads a second VHDX for the M3 Hyper-V check.** It boots `acpidump test=ticks`, so the owner needs no Linux machine to dump the tables.
+- **ADR 0024:** `framebuffer_untyped` is empty for any framebuffer the kernel cannot hand out whole: a write-back 2 MiB page, below 1 MiB or past `2^phys_addr_bits`, or overlapping memory no untyped may cover. `framebuffer` keeps the handoff's values. The layout is unchanged.
+- **M4 has no root task.** The boot region holds the root CNode, the IPC buffer and BootInfo; slots 1, 3 and 12 to 14 are null, and the image fields and `ipc_buffer` are 0 (`docs/design.md`, Boot sequence).
+- **Self-tests restart preempted calls as M5 will:**
+  - the preemption point polls the IRR and never enables interrupts;
+  - a preempted call goes back to the idle loop, which takes the interrupt;
+  - a resume hook after `irq::handle` then decodes the call again from its unchanged arguments.
+- **`debug` and `selftest`:** all test code builds only with `selftest`, which implies `debug`. xtask always enables `selftest` and lints the kernel both with it and with no features. `debug` gates nothing new until M7.
+- **Decoder orders the ABI leaves open:**
+  1. An empty or Zombie invoked slot is `InvalidCapability(0)` whatever the label.
+  2. The label is checked before the length.
+  3. `node_depth` 0 with a non-CNode root is `InvalidRoot`; seL4 gives `MissingCapability`.
+  4. The source depth's `RangeError` comes after the destination's `DeleteFirst`.
+  5. Rotate looks up the destination, then the source, then the pivot.
+
+  All are in `docs/design.md`, System-call dispatch.
+- **ISA routes in `InterruptInfo`:** an IRQ with a route keeps its `gsi` and `flags` even when no I/O APIC serves the GSI, and `routed` is then 0; all three are 0 when its GSI is another IRQ's override target.
+- **Boot panics** on a memory map that is unsorted, overlapping or not 4 KiB granular, on `phys_addr_bits` outside 32 to 52, and on more than 448 untyped or 4096 slots, rather than drop memory.
 
 ## Hyper-V checks
 - **M0 VHDX** (7c4609f, 2026-10-29): boots with Secure Boot off; hello and `TEST PASS` on COM1 through the named pipe.
@@ -94,21 +110,17 @@ Current milestone: M3 · Paging and interrupts, complete: the done-when test pas
   - ACPI: RSDP revision 2 at `0x1fffa014`, XSDT; tables FACP, OEM0, WAET, APIC, SRAT and BGRT; no HPET and no MCFG. MADT flags 0, so no `PCAT_COMPAT` and the 8259s are left alone. One I/O APIC, ID 1 at `0xfec00000`, version `0x11`, 24 pins. Only override: IRQ 9 to GSI 9, level, active high. COM1 on GSI 4, edge, active high.
   - Paging: the direct map covers 4 GiB, 256 WB and 1792 UC 2 MiB pages; the device window holds 2 pages (no HPET).
   - `Test-L4Vhdx.ps1` reported FAIL only because the owner ran it with its defaults, which then expected `cmdline: "test=hello"`. The defaults now hold only the lines every image prints.
+- **M4:** no check is required. CI's `microl4-vhdx-m4-check` boots `test=retype`. Its log would show three things: the BootInfo summary (expected boot region `0x1ff00000-0x1ff23000` and 73 to 115 untyped), the retype record, and the longest stretch between preemption polls, which answers the 4 KiB question on Hyper-V.
 
 ## Last session
-2026-10-30: M3.
-- **Setup:** the lead laid a skeleton first: the CPU check, `BootState`, the linker layout and guard pages, `qemu_args:`, the 64 GiB loader bound and the device-window layout.
-- **Builders:** three worked in parallel worktrees on ACPI, page tables and traps, then a fourth on the interrupt controllers, HPET, Hyper-V and the timer. The lead merged them, added the stack-overflow scenario and the `stac` check, and applied every builder's design corrections through a docs agent.
-- **Problems found along the way:**
-  - The M2 model's random test found revokes whose outcome depended on where preemption fell.
-    - The cycle case got a fix.
-    - A broader "stop after destroying your own slot" rule followed. A fresh reviewer showed it could not hold, because the kernel restarts a call by looking its slot up again.
-    - The rework went back to seL4's Delete and Revoke with the corrected cycle stop. Partial revokes are now documented as preemption-dependent, as in seL4.
-    - The harness restarts through lookups. It checks that a cut-short revoke stops exactly where the uninterrupted one passed a preemption point. The reviewer signed off.
-  - CI's newer Rust exposed a non-global asm label and a new clippy lint; both are fixed.
-  - Codex caught the ACPI reader stopping at 64 GiB instead of `phys_map_size`; it is fixed.
-  - The ten-tick check failed once under host load: QEMU folded three timer expirations into one interrupt. The test now restarts its window when it sees a gap of 1.5 periods or more.
-- **Review:** the fresh reviewer's one blocking item was the missing Hyper-V tick check, now CI's `microl4-vhdx-m3-check`. It signed off after the fixes.
-- **Hyper-V:** the owner ran the M3 check that evening and it passed. Its results are recorded above and in `docs/design.md`'s answered open questions. One new problem for M7: Hyper-V's I/O APIC has no EOI register.
-- **Hyper-V ACPI tables:** from the owner's full log, committed as `core/tests/acpi/hyperv-gen2.dump` with a host test.
-- **Next:** merge PR #4, then M4.
+2026-11-02: M4.
+- **Builders:** three worked in parallel worktrees:
+  - BootInfo and the boot plan in `l4core`;
+  - the invocation decoder;
+  - the kernel plumbing: features, `arch::Objects`, the preemption restart, the boot facts.
+
+  The kernel builder then wired steps 6, 7 and 9 and the two self-tests on top of the merge.
+- **Docs:** a docs agent wrote the builders' notes into `docs/design.md`, `CLAUDE.md` and ADR 0003's status. The lead wrote ADR 0024 for the one change the notes made to `docs/abi.md`.
+- **Review:** the fresh reviewer signed off with no must-fix finding. Its experiment showed that `retype` passed with CNode Zombies disabled; the test now fails that way. A red-team pass on the decoder found nothing.
+- **Problems:** the red-team tests first failed Rust 1.99's clippy (`needless_late_init`), and the lead pushed before seeing it. It is fixed; check each command's exit status before pushing.
+- **Next:** merge PR #5, then M5.
