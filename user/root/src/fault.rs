@@ -139,7 +139,7 @@ pub fn run(bi: &BootInfo) -> ! {
     let h = Thread {
         tcb: handler,
         fault_ep: report_ep,
-        stack: &STACKS[0],
+        stack: STACKS[0],
         entry: handler_main,
         args: [fault_ep, faulter, report_ep, handler_buffer.addr],
     };
@@ -158,7 +158,7 @@ pub fn run(bi: &BootInfo) -> ! {
     let f = Thread {
         tcb: faulter,
         fault_ep: f_fault_ep,
-        stack: &STACKS[1],
+        stack: STACKS[1],
         entry: faulter_main,
         args: [FAULT_ADDR, 0, 0, 0],
     };

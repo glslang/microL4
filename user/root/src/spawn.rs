@@ -36,6 +36,11 @@ impl Stack {
     pub fn contains(&self, addr: u64) -> bool {
         (self.top() - STACK_BYTES as u64..self.top()).contains(&addr)
     }
+
+    /// The unmapped guard page below it (`user/link.ld`).
+    pub fn guard(&self) -> u64 {
+        self.top() - STACK_BYTES as u64 - 0x1000
+    }
 }
 
 /// The stacks. A test gives each to at most one thread.
