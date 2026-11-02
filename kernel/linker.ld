@@ -9,6 +9,12 @@
  * map with each permission (docs/design.md, "The kernel half"): text RX,
  * rodata R, data RW and NX. The stacks at the end of the data segment each
  * sit above a 4 KiB guard page that those tables leave unmapped.
+ *
+ * .rootimage, the root task's ELF file, is a read-only PT_LOAD segment of
+ * its own between rodata and data, page-aligned at both ends so that no
+ * other kernel byte shares its pages: boot step 8 copies the root task out
+ * of it and unmaps it, and step 9 hands its pages out as RAM untyped. It
+ * ends the range the kernel maps as rodata, R and NX.
  */
 ENTRY(_start)
 
@@ -16,6 +22,7 @@ PHDRS
 {
     text   PT_LOAD FLAGS(5);   /* R X */
     rodata PT_LOAD FLAGS(4);   /* R   */
+    rootimage PT_LOAD FLAGS(4);   /* R   */
     data   PT_LOAD FLAGS(6);   /* R W */
 }
 
@@ -54,7 +61,17 @@ SECTIONS
     } :rodata
 
     .eh_frame_hdr : { *(.eh_frame_hdr) } :rodata
-    .eh_frame : { KEEP(*(.eh_frame)) __rodata_end = .; } :rodata
+    .eh_frame : { KEEP(*(.eh_frame)) } :rodata
+
+    /* kernel/src/arch/x86_64/rootimage.rs embeds the file. */
+    .rootimage : ALIGN(4K)
+    {
+        __rootimage_start = .;
+        KEEP(*(.rootimage))
+        . = ALIGN(4K);
+        __rootimage_end = .;
+        __rodata_end = .;
+    } :rootimage
 
     .data : ALIGN(4K)
     {
@@ -115,3 +132,4 @@ SECTIONS
 
 ASSERT(__hvcall_end - __hvcall_start == 4K, "the .hvcall section must be one page")
 ASSERT(__kernel_end - __kernel_start <= KERNEL_IMAGE_MAX, "the kernel image is over KERNEL_IMAGE_MAX (16 MiB)")
+ASSERT(__rootimage_end > __rootimage_start, "the kernel embeds no root image in .rootimage")
