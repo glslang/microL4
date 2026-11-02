@@ -1,0 +1,26 @@
+# M5 review (reviewer K): docs/design.md's "A thread never observes another
+# thread's x87 or SSE state". test=ring3 switches FP state by hand only;
+# here the scheduler does it (user/root/src/isolation.rs). The root task gives threads X and Y, at
+# priority 100, FS and GS bases of their own (TCB_WriteRegisters words 18
+# and 19), loads x87 and SSE values of its own and resumes them. Each
+# thread loads XMM0 to XMM15, ST0, ST1, MXCSR and FCW with its own values
+# and for 80 ms of TSC time stores and compares them, with fs:[0] and
+# gs:[0] against its markers; then for 80 ms holds rbx, rbp, rcx, rsi and
+# r8 to r15, DF and AC in a loop that compares them on every pass; then
+# checks its FP and segment state again. A shared "last thread to run" word
+# counts the times the other thread ran in between, which only the timer's
+# preemption allows. The root passes if every check held, each thread saw
+# the other run at least twice in each phase, and its own x87 and SSE state
+# survived both threads.
+cmdline: test=isolation
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=isolation"
+expect: root: microL4 root task
+expect: root: cmdline "test=isolation"
+expect: isolation: threads X and Y at priority 100
+expect: isolation: thread X: x87, SSE and segment check 0, general-register check 0;
+expect: isolation: thread Y: x87, SSE and segment check 0, general-register check 0;
+expect: isolation: the root task's x87 and SSE state: check 0
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
