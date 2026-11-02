@@ -1280,7 +1280,7 @@ the one to RIP 0 included, whose fetch faults in ring 3).
 
 | Vector | Stack | From ring 3 | From ring 0 |
 | --- | --- | --- | --- |
-| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults); QEMU 8.2's TCG raises #UD for `int1` in ring 0, so M10 brief 5 rechecks `int1` from ring 3) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there), `iretq` at once (`l4core::entry::single_step_into_syscall_entry`, `entry::return_to_kernel`); otherwise panic. QEMU takes no trap there: `test=ring3` runs a `syscall` with TF set, counts no ring-0 #DB, and takes the single step in ring 3 at the return address. On Hyper-V, open until the M5 Hyper-V check boots `test=ring3` |
+| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults); QEMU 8.2's TCG raises #UD for `int1` in ring 0, so M10 brief 5 rechecks `int1` from ring 3) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there) or the first instruction of the #BP stub (`mov ss` with TF set, then `int3`; below), `iretq` at once with the saved state unchanged (`l4core::entry::single_step_into_syscall_entry`, `single_step_into_breakpoint_stub`, `entry::return_to_kernel`); otherwise panic, on the #DB stub's own first instruction too. QEMU takes no trap at either: `test=ring3` runs a `syscall` with TF set, counts no ring-0 #DB, and takes the single step in ring 3 at the return address, and `test=redteam-movss` sees every `mov ss` probe's single step in ring 3. On Hyper-V, open until the M5 Hyper-V check boots `test=ring3` and `test=redteam-movss` |
 | 2, NMI | IST2 | panic | panic |
 | 8, #DF | IST1 | panic | panic |
 | 18, #MC | IST3 | panic | panic |
@@ -1300,8 +1300,28 @@ report instead of shutting down (from memory: TCG cannot raise a real machine
 check, and the `trap_machine_check` scenario enters the handler with
 `int 18`). OVMF already sets it (CR4 is `0x668` at handover, read under GDB
 in M3); the kernel sets it regardless. DR7 keeps its
-reset value `0x400`, no breakpoint enabled ([Invocations](#invocations)), so the
-single-step case is the only ring-0 #DB.
+reset value `0x400`, no breakpoint enabled ([Invocations](#invocations)), so
+a ring-0 #DB can only be a thread's own single step that the CPU carried into
+the kernel. A `syscall` with TF set may raise one at `syscall_entry`. A load
+of SS (`mov ss` or `pop ss`) holds a pending single step until the next
+instruction has finished, so with TF set, `mov ss` followed by an instruction
+that enters the kernel delivers the #DB on the entry's first instruction, in
+ring 0, with GS still the user's (CVE-2018-8897's mechanism, there with a data
+breakpoint; [the M5 red-team finding](redteam/m5-movss-db.md)). Only two
+instructions enter directly: `syscall`, at `syscall_entry`, and `int3`, at the
+#BP stub, the only gate with DPL 3. The #DB at the #BP stub is taken on IST4
+after the CPU pushed the #BP frame at the top of the kernel stack and cleared
+TF; the handler `iretq`s to the stub, which then enters as for any `int3`, its
+frame's ring-3 CS giving it its `swapgs`, and the thread gets UserException 3.
+The single step itself is dropped, as at `syscall_entry`. Every other ring-0
+#DB still panics. `int n` on a DPL-0 gate raises #GP, which drops the pending
+single step (Linux's `tools/testing/selftests/x86/mov_ss_trap.c` notes); and
+`mov ss; int1` raises a #DB from ring 3 into which, by the SDM's description of
+pending debug exceptions, the CPU folds the pending single step. A second #DB
+on the #DB stub's first instruction would have been delivered on IST4 over the
+first one's frame, so the kernel must never return from it, and panics. Both
+are open until the M5 Hyper-V check boots `test=redteam-movss`, whose probes
+2 (`int 0x80`) and 3 (`int1`) would panic if they were wrong.
 
 ### Interrupts and exceptions taken in ring 0
 
@@ -1420,9 +1440,9 @@ a hook, the idle path ends in `thread::exit_to_scheduled`.
 | --- | --- | --- |
 | GDT, TSS, IDT, IST stacks, `PerCpu`, the stubs and their two shared entries, ring-0 exception decode, NMI, #DF, #MC handlers, idle loop and its interrupt path | `arch/x86_64/{gdt,idt,trap,irq}.rs` | M3 |
 | Descriptor encodings, the vector map, error-code and fatal-vector masks for the stubs, the trap frame and the fatal report | `l4core::trap`, host tests | M3 |
-| Syscall MSRs (`init`), `syscall_entry`, `compat_entry`, `exit_sysret`, `exit_iret`, the ring-0 #DB return at `syscall_entry`; the seams `user_syscall`, `user_exception`, `user_interrupt`; `exit_to_user`, `load_user_bases`, `save_user_bases` | `arch/x86_64/entry.rs`; `trap_from_user` in `trap.rs` hands ring-3 traps to it | M5 |
+| Syscall MSRs (`init`), `syscall_entry`, `compat_entry`, `exit_sysret`, `exit_iret`, the ring-0 #DB return at `syscall_entry` and the #BP stub; the seams `user_syscall`, `user_exception`, `user_interrupt`; `exit_to_user`, `load_user_bases`, `save_user_bases` | `arch/x86_64/entry.rs`; `trap_from_user` in `trap.rs` hands ring-3 traps to it | M5 |
 | The end of every entry: `exit_to_scheduled`, the thread switch, idling on the kernel PML4 | `arch/x86_64/thread.rs` | M5 |
-| `Syscall::from_number`; `STAR`, `FMASK`, the RFLAGS masks, `classify`, `save`, `exit_frame`, `single_step_into_syscall_entry` | `l4core::abi`, `l4core::entry`; host tests at `2^47 - 1`, `2^47`, `2^64 - 2^47`, and proptest over all `u64` | M5 |
+| `Syscall::from_number`; `STAR`, `FMASK`, the RFLAGS masks, `classify`, `save`, `exit_frame`, `single_step_into_syscall_entry`, `single_step_into_breakpoint_stub` | `l4core::abi`, `l4core::entry`; host tests at `2^47 - 1`, `2^47`, `2^64 - 2^47`, and proptest over all `u64` | M5 |
 | Dispatch: `handle_syscall`, `handle_exception`, `Outcome`, `invoked_by_call` | `l4core::syscall`; host tests of every system call over fake memory | M5 |
 | What only the kernel does with an `Outcome`: debug system calls, the report of a stopped thread, the count of preempted calls | `kernel/src/dispatch.rs` | M5 |
 | `test=ring3`: the paths between ring 3 and the kernel, before any real thread exists, in 24 steps through a hook that takes every entry from ring 3 | `arch/x86_64/ring3.rs` (`selftest` only) | M5 |
@@ -2707,7 +2727,7 @@ seL4's DebugException, and 0 and 6 up are never sent.
 | Vector from ring 3 | Result |
 | --- | --- |
 | 0 #DE, 6 #UD, 16 #MF, 19 #XM | UserException, code 0 |
-| 1 #DB | UserException, code 0: TF single-step or `int1`. #DB runs on IST4; a ring-0 #DB returns only when its saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set) and panics otherwise |
+| 1 #DB | UserException, code 0: TF single-step or `int1`. #DB runs on IST4; a ring-0 #DB returns only when its saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set) or the #BP stub's first instruction (`mov ss` with TF set, then `int3`, which then gives UserException 3), and panics otherwise |
 | 3 #BP | UserException, code 0, `rip` past the `int3`: vector 3 is the only DPL-3 gate |
 | 10 #TS, 11 #NP, 12 #SS, 13 #GP | UserException with the error code; `int n` for any `n` but 3 hits a DPL-0 gate and arrives as #GP with code `8n + 2` (on QEMU `int 0x80` gives `0x402`, `test=ring3`) |
 | 14 #PF | VMFault: CR2, the error code, its bit 4 as the instruction-fetch flag |
@@ -2792,7 +2812,7 @@ M6 the IPC state machine's proptest covers them too.
 | A fault message carries only the faulting thread's own registers and fault data | `l4core::regs::fault_message` reads only the fault and the faulting thread's registers; host test `fault_messages_carry_the_abi_words` | M5 |
 | A fault reply changes only the registers its fault type names, through `sanitise`, and only label 0 restarts | `l4core::regs::fault_reply`; host tests `a_fault_reply_sets_only_the_registers_its_type_names`, `fault_reply_values_are_sanitised` and `a_fault_reply_with_another_label_stops_the_thread` | M5 |
 | Fault delivery never blocks or faults the kernel and allocates nothing | delivery is a Call that blocks the faulting thread and touches kernel memory only; `deliver_fault` has no preemption point, and its time is bounded by the lookup and the message | M5 |
-| A ring-0 #DB returns only to `syscall_entry`; every other ring-0 #DB, and any of vectors 9, 15, 17 or 20 to 31, panics | IDT handlers (M3); `l4core::entry::single_step_into_syscall_entry` in `trap_from_kernel`; `test=ring3` runs `syscall` with TF set and takes the single step in ring 3 (QEMU raises no ring-0 #DB there) | M3, M5 |
+| A ring-0 #DB returns only to `syscall_entry` or to the #BP stub's first instruction, never to the #DB stub's; every other ring-0 #DB, and any of vectors 9, 15, 17 or 20 to 31, panics | IDT handlers (M3); `l4core::entry::single_step_into_syscall_entry` and `single_step_into_breakpoint_stub` in `trap_from_kernel`, host tests `single_step_into_syscall_entry_needs_db_ring_0_and_that_rip` and `single_step_into_breakpoint_stub_needs_db_ring_0_and_vector_3s_stub`; `test=ring3` runs `syscall` with TF set and takes the single step in ring 3 (QEMU raises no ring-0 #DB there); `test=redteam-movss` runs `mov ss` with TF set before `syscall`, `int3`, `int 0x80`, `int1` and `ud2` (QEMU raises the #DB in ring 3; the Hyper-V check runs it on a real CPU) | M3, M5 |
 | No user action makes the kernel take an exception in ring 0 | the kernel never dereferences user addresses; syscall fuzzer; red-team briefs 5 and 6 | M10 |
 
 ### Compared with seL4
@@ -3345,7 +3365,7 @@ its handler ([ADR 0019](adr/0019-irqcontrol.md)).
 
 | Vectors | Use | Handling |
 | --- | --- | --- |
-| `0x00`-`0x1F` | CPU exceptions | from ring 3: a fault to the thread's handler ([Faults](#faults)), except NMI, #DF and #MC, which panic ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)); 9, 15, 17 and 20 to 31 cannot occur and panic from either ring; from ring 0: panic with the decoded frame (M3), except a `#DB` at `syscall_entry`, which returns ([Kernel entry and exit](#kernel-entry-and-exit)) |
+| `0x00`-`0x1F` | CPU exceptions | from ring 3: a fault to the thread's handler ([Faults](#faults)), except NMI, #DF and #MC, which panic ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)); 9, 15, 17 and 20 to 31 cannot occur and panic from either ring; from ring 0: panic with the decoded frame (M3), except a `#DB` at `syscall_entry` or at the #BP stub's first instruction, which returns ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)) |
 | `0x20`-`0x2F` | 8259 PIC, remapped here and masked | never expected; spurious: no EOI unless the vector's ISR bit is set (an injected MSI) |
 | `0x30`-`0xEF` | 192 device vectors, allocated by the kernel to I/O APIC pins, MSIs and SINTs | IRQ number = vector - `0x30`; see [Delivery](#delivery-1) |
 | `0xF0`-`0xFC` | reserved for IPIs (multi-core stretch goal) | unexpected: logged in debug builds, EOI |
@@ -3362,7 +3382,8 @@ handler. `int1` raises `#DB` without a DPL check (from memory; M10 brief 5
 checks it from ring 3, since QEMU 8.2's TCG raises `#UD` for `int1` in ring 0,
 and the `trap_debug` scenario single-steps instead): from ring 3 it is
 UserException 1; a ring-0 `#DB` returns only when
-the saved RIP is exactly `syscall_entry`, and any other panics. Vectors 9, 15,
+the saved RIP is exactly `syscall_entry` or the #BP stub's first instruction,
+and any other panics. Vectors 9, 15,
 17 (`#AC`, CR0.AM = 0) and 20 to 31 (`#VE` not enabled, `#CP` without CET, 29
 and 30 SEV only, the rest reserved) cannot occur; only an injected MSI reaches them, and the
 kernel panics. Their gates take the no-error-code entry, so the panic reads
@@ -4114,7 +4135,7 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Are boot-created objects (root CNode, TCB, VSpace, BootInfo) covered by an untyped? | If they are, revoking that untyped destroys the root task; if not, their memory is never reclaimed | M4 (answered) | Answered in M4: as seL4, they come from the boot region, outside every untyped, and their capabilities are derivation roots. `check_untyped` and `test=bootinfo` check that no untyped covers the region, and `check_root_cnode` that every boot capability is an original at depth 0 with no links |
 | Are 448 untyped descriptors enough? | Boot panics if not | M4, from the recorded QEMU and Hyper-V memory maps (answered) | Answered in M4: yes, by several times on both targets. At every physical address width from 36 to 52 bits, QEMU's recorded map gives 106 to 148 untyped, 342 to 300 below 448, and Hyper-V's 73 to 115, 375 to 333 below ([Untyped](#untyped)). If a machine needs more, BootInfo grows to four pages as version 2 |
 | What if the framebuffer shares a 2 MiB page with RAM-like memory? | It could not be device untyped without aliasing the write-back direct map, so `fb` could not run | M4 (answered) | Answered in M4: no untyped covers it, `framebuffer_untyped` is empty, BootInfo's `framebuffer` still describes it, and the boot summary prints a `bootinfo: warning:` line with the reason (host test `framebuffer_sharing_a_2mib_page_with_ram`). Not seen: QEMU's framebuffer at 2 GiB gets 6 device untyped, and Hyper-V's at `0xF8000000` 2 on the recorded map |
-| Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5 on QEMU (answered); Hyper-V (open) | Answered on QEMU in M5: no. `test=ring3` runs a `syscall` with TF set and counts no ring-0 #DB; `sysretq` restores TF, and the thread traps at the return address before its next instruction runs. The RIP special case stays as insurance. Open on Hyper-V until the M5 Hyper-V check boots `test=ring3` |
+| Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5 on QEMU (answered); Hyper-V (open) | Answered on QEMU in M5: no. `test=ring3` runs a `syscall` with TF set and counts no ring-0 #DB; `sysretq` restores TF, and the thread traps at the return address before its next instruction runs. The RIP special case stays as insurance. Open on Hyper-V until the M5 Hyper-V check boots `test=ring3`. The same question for `mov ss` with TF set, then `int3`, `int n` or `int1`, is open until it boots `test=redteam-movss` ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)) |
 | Does an unmasked SIMD exception raise #XM with CR4.OSXMMEXCPT set? | QEMU's TCG raises no SIMD exception, so the #XM path, UserException 19, has not run | M5 Hyper-V check (open) | Open until the M5 Hyper-V check boots `test=ring3`, whose step 9 expects #XM; on QEMU a `divsd` by zero with ZM clear only sets ZE ([FP exceptions](#fp-exceptions)) |
 | Is `swapgs` worth keeping on one core? | seL4's uniprocessor build avoids it and a class of mistakes with it | M5 (answered) | Answered in M5: kept, for the multi-core stretch goal. `swapgs` runs once per entry from ring 3 and once per exit, the IST handlers never read GS, and `test=ring3` checks `IA32_GS_BASE` at every entry from ring 3 |
 | Which register is a cancelled thread's restart point? | Cancelled threads become `Restart` and re-execute `syscall`; IPC relies on their argument registers being untouched | M5 (answered) | Answered in M5: `fault_ip`, the saved user `rcx` minus 2, the length of `syscall` (`l4core::entry::save`); `tcb::activate` sets `next_ip` to it when a `Restart` thread next runs. IPC writes a blocked thread's registers only on completion (host tests in `core/src/ipc/tests.rs`) |
