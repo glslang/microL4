@@ -35,14 +35,7 @@ use super::{RootLayout, RootNeeds, SlotPlan};
 use crate::bootinfo::{BOOTINFO_FRAMES, CAP_BOOTINFO_FRAME, CAP_INIT_IPC_BUFFER};
 use crate::cap::CapType;
 use crate::elf::{Elf, ElfError, Segment};
-use crate::regs::{Exit, Regs};
-use crate::vspace::{PAGE_4K, Span, UserAccess};
-
-/// The lowest address a frame may map; page 0 never maps (`docs/abi.md`,
-/// "Address spaces", Constants).
-pub const USER_MIN: u64 = 0x0000_0000_0000_1000;
-/// A frame mapping must end at or below this address.
-pub const USER_TOP: u64 = 0x0000_7FFF_FFFF_F000;
+use crate::vspace::{PAGE_4K, Span, USER_MIN, USER_TOP, UserAccess};
 
 /// The most the image's segments may span, from the first segment's page
 /// to the end of the last segment's last page.
@@ -53,8 +46,6 @@ pub const ROOT_EXTRA_PAGES: u64 = 1 + BOOTINFO_FRAMES;
 /// The image must end at or below this address, so that the pages after it
 /// end at or below [`USER_TOP`].
 pub const ROOT_IMAGE_TOP: u64 = USER_TOP - ROOT_EXTRA_PAGES * PAGE_4K;
-/// The root task's RFLAGS when it first runs: IF set.
-pub const ROOT_RFLAGS: u64 = 0x202;
 
 /// How far each level of paging structure reaches: a PDPT 512 GiB, a page
 /// directory 1 GiB, a page table 2 MiB. In `user_image_paging` order.
@@ -296,19 +287,6 @@ impl<'a> RootImage<'a> {
             pts,
             image_frames: self.image_frames(),
             hypervisor: None,
-        }
-    }
-
-    /// The root task's registers when it first runs (`docs/abi.md`,
-    /// "Root-task entry state"): `rip` the entry, `rdi` BootInfo, RFLAGS
-    /// `0x202`, every other register 0 and the first exit an `iretq`.
-    pub fn entry_regs(&self) -> Regs {
-        Regs {
-            rdi: self.bootinfo(),
-            rflags: ROOT_RFLAGS,
-            next_ip: self.entry(),
-            exit: Exit::Iret as u64,
-            ..Regs::default()
         }
     }
 }
