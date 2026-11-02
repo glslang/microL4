@@ -116,6 +116,7 @@ fn run_test(
         // Threads, address spaces and the root task (M5).
         "rootimage" => rootimage::test(boot, root),
         "ring3" => arch::test_ring3(root),
+        "vspace" => arch::test_vspace(root),
         other => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)
