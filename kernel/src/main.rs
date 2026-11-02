@@ -111,6 +111,8 @@ fn run_test(
         // Kernel objects and BootInfo (M4).
         "bootinfo" => selftest::bootinfo(boot, facts, root),
         "retype" => selftest::retype(root),
+        // Address spaces (M5).
+        "vspace" => arch::test_vspace(root),
         other => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)

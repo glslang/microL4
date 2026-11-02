@@ -45,7 +45,7 @@ pub use apic::test_nmi_stack;
 #[cfg(feature = "selftest")]
 pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]
-pub use paging::{direct_map_page, test_lowmem, test_paging};
+pub use paging::{direct_map_page, test_lowmem, test_paging, test_vspace};
 #[cfg(feature = "selftest")]
 pub use timer::start_ticks_test;
 #[cfg(feature = "selftest")]
