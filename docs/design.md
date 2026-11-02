@@ -1081,12 +1081,16 @@ descriptor raises #GP, as the `trap_general_protection` scenario shows.
 | `IA32_SYSENTER_CS` (`0x174`), `_ESP`, `_EIP` | 0 | firmware may leave them set; with CS 0, `sysenter` faults in ring 3 on Intel and is #UD in long mode on AMD (from memory; no M5 test runs `sysenter`) |
 | `IA32_GS_BASE` (`0xC000_0101`) | the per-CPU area while in ring 0 | |
 | `IA32_KERNEL_GS_BASE` (`0xC000_0102`) | the current thread's GS base while in ring 0 | swapped in by the exit `swapgs`; written at a thread switch ([FS and GS base](#fs-and-gs-base)) |
+| `IA32_TSC_AUX` (`0xC000_0103`) | 0, if CPUID reports `rdtscp` (`0x8000_0001` EDX bit 27) or `rdpid` (7 ECX bit 22) | both return it in ring 3 ([ADR 0025](adr/0025-user-tsc.md)), so the firmware's value must not reach a thread (`l4core::cpu::Cpuid::has_tsc_aux`) |
 
 `entry::init` (`arch/x86_64/entry.rs`) writes `IA32_STAR`, `IA32_LSTAR`,
 `IA32_CSTAR`, `IA32_FMASK`, the three SYSENTER MSRs and EFER.SCE in boot
 step 3, right after the GDT is loaded, and prints `entry: syscall_entry at
 <address>, IA32_STAR 0x13000800000000, IA32_FMASK 0x257fd5, EFER.SCE on,
-IA32_SYSENTER_CS 0`.
+IA32_SYSENTER_CS 0`. It then writes `IA32_TSC_AUX` and prints it read back,
+`entry: IA32_TSC_AUX 0x0, which rdtscp and rdpid read in ring 3`
+(`test=ring3` expects it on QEMU's `-cpu max`), or `entry: no rdtscp or
+rdpid, so no IA32_TSC_AUX`.
 
 TSS: RSP0 = the kernel stack top; IST1 #DF, IST2 NMI, IST3 #MC, IST4 #DB, each
 8 KiB above an unmapped guard page; I/O map base past the limit, so ring 3 has
@@ -1214,9 +1218,11 @@ the exit stub with the frame as its stack:
   `0x0000_8000_0000_0000`, the sanitiser's rule
   ([User register set and sanitising](#user-register-set-and-sanitising)). A
   debug
-  kernel prints a warning when this fires. Without a kernel bug it fires
-  only for an `rsp` the thread set itself, or for a `rip` restarted after a
-  fault on an upper-half fetch; otherwise a writer forgot to sanitise.
+  kernel prints a warning the first time each fires in a boot, not again,
+  since a thread can make the `rsp` one fire on every system call. Without
+  a kernel bug it fires only for an `rsp` the thread set itself, or for a
+  `rip` restarted after a fault on an upper-half fetch; otherwise a writer
+  forgot to sanitise.
 - `rflags` = `(rflags & 0x0024_0DD5) | 0x0202`: CF PF AF ZF SF TF DF OF AC
   ID, which ring 3 can set itself with `popfq`, are kept; IF and bit 1 are
   forced on; IOPL, NT, RF, VM, VIF and VIP are forced off (ring 3 can set NT
@@ -4074,7 +4080,10 @@ halt. Interrupts are off throughout, so one call's output is never split.
 touching a register, and `kernel/src/dispatch.rs` performs them for the
 current thread (`serial::put_byte` for `DebugPutChar`). `DebugDumpScheduler`
 walks a list of every TCB whose two link words live in the TCB's debug-only
-tail, as seL4 keeps `ksDebugTCBs`. Numbers 19 to 31 stay reserved; there is no
+tail, as seL4 keeps `ksDebugTCBs`. The walk has no preemption point, so its
+time grows with the number of TCBs, which any thread with untyped memory can
+raise, and any thread can call it in a loop; accepted, as these calls exist
+only in a debug kernel, which makes no timing promise (M5 review). Numbers 19 to 31 stay reserved; there is no
 `DebugNameThread`. A user-space test ends a QEMU run with `DebugHalt(0)` after
 printing `TEST PASS`. In debug scenarios the kernel's writer and `uart` share
 COM1: the kernel only polls LSR and writes THR, so they coexist, with lines

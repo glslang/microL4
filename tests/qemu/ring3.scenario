@@ -14,6 +14,7 @@ exit: success
 expect: microL4 kernel
 expect: entry: syscall_entry at 0xffffffff8 # its address moves with the image
 expect: , IA32_STAR 0x13000800000000, IA32_FMASK 0x257fd5, EFER.SCE on, IA32_SYSENTER_CS 0
+expect: entry: IA32_TSC_AUX 0x0, which rdtscp and rdpid read in ring 3 # QEMU's -cpu max has both
 expect: fpu: XCR0 0x3 of
 expect: supported, XSAVE area 576 bytes of the TCB's 1024
 expect: cpu: CR0 0x80010033 CR4 0x340ee8 EFER 0xd01

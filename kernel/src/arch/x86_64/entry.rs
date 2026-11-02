@@ -9,7 +9,8 @@
 //!   them (M3). See docs/abi.md, "Boot handoff".
 //! - [`init`], from step 3: the syscall MSRs. `IA32_STAR`, `IA32_LSTAR` =
 //!   `syscall_entry`, `IA32_CSTAR` = `compat_entry`, `IA32_FMASK`, EFER.SCE,
-//!   and the SYSENTER MSRs zeroed so `sysenter` cannot enter ring 0.
+//!   and the SYSENTER MSRs zeroed so `sysenter` cannot enter ring 0; and
+//!   `IA32_TSC_AUX` zeroed, which `rdtscp` and `rdpid` read in ring 3.
 //! - `syscall_entry` builds the 22-word trap frame at the top of the
 //!   kernel stack with vector 256 and calls `syscall_from_user`; the IDT
 //!   stubs in [`super::trap`] build the same frame for exceptions and
@@ -25,9 +26,10 @@
 //! - [`load_user_bases`] and [`save_user_bases`] move a thread's FS and GS
 //!   bases between its [`Regs`] and `IA32_FS_BASE` and
 //!   `IA32_KERNEL_GS_BASE` at a thread switch (ADR 0015).
-//! - [`return_to_kernel`] ends the one ring-0 trap that returns: the
+//! - [`return_to_kernel`] ends the ring-0 traps that return: the
 //!   single-step `#DB` a `syscall` with TF set may raise at
-//!   `syscall_entry`.
+//!   `syscall_entry`, and the one `mov ss` with TF set defers onto the
+//!   first instruction of the `#BP` stub.
 //!
 //! GS points at the per-CPU area whenever ring-0 code outside the IST
 //! handlers runs: `swapgs` runs exactly once on each entry from ring 3
@@ -36,6 +38,7 @@
 
 use core::arch::{asm, global_asm};
 use core::mem::offset_of;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use l4core::entry::{FMASK, STAR, SYSCALL_VECTOR, UserEntry, exit_frame, lower_half};
 use l4core::regs::{Exit, Regs};
@@ -96,13 +99,15 @@ const IA32_FS_BASE: u32 = 0xC000_0100;
 /// The user's GS base while the kernel runs: `swapgs` exchanges it with
 /// `IA32_GS_BASE` on every entry and exit.
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+/// What `rdtscp` returns in ECX and `rdpid` in its register.
+const IA32_TSC_AUX: u32 = 0xC000_0103;
 /// EFER.SCE: `syscall` and `sysret` enabled.
 const EFER_SCE: u64 = 1 << 0;
 
 /// Writes the syscall MSRs (`docs/design.md`, "Descriptor tables and
-/// MSRs"). Called once from step 3, after the GDT is loaded; nothing can
-/// execute `syscall` before ring 3 exists, so the entry is ready long
-/// before it can be used.
+/// MSRs"), and `IA32_TSC_AUX` = 0 if the CPU has it. Called once from step
+/// 3, after the GDT is loaded; nothing can execute `syscall` before ring 3
+/// exists, so the entry is ready long before it can be used.
 pub fn init() {
     let entry = syscall_entry as *const () as u64;
     // SAFETY: every MSR here exists on every x86_64 CPU (the SYSENTER ones
@@ -125,6 +130,19 @@ pub fn init() {
     kprintln!(
         "entry: syscall_entry at {entry:#x}, IA32_STAR {STAR:#x}, IA32_FMASK {FMASK:#x}, EFER.SCE on, IA32_SYSENTER_CS 0"
     );
+    // `rdtscp` and `rdpid` return IA32_TSC_AUX in ring 3 (ADR 0025), so
+    // the firmware's value must not stay in it.
+    if cpu::cpuid_features().has_tsc_aux() {
+        // SAFETY: CPUID reports `rdtscp` or `rdpid`, so the MSR exists, and
+        // any 32-bit value is valid; only those two instructions read it.
+        unsafe { cpu::write_msr(IA32_TSC_AUX, 0) };
+        kprintln!(
+            "entry: IA32_TSC_AUX {:#x}, which rdtscp and rdpid read in ring 3",
+            cpu::read_msr(IA32_TSC_AUX)
+        );
+    } else {
+        kprintln!("entry: no rdtscp or rdpid, so no IA32_TSC_AUX");
+    }
 }
 
 /// `syscall_entry`'s address, as `IA32_LSTAR` holds it.
@@ -371,6 +389,11 @@ fn user_interrupt(frame: &TrapFrame, vector: u8) -> ! {
 // Exit
 // ---------------------------------------------------------------------------
 
+/// Whether [`exit_to_user`] has warned of a RIP, or of an RSP, at or above
+/// 2^47.
+static WARNED_RIP: AtomicBool = AtomicBool::new(false);
+static WARNED_RSP: AtomicBool = AtomicBool::new(false);
+
 /// Leaves the kernel for the thread whose registers are `regs`: by
 /// `sysretq` if it entered by `syscall` and nothing wrote its registers
 /// since, else by `iretq` (`l4core::entry::exit_frame`). The caller has
@@ -385,16 +408,17 @@ pub fn exit_to_user(regs: &Regs) -> ! {
     let (frame, path) = exit_frame(regs);
     // Without a kernel bug these fire only for an RSP the thread set
     // itself, or a return address past the lower half (`docs/design.md`,
-    // Exit).
-    if frame.rip != regs.next_ip {
+    // Exit). A thread can do either on every system call, so each warning
+    // is printed once per boot, not once per exit.
+    if frame.rip != regs.next_ip && !WARNED_RIP.swap(true, Ordering::Relaxed) {
         kprintln!(
-            "entry: warning: RIP {:#x} at or above 2^47 exits as 0",
+            "entry: warning: RIP {:#x} at or above 2^47 exits as 0 (printed once per boot)",
             regs.next_ip
         );
     }
-    if frame.rsp != regs.rsp {
+    if frame.rsp != regs.rsp && !WARNED_RSP.swap(true, Ordering::Relaxed) {
         kprintln!(
-            "entry: warning: RSP {:#x} at or above 2^47 exits as 0",
+            "entry: warning: RSP {:#x} at or above 2^47 exits as 0 (printed once per boot)",
             regs.rsp
         );
     }

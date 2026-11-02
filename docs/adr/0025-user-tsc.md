@@ -16,6 +16,11 @@ clear as well, and offers no time system call outside MCS.
 
 - The kernel keeps CR4.TSD clear: `rdtsc` and `rdtscp` work in ring 3 on
   every thread, and BootInfo's `tsc_hz` converts their ticks to time.
+- `rdtscp` also returns `IA32_TSC_AUX` in ECX, as `rdpid` does. When CPUID
+  reports either instruction, the kernel writes the MSR to 0 in boot step 3
+  (`entry::init`, which prints it), so every thread reads 0 there, not
+  whatever the firmware left (added in the M5 fix round, after the M5
+  kernel review found the MSR never written).
 - The ABI promises nothing about the TSC beyond that: it is not
   synchronised across cores (there is one), and an invariant TSC is not
   checked.
