@@ -21,13 +21,14 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use l4core::boot::check::{check_bootinfo, check_plan, check_root_cnode, check_untyped};
 use l4core::boot::{LOW_MEMORY_END, MSI_WINDOW};
-use l4core::bootinfo::{CAP_INIT_CNODE, UntypedDesc};
+use l4core::bootinfo::{CAP_BOOTINFO_FRAME, CAP_INIT_CNODE, ROOT_CNODE_SLOTS, UntypedDesc};
 use l4core::cap::{Cap, CapType, ObjectType, Rights, TCB_SLOTS};
 use l4core::cdt;
 use l4core::cspace;
 use l4core::error::SyscallError;
 use l4core::invoke::{self, ExtraCap, InvokeError, Message, label};
-use l4core::slot::{Slot, SlotAddr, SlotMemory};
+use l4core::slot::{Node, Slot, SlotAddr, SlotMemory};
+use l4core::vspace::CacheType;
 
 use crate::arch::{self, BootFacts, Objects, StaticCell};
 use crate::boot::{BootState, RootSpace};
@@ -71,7 +72,9 @@ fn overlaps(a: &Range<u64>, b: &Range<u64>) -> bool {
 /// the descriptor tables, the page tables and `BootState`; the pages the
 /// device window maps; the boot region `arch` zeroed; the MSI window and
 /// `[0, 1 MiB)`. Every RAM untyped must also be memory `arch` lets kernel
-/// objects occupy.
+/// objects occupy. Last, it walks the live direct map over every untyped:
+/// RAM untyped must be mapped write-back, and no device untyped may lie in
+/// a write-back page.
 pub fn bootinfo(boot: &BootState, facts: &BootFacts, root: &RootSpace) -> ! {
     let (plan, bi) = (&root.plan, root.bootinfo);
     let k = Objects::begin();
@@ -151,6 +154,32 @@ pub fn bootinfo(boot: &BootState, facts: &BootFacts, root: &RootSpace) -> ! {
         ram + device
     );
     kprintln!("bootinfo: every RAM untyped is RAM the kernel hands out");
+
+    // The direct map's cache types, from the live tables rather than the
+    // rule the planner applied: every RAM untyped is mapped write-back, and
+    // no device untyped lies in a write-back page (ADR 0004).
+    let end = boot.handoff.direct_map_end();
+    let mut pages = 0u64;
+    for (i, d) in bi.untyped().iter().enumerate() {
+        let mut a = d.paddr;
+        while a < d.end().min(end) {
+            let mapped = arch::direct_map_page(boot, a);
+            let wb = matches!(mapped, Some((CacheType::WriteBack, _)));
+            if d.device() == wb || mapped.is_none() {
+                fail(format_args!(
+                    "bootinfo: {} untyped {i} at {}: the direct map maps {a:#x} as {mapped:?}",
+                    if d.device() { "device" } else { "RAM" },
+                    Hex(&(d.paddr..d.end()))
+                ))
+            }
+            let size = mapped.map_or(4096, |(_, size)| size);
+            a = (a | (size - 1)) + 1;
+            pages += 1;
+        }
+    }
+    kprintln!(
+        "bootinfo: the live direct map maps every RAM untyped write-back and no device untyped write-back ({pages} pages walked)"
+    );
     kprintln!("TEST PASS");
     arch::exit(arch::ExitCode::Success)
 }
@@ -173,11 +202,20 @@ const GUARD_5: u64 = (5 << 6) | 60;
 const GUARD_3: u64 = (3 << 6) | 60;
 /// The badge the test mints.
 const BADGE: u64 = 0x42;
+/// The slots of C that hold a copy of the BootInfo frame and a mint of the
+/// root CNode capability: boot capabilities, not from U.
+const C_BOOTINFO_COPY: u64 = 8;
+const C_ROOT_COPY: u64 = 9;
+/// The boot capabilities the test copies into C.
+const COPIED_BOOT_SLOTS: [u64; 2] = [CAP_BOOTINFO_FRAME, CAP_INIT_CNODE];
 /// What objects without slots are filled with after the first run.
 const PATTERN: u8 = 0xC3;
 /// The least size of `U`: it holds a 1 MiB untyped, a 2 MiB frame and
 /// the rest.
 const MIN_U_BITS: u8 = 23;
+/// How long the test waits with interrupts off for the 100 Hz timer before
+/// run 1: five periods.
+const WAIT_NS: u64 = 50_000_000;
 
 /// A CPtr into a guarded copy of the test's CNode: guard `guard`, then
 /// slot `slot`.
@@ -256,9 +294,10 @@ struct Ctx {
 impl Ctx {
     /// The sequence each run makes: every object type `U` can make, the
     /// CNode methods between the root CNode and the test's CNode `C`
-    /// (through its own capability and two guarded copies), a retype of
-    /// the untyped made from `U`, and three calls that must fail.
-    fn calls(&self) -> [Call; 25] {
+    /// (through its own capability and two guarded copies), copies into
+    /// `C` of boot capabilities that do not come from `U`, a retype of the
+    /// untyped made from `U`, and three calls that must fail.
+    fn calls(&self) -> [Call; 27] {
         let (u, e) = (self.u, self.e);
         let ut = e; // The 1 MiB untyped made from U.
         let cn = e + 1; // C, radix 4.
@@ -328,6 +367,22 @@ impl Ctx {
                 cn_g5,
                 label::CNODE_MOVE,
                 &[guarded(5, 2), 64, nt, 64],
+                &[ROOT],
+            ),
+            // Two capabilities in C that do not come from U: only C's
+            // Zombie clearing can delete them when U is revoked.
+            Call::new(
+                "copy the BootInfo frame into C",
+                cn,
+                label::CNODE_COPY,
+                &[C_BOOTINFO_COPY, CN_RADIX, CAP_BOOTINFO_FRAME, 64, ALL],
+                &[ROOT],
+            ),
+            Call::new(
+                "mint the root CNode into C",
+                cn,
+                label::CNODE_MINT,
+                &[C_ROOT_COPY, CN_RADIX, ROOT, 64, ALL, 0],
                 &[ROOT],
             ),
             Call::new(
@@ -423,7 +478,7 @@ impl Ctx {
     /// CNode's and the TCB's, if they exist.
     fn for_each_slot(&self, k: &Objects, mut f: impl FnMut(SlotAddr)) {
         let layout = &self.root.plan.layout;
-        for slot in 0..l4core::bootinfo::ROOT_CNODE_SLOTS {
+        for slot in 0..ROOT_CNODE_SLOTS {
             f(layout.slot(slot));
         }
         // C, from root slot e + 1, and the TCB, from root slot e + 6.
@@ -596,6 +651,18 @@ pub fn retype(root: &'static RootSpace) -> ! {
         ctx.e
     );
     arch::set_resume_hook(resume);
+    // Run 1's first call resets U. Waiting here, with interrupts off, for
+    // the timer makes its first poll find an interrupt pending on any host,
+    // however fast the reset would be.
+    if !arch::wait_interrupt_pending(WAIT_NS) {
+        fail(format_args!(
+            "retype: no interrupt became pending within {} ms",
+            WAIT_NS / 1_000_000
+        ))
+    }
+    kprintln!(
+        "retype: an interrupt is pending, so run 1's reset of U is preempted by it at its first poll"
+    );
     drive()
 }
 
@@ -821,30 +888,40 @@ fn end_run(ctx: &Ctx, phase: Phase) {
     }
 }
 
-/// `U` was revoked: every slot a descendant held is empty, the root
-/// CNode's boot capabilities are as boot made them, and `U` is unchanged
-/// but for having no children.
+/// `U` was revoked. Every slot the test filled is empty, C's copies of boot
+/// capabilities included, which only C's Zombie clearing deletes. Every
+/// boot capability, `U` among them, holds what it held after run 1 (`U`'s
+/// watermark where the run left it) and is again a derivation root with
+/// no links: no children, so the boot capabilities copied into C have
+/// none left. Every recorded slot and every root CNode slot passes
+/// `cdt::check_slot`.
 fn after_revoke(ctx: &Ctx, k: &Objects, phase: Phase) {
     let layout = &ctx.root.plan.layout;
+    let boot_slots = layout.slot(0)..layout.slot(ctx.e);
     let len = RECORD_LEN.load(Ordering::Relaxed);
-    let u = layout.slot(ctx.u);
+    let check = |at: SlotAddr| {
+        if let Err(why) = cdt::check_slot(k, at) {
+            fail(format_args!(
+                "retype: {}: slot {:#x}: {why}",
+                phase.name(),
+                at.get()
+            ))
+        }
+    };
     let mut emptied = 0;
     for e in &RECORD[..len] {
         let e = e.each_ref().map(|w| w.load(Ordering::Relaxed));
         let at = SlotAddr::new(e[0]).expect("a recorded slot address");
+        check(at);
         let now = k.load(at);
-        let boot_slot = (layout.slot(0)..layout.slot(ctx.e)).contains(&at);
-        if at == u {
-            if now.cap != Slot::from_words([e[1], e[2], e[3], e[4]]).cap || cdt::has_children(k, u)
-            {
-                fail(format_args!("retype: {}: U changed", phase.name()))
-            }
-        } else if boot_slot {
-            if entry(k, at) != Some(e) {
+        if boot_slots.contains(&at) {
+            let recorded = Slot::from_words([e[1], e[2], e[3], e[4]]).cap;
+            if now.cap != recorded || now.node != Node::new(true, 0, 0) {
                 fail(format_args!(
-                    "retype: {}: boot slot {:#x} changed",
+                    "retype: {}: boot slot {:#x} holds {:x?}, not run 1's capability as a root without links",
                     phase.name(),
-                    at.get()
+                    at.get(),
+                    now
                 ))
             }
         } else if now != Slot::EMPTY {
@@ -857,17 +934,29 @@ fn after_revoke(ctx: &Ctx, k: &Objects, phase: Phase) {
             emptied += 1;
         }
     }
-    for slot in ctx.e..l4core::bootinfo::ROOT_CNODE_SLOTS {
-        if k.load(layout.slot(slot)) != Slot::EMPTY {
+    for slot in 0..ROOT_CNODE_SLOTS {
+        let at = layout.slot(slot);
+        check(at);
+        if slot >= ctx.e && k.load(at) != Slot::EMPTY {
             fail(format_args!(
                 "retype: {}: root slot {slot} is not empty",
                 phase.name()
             ))
         }
     }
+    for slot in COPIED_BOOT_SLOTS {
+        if cdt::has_children(k, layout.slot(slot)) {
+            fail(format_args!(
+                "retype: {}: root slot {slot}, copied into C, still has children",
+                phase.name()
+            ))
+        }
+    }
     kprintln!(
-        "retype: {} done: the {emptied} slots U's descendants held are empty, U and the boot capabilities unchanged",
-        phase.name()
+        "retype: {} done: the {emptied} slots the test filled are empty, C's copies of root slots {} and {} included; U and the boot capabilities are as run 1 left them, roots without links",
+        phase.name(),
+        COPIED_BOOT_SLOTS[0],
+        COPIED_BOOT_SLOTS[1]
     );
 }
 

@@ -19,7 +19,7 @@ use super::cpu;
 use crate::boot::BootState;
 
 #[cfg(feature = "selftest")]
-pub use self::selftest::{tables_virt, test_lowmem, test_paging, translate};
+pub use self::selftest::{direct_map_page, tables_virt, test_lowmem, test_paging, translate};
 
 const CR0_WP: u64 = 1 << 16;
 const CR4_PGE: u64 = 1 << 7;
@@ -257,6 +257,20 @@ mod selftest {
     pub fn tables_virt() -> core::ops::Range<u64> {
         let start = TABLES.0.get() as u64;
         start..start + size_of::<KernelTables>() as u64
+    }
+
+    /// How the live kernel tables map physical `phys` in the direct map:
+    /// the cache type and the size of the page holding it, or `None` if
+    /// no page does. For `test=bootinfo`.
+    pub fn direct_map_page(boot: &BootState, phys: u64) -> Option<(CacheType, u64)> {
+        let Some((tables, _)) = built() else {
+            panic!("the kernel's tables are not loaded");
+        };
+        let tables_phys = kernel_layout(&boot.handoff).virt_to_phys(&raw const *tables as u64);
+        match tables.walk(tables_phys, PHYS_MAP_BASE + phys) {
+            Ok(t) => t.map(|t| (t.cache, t.page_size)),
+            Err(e) => panic!("{phys:#x} does not translate in the direct map: {e:?}"),
+        }
     }
 
     /// Records one check of `test=paging`; returns whether it held.

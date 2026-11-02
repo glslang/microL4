@@ -3,28 +3,34 @@
 # with CPtrs into the root CNode, as the root task will make them: the
 # largest RAM untyped U is retyped into every object type, the CNode
 # methods move capabilities between the root CNode and a new CNode (through
-# its own capability and guarded copies), the untyped made from U is
-# retyped too, and three calls fail as they must. Every slot is recorded,
-# the objects are filled, U is revoked, and the same calls run again: the
-# record must match and the objects read zero. Calls are preempted by the
-# timer during the first reset of U and by injected preemptions, and
-# restart from the idle path each time; the kernel counts and checks them.
-# Each phase reports its preemptions and the stretches between its polls.
+# its own capability and guarded copies), the new CNode also gets copies of
+# the BootInfo frame and the root CNode capability, which only its Zombie
+# can delete, the untyped made from U is retyped too, and three calls fail
+# as they must. Every slot is recorded, the objects are filled, U is
+# revoked, and the same calls run again: the record must match and the
+# objects read zero. After each revoke every slot the test filled is empty,
+# the boot capabilities are roots without links again, and every slot
+# passes cdt::check_slot. The kernel waits for a timer interrupt before
+# run 1, so the first reset of U is preempted by it at its first poll;
+# injected preemptions hit both runs and both revokes. Every call restarts
+# from the idle path; the kernel counts and checks the restarts. Each
+# phase reports its preemptions and the stretches between its polls.
 cmdline: test=retype
 exit: success
 expect: microL4 kernel
 expect: cmdline: "test=retype"
 expect: bootinfo: boot region
 expect: retype: U is root slot
-expect: retype: run 1: U into a 1 MiB untyped preempted by
+expect: retype: an interrupt is pending, so run 1's reset of U is preempted by it at its first poll
+expect: retype: run 1: U into a 1 MiB untyped preempted by an interrupt at poll 1 (attempt 1)
 expect: retype: run 1 done:
 expect: retype: run 1: preempted
-expect: retype: revoke 1 done: the 24 slots U's descendants held are empty, U and the boot capabilities unchanged
+expect: retype: revoke 1 done: the 26 slots the test filled are empty, C's copies of root slots 9 and 2 included; U and the boot capabilities are as run 1 left them, roots without links
 expect: retype: revoke 1: preempted
 expect: retype: run 2 done: the same
 expect: its objects' 2098 KiB read zero
 expect: retype: run 2: preempted
-expect: retype: revoke 2 done: the 24 slots U's descendants held are empty
+expect: retype: revoke 2 done: the 26 slots the test filled are empty, C's copies of root slots 9 and 2 included
 expect: retype: revoke 2: preempted
 expect: restarts from the idle path after
 expect: retype: the longest stretch between two polls:
