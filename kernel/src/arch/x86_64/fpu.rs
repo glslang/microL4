@@ -17,12 +17,6 @@
 //! The kernel itself never executes an x87 or SSE instruction: only
 //! XSAVE64, XRSTOR64, XSETBV and XGETBV, here.
 
-// Until the scheduler switches threads, only `test=ring3` switches state.
-#![cfg_attr(
-    not(feature = "selftest"),
-    expect(dead_code, reason = "the scheduler switches FP state through it")
-)]
-
 use core::arch::asm;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -101,7 +95,8 @@ pub fn check_control_state() {
     assert_eq!(xcr0, XCR0, "XCR0");
 }
 
-/// The TCB whose state the registers hold, if any.
+/// The TCB whose state the registers hold, if any, for the self-tests.
+#[cfg(feature = "selftest")]
 pub fn owner() -> Option<TcbRef> {
     TcbRef::new(OWNER.load(Ordering::Relaxed))
 }
