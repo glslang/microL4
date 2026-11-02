@@ -6,6 +6,7 @@ mod acpidump;
 mod compile;
 mod image;
 mod qemu;
+mod rootimage;
 mod scenario;
 mod source;
 
@@ -19,7 +20,8 @@ const USAGE: &str = "\
 usage: cargo xtask <command> [options]
 
 commands:
-  build             build the kernel and the loader
+  build             build the user crates, the kernel with the root task
+                    embedded, and the loader
   image             build target/xtask/image/disk.img and disk.vhdx
   run               boot the image under OVMF, COM1 on stdio (Ctrl-A X quits)
   test [names...]   host tests, kernel source checks, then every QEMU
@@ -95,7 +97,19 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
     match opts.command.as_str() {
         "build" => {
             let art = compile::build(profile)?;
-            println!("kernel: {}\nloader: {}", rel(&art.kernel), rel(&art.loader));
+            let p = &art.packed;
+            println!(
+                "root: {}\nroot image: {}, {} bytes, entry {:#x}, image {:#x}-{:#x}, {} frames\nkernel: {}\nloader: {}",
+                rel(&art.root),
+                rel(&art.root_image),
+                p.bytes,
+                p.entry,
+                p.image.0,
+                p.image.1,
+                p.frames,
+                rel(&art.kernel),
+                rel(&art.loader)
+            );
         }
         "image" => {
             let art = compile::build(profile)?;
