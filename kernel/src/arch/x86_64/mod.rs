@@ -40,7 +40,7 @@ pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
 #[cfg(feature = "debug")]
 pub use objects::for_each_tcb;
-pub use objects::{Objects, bootinfo_frames, set_invoked_by_call};
+pub use objects::{Objects, bootinfo_frames};
 pub use rootimage::take_rootimage;
 pub use thread::exit_to_scheduled;
 #[cfg_attr(

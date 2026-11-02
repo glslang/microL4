@@ -16,7 +16,7 @@ use l4core::boot::{self as l4boot, BootInput, BootPlan, FramebufferStatus, Untyp
 use l4core::bootinfo::{
     BootInfo, CAP_INIT_CNODE, CAP_INIT_IPC_BUFFER, CAP_INIT_TCB, CAP_INIT_VSPACE, InterruptInfo,
 };
-use l4core::cap::{TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_VSPACE};
+use l4core::cap::{Cap, TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_REPLY, TCB_SLOT_VSPACE};
 use l4core::handoff::{Handoff, MemoryRegion};
 use l4core::kernel::Kernel;
 use l4core::sched;
@@ -269,6 +269,13 @@ pub fn make_root_space(
     let t = TcbRef::from_cap(&tcb_cap).expect("the plan has a root TCB");
     k.init_object(tcb_cap);
     tcb::init_root(&mut k, t, entry, bootinfo_va);
+    // Its master reply capability, a derivation root, as retype gives
+    // every other TCB one (`docs/design.md`, "Reply capabilities").
+    cdt::insert_root(
+        &mut k,
+        t.slot(TCB_SLOT_REPLY),
+        Cap::reply(t.get(), true, true),
+    );
     for (from, to) in [
         (CAP_INIT_CNODE, TCB_SLOT_CSPACE),
         (CAP_INIT_VSPACE, TCB_SLOT_VSPACE),

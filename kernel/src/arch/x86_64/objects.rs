@@ -2,11 +2,12 @@
 //! "How `core/` reaches kernel memory", "Deletion and finalisation", "Reset
 //! and preemption", "Threads and TCBs", "Scheduling"): [`Objects`]
 //! implements `l4core`'s `SlotMemory`, `Kernel`, `PagingStore` (in
-//! [`super::paging`]), `Tcbs`, `Scheduling` and `Threads` over the direct
-//! map.
+//! [`super::paging`]), `Tcbs`, `Scheduling`, `Threads` and `IpcEnv` over
+//! the direct map.
 //!
-//! - Slots, TCB fields and IPC buffer words are loaded and stored by value
-//!   through raw pointers at `PHYS_MAP_BASE + addr`, and `zero` writes
+//! - Slots, TCB fields, endpoint words and IPC buffer words are loaded and
+//!   stored by value through raw pointers at `PHYS_MAP_BASE + addr`, and
+//!   `zero` writes
 //!   through one the same way; no Rust reference into object memory is
 //!   ever made.
 //! - Debug builds check every slot address, TCB and range `zero` clears
@@ -18,7 +19,8 @@
 //!   a place in the debug list, a new PML4 the kernel's half; a TCB's last
 //!   capability suspends it and drops its FP and FS/GS-base ownership; a
 //!   Frame or paging structure unmaps; a mapped one that moves takes its
-//!   back-reference along. Endpoints and reply capabilities wait for IPC.
+//!   back-reference along; an endpoint's last capability releases its
+//!   queue (`l4core::ipc::finalise`).
 //! - The preemption point polls the local APIC's IRR and never enables
 //!   interrupts. With `selftest` it also counts polls, times the longest
 //!   stretch between two, and can be told to report a preemption with no
@@ -30,12 +32,14 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use l4core::bootinfo::{BOOTINFO_SIZE, BootInfo};
-use l4core::cap::{Cap, CapType, SLOT_SIZE, TCB_BITS};
+use l4core::cap::{Cap, CapType, ENDPOINT_BITS, SLOT_SIZE, TCB_BITS};
+use l4core::ipc::{self, IpcEnv};
 use l4core::kernel::{Kernel, Preempted};
 use l4core::objmem::ObjectMemory;
 use l4core::sched::{Scheduler, Scheduling};
 use l4core::slot::{Slot, SlotAddr, SlotMemory};
-use l4core::tcb::{self, REGS_OFFSET, TcbRef, Tcbs, ThreadState, Threads, XSAVE_OFFSET};
+use l4core::syscall;
+use l4core::tcb::{self, EpRef, REGS_OFFSET, TcbRef, Tcbs, Threads, XSAVE_OFFSET};
 
 use super::{BootFacts, StaticCell, apic, entry, fpu, paging, phys_to_virt, thread};
 use crate::boot::BootState;
@@ -82,15 +86,6 @@ fn object_memory(memory: &ObjectMemory, paddr: u64, len: u64) -> bool {
         || RECLAIMED.get().is_some_and(|r| {
             paddr >= r.start && paddr.checked_add(len).is_some_and(|end| end <= r.end)
         })
-}
-
-/// Whether the invocation the kernel is performing came by `Call`
-/// ([`Threads::invoked_by_call`]); set by the system-call path.
-static INVOKED_BY_CALL: AtomicBool = AtomicBool::new(false);
-
-/// Says whether the invocation about to be performed came by `Call`.
-pub fn set_invoked_by_call(call: bool) {
-    INVOKED_BY_CALL.store(call, Ordering::Relaxed);
 }
 
 /// The ready queues, the scheduler action and the current thread.
@@ -188,6 +183,17 @@ impl Objects {
         );
         self.check(t.get(), 1 << TCB_BITS, "TCB");
         t.get() + offset
+    }
+
+    /// The physical address of word `offset` of endpoint `ep`: one of its
+    /// four.
+    fn endpoint_field(&self, ep: EpRef, offset: u64) -> u64 {
+        assert!(
+            offset < 1 << ENDPOINT_BITS && offset.is_multiple_of(8),
+            "endpoint field offset {offset:#x}"
+        );
+        self.check(ep.get(), 1 << ENDPOINT_BITS, "endpoint");
+        ep.get() + offset
     }
 
     /// Boot step 8: copies root-image `bytes` to `paddr`, inside one image
@@ -290,18 +296,18 @@ impl Scheduling for Objects {
 }
 
 impl Threads for Objects {
-    /// No thread blocks before IPC (M5 part 3), so this does what IPC's
-    /// `cancel_ipc` does to the thread itself: a blocked thread becomes
-    /// `Inactive`, and its pending fault is cleared.
+    /// IPC's `cancel_ipc`: a blocked thread leaves its endpoint queue, or
+    /// loses the reply capability to it, and becomes `Inactive`; its fault
+    /// is cleared in any state.
     fn cancel_ipc(&mut self, t: TcbRef) {
-        if self.state(t).is_blocked() {
-            self.set_state(t, ThreadState::Inactive);
-        }
-        self.set_fault(t, None);
+        ipc::cancel_ipc(self, t);
     }
 
+    /// The current thread's `rdx` is `Call`'s number: every system call
+    /// preserves `rdx`, so it says how the invocation being performed came;
+    /// false with no current thread (a self-test's invocation).
     fn invoked_by_call(&self) -> bool {
-        INVOKED_BY_CALL.load(Ordering::Relaxed)
+        syscall::invoked_by_call(self)
     }
 
     /// No SynIC page is recorded before M9.
@@ -320,6 +326,33 @@ impl Threads for Objects {
         // thread's buffer slot holds with Read and Write, which holds no
         // slot or kernel data.
         unsafe { ptr::write(phys_to_virt(paddr) as *mut u64, value) };
+    }
+}
+
+/// Endpoint words and IPC buffer reads through the direct map, for
+/// `l4core::ipc`.
+impl IpcEnv for Objects {
+    fn endpoint_word(&self, ep: EpRef, offset: u64) -> u64 {
+        let at = self.endpoint_field(ep, offset);
+        // SAFETY: an `EpRef` names a live endpoint (it comes only from an
+        // Endpoint capability or a blocked thread's state, which IPC keeps
+        // in step with the endpoint's queue, and finalisation empties that
+        // queue before the memory can be reset): 32-byte aligned in RAM
+        // below the direct map's end, so mapped RW and write-back. The word
+        // is one of its four, which only this type reaches, by value; any
+        // bits are a `u64`.
+        unsafe { ptr::read(phys_to_virt(at) as *const u64) }
+    }
+
+    fn set_endpoint_word(&mut self, ep: EpRef, offset: u64, value: u64) {
+        let at = self.endpoint_field(ep, offset);
+        // SAFETY: as in `endpoint_word`; the write changes one word of the
+        // endpoint and no slot, kernel code or static data.
+        unsafe { ptr::write(phys_to_virt(at) as *mut u64, value) };
+    }
+
+    fn read_buffer_word(&self, paddr: u64) -> u64 {
+        self.buffer_word(paddr)
     }
 }
 
@@ -349,15 +382,15 @@ impl Kernel for Objects {
                     debug_tcbs::remove(self, t);
                 }
             }
-            // M5: on the last capability, every queued thread is released
-            // and restarts its system call.
-            CapType::Endpoint => {}
+            // The last capability to an endpoint releases its queue: every
+            // queued thread restarts its system call. A reply capability
+            // needs nothing: deleted unused, it leaves its caller
+            // `BlockedOnReply`, and a master goes only with its TCB, after
+            // `cancel_ipc` deleted the one derived from it.
+            CapType::Endpoint | CapType::Reply => ipc::finalise(self, cap, last),
             // M6: on the last capability, unbound from its TCB and every
             // waiter released.
             CapType::Notification => {}
-            // M5: a reply capability's caller is released; a master goes
-            // only with its TCB.
-            CapType::Reply => {}
             // A Frame unmaps on every deletion, a paging structure on its
             // only one, and a PML4's last capability empties its user half
             // (loading the kernel PML4 first if it is in CR3).
