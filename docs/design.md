@@ -82,11 +82,11 @@ The kernel never blocks and has no kernel threads.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Kernel code runs with interrupts disabled, from entry to exit; only the idle thread's halt loop runs with `IF = 1` in ring 0 | `IA32_FMASK` clears IF; every IDT gate is an interrupt gate; no `sti` outside the idle loop (review, M10 brief 5) | M3, M5 |
-| Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; M10 brief 6 | M2, M4, M5, M6, M10 |
+| Kernel code runs with interrupts disabled, from entry to exit; only the idle thread's halt loop runs with `IF = 1` in ring 0 | `IA32_FMASK` clears IF; every IDT gate is an interrupt gate; no `sti` outside the idle loop (review, M10 brief 5); `test=ring3` reads RFLAGS at every entry from ring 3 and requires IF clear | M3, M5 |
+| Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; from M5 an invocation cut short leaves its caller `Restart` (`l4core::syscall`), and the paging loops touch at most 512 entries with no preemption point ([Deletion](#deletion)); M10 brief 6 | M2, M4, M5, M6, M10 |
 | A system call restarted after a preemption point continues its work and never repeats a completed step. Two exceptions, both as in seL4: a partial revoke, whose work destroyed a CNode on the lookup path that named its slot (a Delete can do this only through a path that runs through its own slot), so its restart fails the lookup and leaves the rest undone, with an outcome that depends on where preemption fell; and a Delete or Revoke that finalises the caller's own TCB, which is never restarted ([Slot operations](#slot-operations)) | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random, restarting Delete and Revoke by looking their slots up again, and requiring a revoke cut short to stop exactly where the unpreempted revoke passed one of its preemption points, in memory and in the hook calls made so far | M2, M4 |
 | The kernel allocates no memory after boot | the kernel links no allocator; every object comes from `Untyped_Retype` | M4 |
-| The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map; SMAP on (M3); no `stac` anywhere (CI grep over `kernel/`) | M3, M5 |
+| The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map: an IPC buffer word through `l4core::tcb::buffer_word`, which gives the physical address in the frame of the TCB's buffer slot, and `arch::Objects`' buffer accessors; the root image through `Objects::copy_into_frame` (boot step 8); SMAP on (M3); no `stac` anywhere (CI grep over `kernel/`) | M3, M5 |
 | Every exception and interrupt entry clears RFLAGS.AC and DF before any Rust code runs | `clac` and `cld` in every entry stub ([Kernel entry and exit](#kernel-entry-and-exit)) | M3 |
 | `unsafe` appears only in `kernel/src/arch/`, each block with a `SAFETY:` comment; `core/` has none | `#![deny(unsafe_code)]` outside `arch`, `clippy::undocumented_unsafe_blocks`, `#![forbid(unsafe_code)]` in `core/` | M0 |
 
@@ -111,29 +111,30 @@ PAT, SMEP, SMAP and XSAVE, and turns UMIP on when the CPU has it
 Hardware facts this document relies on are listed once, here. M1 wrote each
 from memory of the Intel SDM or of QEMU and Hyper-V behaviour, not checked
 against a source; the last column names the milestone that checks it, or says
-how M3 checked it.
+how M3 or M5 checked it.
 
 | Ref | Fact | Check |
 | --- | --- | --- |
 | H1 | QEMU's default TCG CPU model `qemu64`, which xtask used before M3, has NX, PGE and PAT but not SMEP, SMAP, XSAVE, UMIP, PCID or 1 GiB pages. `-cpu max` under TCG has SMEP, SMAP and UMIP, and LA57 unless `la57=off`. | Checked in M3: the `cpu_refuse` scenario boots `qemu64` and the kernel finds NX, PGE and PAT but not SMEP, SMAP or XSAVE; the `hello` boot log shows `-cpu max,la57=off` with SMEP, SMAP and UMIP. `qemu64`'s lack of UMIP, PCID and 1 GiB pages and `-cpu max`'s LA57 are from memory |
 | H2 | Hyper-V passes SMEP and SMAP through to a Generation 2 guest when the host CPU has them and processor compatibility mode is off. | Checked at the M3 Hyper-V check: the kernel booted past `check_cpu` |
-| H3 | Exception and interrupt delivery clears TF, NT and RF (and IF for interrupt gates) but not AC or DF; `syscall` clears the RFLAGS bits set in `IA32_FMASK`. | Checked in M3 for TF and IF only: the `trap_debug` handler, entered by a single step, runs to its report, and `idle_irq` finds IF = 0 in the interrupt path. Whether delivery leaves AC and DF set was not observed; every stub clears both regardless. `syscall`: M5 |
+| H3 | Exception and interrupt delivery clears TF, NT and RF (and IF for interrupt gates) but not AC or DF; `syscall` clears the RFLAGS bits set in `IA32_FMASK`. | Checked in M3 for TF and IF only: the `trap_debug` handler, entered by a single step, runs to its report, and `idle_irq` finds IF = 0 in the interrupt path. Whether delivery leaves AC and DF set was not observed; every stub clears both regardless. `syscall`: checked in M5 on QEMU: `test=ring3` makes a `syscall` with DF, NT and AC set, finds them in the saved RFLAGS (`0x44646`) and clear in ring 0 |
 | H4 | With CR4.PCIDE = 0, a CR3 write invalidates every non-global TLB entry and every paging-structure-cache entry. Clearing and setting CR4.PGE invalidates every entry, global ones included. | Checked in M3 only in part: after the CR3 load and the PGE toggle, `lowmem` faults on the loader's 1:1 map, but TCG flushes every translation on any CR3 write, so it cannot show that the toggle is needed. The rest is from memory |
-| H5 | `invlpg a` invalidates the TLB entries for the page holding `a`, whatever its size, and all paging-structure-cache entries. | M5 |
-| H6 | Changing an entry's P flag from 0 to 1 needs no invalidation: no TLB or paging-structure-cache entry is made from a not-present entry. Any other change to a present entry needs one. | M5 |
-| H7 | Effective R/W and U/S are the AND over the walk and XD the OR, so intermediate entries may grant everything and leaves restrict. | M5 |
+| H5 | `invlpg a` invalidates the TLB entries for the page holding `a`, whatever its size, and all paging-structure-cache entries. | Not checked on a CPU in M5: TCG hides a missing flush ([TLB maintenance](#tlb-maintenance)), and the TLB model of `l4core::vspace`'s proptest is built on this fact. From memory |
+| H6 | Changing an entry's P flag from 0 to 1 needs no invalidation: no TLB or paging-structure-cache entry is made from a not-present entry. Any other change to a present entry needs one. | As H5 |
+| H7 | Effective R/W and U/S are the AND over the walk and XD the OR, so intermediate entries may grant everything and leaves restrict. | Checked in part in M5 on QEMU: `test=ring3` maps every user page under tables with R/W, U/S set and XD clear, runs its code page and takes #PF with error `0x7` writing to it, a read-only leaf. The XD OR and the U/S AND are from memory |
 | H8 | PAT index = 4·PAT + 2·PCD + PWT; the PAT bit is bit 7 of a 4 KiB PTE and bit 12 of a 2 MiB PDE. Type encodings: UC `00h`, WC `01h`, WT `04h`, WB `06h`, UC- `07h`. A page mapped UC or WC must not also be mapped WB (SDM vol. 3, 11.12.4). | Checked in M3 against seL4's entry layouts (`structures.bf`) and `init_pat_msr`, and pinned by host tests in `l4core::vspace`; the aliasing rule is from memory |
-| H9 | `sysretq` with a non-canonical RCX raises #GP in ring 0 on Intel CPUs, after the kernel has restored the user's RSP. | M5 |
+| H9 | `sysretq` with a non-canonical RCX raises #GP in ring 0 on Intel CPUs, after the kernel has restored the user's RSP. | Not checked: `l4core::entry::exit_frame` never lets `sysretq` see such an RCX. `test=ring3` makes a `syscall` that returns to 2^47, and the kernel leaves by `iretq` to RIP 0 ([Exit](#exit)). From memory |
 | H10 | An MTRR type of UC with a PAT type of WB gives UC; a PAT type of WC gives WC whatever the MTRR. Fixed-range MTRRs make the legacy hole at `0xA0000` UC. | M8, when the framebuffer is first mapped WC; M3 maps no page whose type depends on it |
-| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | M5, the first ring-3 code; M3 sets CR4.UMIP when CPUID reports it |
+| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | Checked in M5 on QEMU for `sgdt`: under `-cpu max`, which has UMIP, `test=ring3` runs `sgdt` in ring 3 and takes #GP with error 0. The other four are from memory. M3 sets CR4.UMIP when CPUID reports it; on Hyper-V, open until the M5 Hyper-V check boots `test=ring3` |
 | H12 | CPUID: leaf 1 EDX bit 13 PGE, bit 16 PAT; leaf `0x8000_0001` EDX bit 20 NX; leaf 7.0 EBX bit 7 SMEP, bit 20 SMAP; leaf 7.0 ECX bit 2 UMIP. | Checked in M3: `l4core::cpu` reads these bits, and the boots agree with H1 (`qemu64` lacks exactly SMEP, SMAP and XSAVE in `cpu_refuse`; `-cpu max,la57=off` has all seven in `hello`) |
-| H13 | The CPU may fill TLB and paging-structure-cache entries at any time, in any ring, from any present entry reachable from CR3, including for speculative accesses that never retire (SDM vol. 3, 4.10.2.3). So a flush must follow the entry write it covers, never precede it. | M5 |
+| H13 | The CPU may fill TLB and paging-structure-cache entries at any time, in any ring, from any present entry reachable from CR3, including for speculative accesses that never retire (SDM vol. 3, 4.10.2.3). So a flush must follow the entry write it covers, never precede it. | As H5; `Flush` is returned by the operation that wrote the entry, so the order holds by construction |
 | H14 | CPUID leaf 7.0 EDX bit 29 says `IA32_ARCH_CAPABILITIES` (MSR `0x10A`) exists; its bit 0, `RDCL_NO`, says the CPU is not open to Meltdown (rogue data cache load). | Checked in M3: TCG's `-cpu max` does not report the MSR, so QEMU boots print `unknown`; the owner's Hyper-V host reports it with `RDCL_NO` set, `cpu: meltdown: not vulnerable` |
 
 ### Rings and segments
 
 M3 loads this GDT; M5, which adds system calls, writes `IA32_STAR` =
-`0x0013_0008_0000_0000`.
+`0x0013_0008_0000_0000` in the same boot step ([Descriptor tables and
+MSRs](#descriptor-tables-and-msrs)).
 
 | Index | Offset | Selector used | Descriptor |
 | --- | --- | --- | --- |
@@ -179,7 +180,7 @@ M3 loads this GDT; M5, which adds system calls, writes `IA32_STAR` =
 | CR4.UMIP | M3 | run without it | it hides the GDT, IDT and TSS addresses [H11], which are fixed and public in microL4 (no KASLR), so it protects nothing; on when present as hygiene |
 | CR4.PCIDE | never set | | PCID is off in v0 ([Address spaces](#address-spaces)) |
 | CR4.LA57 | never set | the loader refuses (`docs/boot.md`) | 4-level paging only |
-| XSAVE (CPUID.1:ECX bit 26) | M3 checks it; M5 sets CR4.OSXSAVE and XCR0 | refuse to boot | eager FP switching ([FP and SIMD](#fp-and-simd)) |
+| XSAVE (CPUID.1:ECX bit 26) | M3 checks it; M5 sets CR4.OSXSAVE and XCR0 in boot step 3 (`fpu::init`) | refuse to boot | eager FP switching ([FP and SIMD](#fp-and-simd)) |
 
 "Refuse to boot" means that M3 checks CPUID [H12] before it changes any
 state and panics with one line, `CPU lacks <features>`, naming every missing
@@ -191,7 +192,10 @@ SMAP and XSAVE [H1], so from M3 xtask's `base_command()` passes
 `cpu_refuse` scenario boots `-cpu qemu64`. `tools/hyperv/New-L4Vm.ps1` turns
 processor compatibility mode off, and the M3 Hyper-V check confirms SMEP and
 SMAP [H2]. The M3 boot summary prints the CPUID features the kernel requires and
-the Meltdown line below.
+the Meltdown line below. From M5 its `cpu:` line reads `CR0 0x80010033 CR4
+0x340ee8 EFER 0xd01` on QEMU: M3's CR4 with OSFXSR, OSXMMEXCPT and OSXSAVE
+added, and EFER with SCE ([FP and SIMD](#fp-and-simd), [Descriptor tables and
+MSRs](#descriptor-tables-and-msrs)).
 
 ### The kernel half
 
@@ -200,7 +204,7 @@ the Meltdown line below.
 | 0 to 255 | `[0, 0x0000_8000_0000_0000)` | user mappings; empty in the kernel PML4 | | |
 | 256 | `PHYS_MAP_BASE` + `[0, min(phys_map_size, 64 GiB))` | the direct map | 2 MiB; 4 KiB over the kernel image | RW, NX, global; WB or UC by the rules below; the image's `.text` and `.rodata` read-only |
 | 257 to 510 | | nothing | | |
-| 511 | `KERNEL_VIRT_BASE` to `__kernel_end` | the kernel image | 4 KiB | `.text` and `.hvcall` RX, `.rodata` R, `.data` and `.bss` RW NX; global, WB; a hole under each stack |
+| 511 | `KERNEL_VIRT_BASE` to `__kernel_end` | the kernel image | 4 KiB | `.text` and `.hvcall` RX, `.rodata` R, `.rootimage` R NX until boot step 8 unmaps it, `.data` and `.bss` RW NX; global, WB; a hole under each stack |
 | 511 | `KERNEL_DEVICE_BASE` = `0xFFFF_FFFF_FFE0_0000` to the top | the kernel device window | 4 KiB | RW, NX, global, UC (PAT index 3) |
 
 - **Direct-map cache types.** A 2 MiB page is WB if it overlaps a RAM-like
@@ -258,7 +262,9 @@ the Meltdown line below.
   the image; the builder refuses tables outside the image's data. Every
   kernel entry has Accessed preset, and every writable kernel leaf Dirty, as
   Linux presets them, so the CPU never writes the kernel's tables and the
-  kernel reads them after boot as plain shared data.
+  kernel reads them after boot as plain shared data. The kernel itself
+  writes them once after M3: boot step 8 clears the PTEs of `.rootimage`
+  (`arch::paging::unmap_rootimage`).
 - **Bounds.** The direct map covers at most 64 GiB: the loader allocates below
   64 GiB, M3 panics if the kernel image, the handoff or its memory map ends
   above the direct map, and RAM above it becomes no untyped
@@ -270,12 +276,19 @@ the Meltdown line below.
   and unless `.text` (with `.hvcall`), `.rodata` and `.data` (with `.bss` and
   the stacks) tile `[KERNEL_VIRT_BASE, KERNEL_VIRT_BASE + kernel_size)` in
   that order with no gap: `l4core::vspace::KernelLayout` names those three
-  ranges, so M5's `.rootimage` must add its own.
+  ranges and, from M5, `.rootimage`'s, which `KernelLayout::check` requires
+  to be whole pages of rodata. `kernel/linker.ld` puts it at the end of
+  rodata, so `__rodata_end` equals `__rootimage_end`. The table builder maps
+  it R at `KERNEL_VIRT_BASE` and RW in the direct map; without that field the
+  direct map would map it read-only, and resetting the untyped that cover
+  it after step 8 would fault in ring 0.
 - **Sharing.** Kernel PML4 entries 256 and 511 point at the kernel's PDPTs
   with U/S = 0. Retyping a PML4 copies entries 256 to 511 from the kernel
   PML4, as seL4's `copyGlobalMappings` copies its kernel slots (511 only, or
   from the TLB-bitmap slot below it on SMP: `TLBBITMAP_PPTR`,
-  `src/arch/x86/64/kernel/vspace.c`). The kernel writes its PML4 only
+  `src/arch/x86/64/kernel/vspace.c`). The copy is the `init_object` hook's
+  (`l4core::vspace::init_pml4`); boot step 8 calls the hook on the root
+  PML4, which is not retyped. The kernel writes its PML4 only
   in the M3 boot sequence, before any PML4 can be retyped, and no invocation
   can write a slot above 255 ([user range](#user-address-range)), so every
   PML4's upper half stays equal to the kernel's. A later change to the kernel
@@ -341,21 +354,21 @@ in `STATUS.md`, and M10 lists the risk. TCG's `-cpu max` does not report
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| User code runs only in ring 3 and in 64-bit mode | the GDT has no DPL-3 32-bit code descriptor and there is no LDT; user CS and SS are fixed selectors, never taken from user registers | M3, M5 |
+| User code runs only in ring 3 and in 64-bit mode | the GDT has no DPL-3 32-bit code descriptor and there is no LDT; user CS and SS are fixed selectors, never taken from user registers: `l4core::entry::exit_frame` writes constants, and `test=ring3` finds them in every frame from ring 3 | M3, M5 |
 | The kernel never runs without NX, PGE, PAT, SMEP, SMAP and XSAVE | `arch::check_cpu` before any other M3 step; the `cpu_refuse` scenario boots `qemu_args: -cpu qemu64` and expects one `CPU lacks` line naming SMEP, SMAP and XSAVE | M3 |
 | CR0.WP, EFER.NXE, CR4.SMEP, CR4.SMAP and CR4.PGE are set before the first user instruction and never cleared | M3 init; the boot summary prints CR0, CR4 and EFER and a scenario matches the line | M3 |
 | Every boot states its Meltdown exposure | M3 prints `cpu: meltdown: vulnerable`, `not vulnerable` or `unknown` from `RDCL_NO`; a scenario matches the line; the Hyper-V check records it in `STATUS.md`; M10 lists the accepted risk | M3, M10 |
-| Kernel code always runs with RFLAGS.AC = 0 and DF = 0 | `IA32_FMASK` includes AC and DF; `clac` and `cld` at every exception and interrupt entry; review of `arch` entry code | M3, M5 |
+| Kernel code always runs with RFLAGS.AC = 0 and DF = 0 | `IA32_FMASK` includes AC and DF; `clac` and `cld` at every exception and interrupt entry; review of `arch` entry code; `test=ring3` reads RFLAGS at every entry from ring 3, one of them a `syscall` with DF and AC set | M3, M5 |
 | The kernel never executes `stac` | CI grep over `kernel/` | M3 |
-| Ring 3 cannot use I/O ports directly | IOPL 0 in every user RFLAGS (`IA32_FMASK`, register writes sanitise it); the TSS denies every port | M3, M5 |
-| Every upper-half translation is supervisor-only; no user-accessible translation is global | kernel PML4 entries 256 to 511 have U/S = 0; the `core` leaf encoder always sets U/S and never sets G | M3, M5 |
-| Every PML4's entries 256 to 511 equal the kernel PML4's | PML4 retype copies them; the kernel PML4 is written only in the M3 boot sequence; user mappings end below `USER_TOP` | M3, M5 |
-| No address space contains the loader's 1:1 map | the kernel PML4's lower half is empty after M3's CR3 switch and PGE toggle; PML4 retype copies only entries 256 to 511 | M3, M5 |
+| Ring 3 cannot use I/O ports directly | IOPL 0 in every user RFLAGS (`exit_frame` clears it at every exit, and `l4core::regs::sanitise` at every register write); the TSS denies every port | M3, M5 |
+| Every upper-half translation is supervisor-only; no user-accessible translation is global | kernel PML4 entries 256 to 511 have U/S = 0; the `core` leaf encoder always sets U/S and never sets G; `test=vspace` walks a mapped user page and finds it user and not global | M3, M5 |
+| Every PML4's entries 256 to 511 equal the kernel PML4's | the `init_object` hook copies them into every new PML4 and the root PML4 (host test `a_new_pml4_gets_the_kernel_half_and_nothing_else`, `test=vspace`); the kernel PML4 is written only in the M3 boot sequence, and step 8 changes only a page table below it; user mappings end below `USER_TOP`; `arch::paging::set_vm_root` checks entries 256 and 511, and every one in debug builds, before it loads a PML4 | M3, M5 |
+| No address space contains the loader's 1:1 map | the kernel PML4's lower half is empty after M3's CR3 switch and PGE toggle; `init_pml4` copies only entries 256 to 511 | M3, M5 |
 | The kernel reaches device registers only through the UC device window, and no 2 MiB direct-map page holding a kernel device page or no RAM is WB | the M3 table builder; `l4core::vspace::direct_map_type`, host tests on the QEMU and Hyper-V memory maps and MADTs; M4 makes no RAM untyped from a 2 MiB page holding a kernel device page | M3, M4 |
 | The page below the kernel stack and below each of the four IST stacks is unmapped | linker-script holes; the M3 table builder skips them; a scenario overflows the kernel stack and expects the double-fault report | M3 |
 | No mapping of kernel text or read-only data is writable, and no mapping of kernel data is executable; the one exception is the direct-map alias of `.rootimage`, which is writable and never executed | M3 image tables from the linker sections; the direct map's 4 KiB pages over the image; CR0.WP; NX required; a host test of the table builder over each alias | M3 |
 | The kernel image, the handoff and its memory map lie inside the direct map | the loader allocates below 64 GiB; M3 panics otherwise | M3 |
-| The kernel image, `.rootimage` included, is at most 16 MiB | `kernel/linker.ld` assertion (M3); xtask strips `root` and checks the size | M3, M5 |
+| The kernel image, `.rootimage` included, is at most 16 MiB | `kernel/linker.ld` assertion (M3); xtask strips `root` before the kernel embeds it and checks the built kernel against `KERNEL_IMAGE_MAX` (`xtask/src/compile.rs`) | M3, M5 |
 
 ### Compared with seL4
 
@@ -412,8 +425,19 @@ representation](#capability-representation)) holds the type, the object
 address, the size, the rights and the `device` bit; the mapping record
 (`mapped`, `table`, and `vaddr` or `index`: at most 59 bits) is its one `data`
 word. Paging structures and the tables they sit in are always RAM inside the
-direct map, so 23 bits of an 8 KiB-aligned address suffice. Derivation rules,
-which the capability core applies in M2:
+direct map, so 23 bits of an 8 KiB-aligned address suffice. The record is 0
+when the capability is unmapped (`l4core::vspace::paging`, `FrameMapping`
+and `TableMapping`):
+
+| Bits | Frame | PDPT, PageDirectory, PageTable |
+| --- | --- | --- |
+| 0 | `mapped`, 1 | `mapped`, 1 |
+| 1 to 23 | `table >> 13` | parent `table >> 13` |
+| 24 to 58 | `vaddr >> 12` | `index`, bits 24 to 32 |
+
+Recording a table at or above `STRUCTURE_LIMIT` = 2^36 (64 GiB, the direct
+map's bound) panics, and so does reading a non-zero record without bit 0.
+Derivation rules, which the capability core applies in M2:
 
 - Copying or minting a frame capability gives an unmapped capability, as in
   seL4 (`Mode_deriveCap`). Each copy maps at most one page. Sharing memory
@@ -431,7 +455,11 @@ which the capability core applies in M2:
   back-reference in its table to the new slot. The capability core's
   `Kernel` trait has `moved(cap, old_slot, new_slot)`, called after
   `CNode_Move`, `CNode_Mutate`, both halves of `CNode_Rotate`, the Rotate
-  swap, every Zombie swap and `CNode_SaveCaller`. M2 defines and calls the hook; M5 fills it in.
+  swap, every Zombie swap and `CNode_SaveCaller`. M2 defines and calls the
+  hook; M5 fills it in (`arch::paging::moved`, over
+  `l4core::vspace::moved`), which checks the link from the old slot and
+  that the new slot holds the capability before it rewrites the
+  back-reference.
 
 ### Back-references instead of ASIDs
 
@@ -466,7 +494,12 @@ mismatch. Before writing through a capability's mapping (`T`, `i`), the
 kernel checks that `T.backref[i]` names the capability's own slot; before
 acting on `T.backref[i]` = `S`, it checks that `S` holds a capability whose
 mapping is (`T`, `i`) and whose object entry `i` points at. One extra read
-turns a broken link into a panic instead of a write into reused memory.
+turns a broken link into a panic instead of a write into reused memory. Each
+step of a table walk checks the link of the entry it follows. The kernel's
+`finalise` hook is not told the deleted capability's slot, so for a mapped
+Frame or paging structure the paging code takes the slot its
+back-reference names, checks that the slot holds exactly that capability,
+then checks the link both ways.
 Whether a structure is empty, which Map requires, is a scan of its 512
 back-references (L1); 8 KiB leaves no room for a counter.
 
@@ -557,7 +590,7 @@ structure it does nothing.
 | A PDPT, PageDirectory or PageTable capability is deleted (always the only one) | as its `Unmap`: detach, then empty; child structures keep their own entries | CR3 reload |
 | A structure's parent is unmapped or deleted, which empties the parent | the structure becomes unmapped but keeps its own entries. It is unreachable, so no translation uses it; Map refuses it until its own `Unmap` empties it | the parent's |
 | A PML4 capability that is not the last is deleted | nothing; if it was the running thread's VSpace slot, the exit path loads the kernel PML4 | CR3 write at exit |
-| The last PML4 capability is deleted | if CR3 holds it, load the kernel PML4 first; then clear the mappings of the PDPT capabilities named by back-references 0 to 255 | CR3 write |
+| The last PML4 capability is deleted | if CR3 holds it, load the kernel PML4 first (`arch::paging::finalise`); then clear entries 0 to 255 and the mappings of the PDPT capabilities their back-references name (`l4core::vspace::finalise`, which returns `Flush::None`) | the CR3 write, if it was loaded; else none, since the TLB holds translations of the loaded PML4 only |
 | A mapped capability is moved | rewrite its back-reference | none |
 | An untyped is revoked | each descendant is deleted as above, with the revoke loop's preemption points between capabilities ([Slot operations](#slot-operations)) | as above |
 
@@ -590,38 +623,60 @@ VSpace drops at worst one unrelated translation of the loaded one, and a
 spurious CR3 reload costs a refill. A reviewer checks one thing: every `core`
 operation that clears or changes a present entry returns the flush the table
 names, and `arch` applies it after `core` returns and before returning to user
-mode. The flush must follow the entry write: the CPU may refill the TLB from a
-still-present entry at any moment, speculatively and in ring 0 [H13], so a
-flush issued first could be undone before the write. Returning `Flush` from
-the operation that wrote the entry gives that order by construction. A missed
-flush lets a thread keep using a frame after unmap; if the frame is then
-retyped into a kernel object, the thread can write that object. A missed
-reload after a table detach lets the CPU keep walking, and setting accessed
-and dirty bits in, a table whose memory may be retyped. TCG hides both
-(PLAN.md), so the host model below checks them.
+mode. An invocation returns only a `Reply`, so `l4core::vspace::invoke` hands
+its flush to `PagingStore::flush` inside the call, after the writes; the
+kernel's `finalise` and `moved` hooks apply theirs themselves. Both end in
+`arch::paging::apply`. The flush must follow the entry write: the CPU may
+refill the TLB from a still-present entry at any moment, speculatively and in
+ring 0 [H13], so a flush issued first could be undone before the write.
+Returning `Flush` from the operation that wrote the entry gives that order by
+construction. A missed flush lets a thread keep using a frame after unmap; if
+the frame is then retyped into a kernel object, the thread can write that
+object. A missed reload after a table detach lets the CPU keep walking, and
+setting accessed and dirty bits in, a table whose memory may be retyped. TCG
+hides both (PLAN.md), so the host model below checks them.
 
 ### Where the code lives
 
-- **`l4core::vspace`** (`core/`): the constants; entry encoding; range,
-  rights and attribute checks; the type of each direct-map page (M3); map,
-  remap, unmap, table unmap, deletion and the move hook, written against two
-  traits: `PagingStore`, which reads and writes an entry or a back-reference
-  of the structure at a physical address, and the capability core's slot
-  store (M2). Every operation returns a `#[must_use]` `Flush`: `None`,
-  `Page(vaddr)` or `All`. Host tests cover the bounds; a proptest runs random
-  map, remap, unmap, delete and move sequences against a model of the
-  mappings, checking L1 to L3 and the tree shape, and runs a TLB model that
-  caches every translation of the loaded PML4 before each step and checks,
-  after the step and its `Flush`, that no cached translation disagrees with
-  the tables.
-- **`kernel/src/arch/x86_64/paging.rs`**: `PagingStore` over the direct map;
+- `l4core::vspace` (`core/src/vspace.rs`): the constants; entry encoding; the
+  type of each direct-map page and the kernel's tables (M3).
+- `l4core::vspace::paging` (`core/src/vspace/paging.rs`, M5): the user half.
+  The mapping records; range, rights and attribute checks; map, remap, unmap,
+  table unmap, deletion (`finalise`) and the move hook (`moved`); a new PML4's
+  kernel half (`init_pml4`); `translate`, a walk for tests; and boot step 8's
+  helpers, `TableCounts::covering`, `map_boot_tables` and `map_boot_frame`. It
+  is written against two traits: `PagingStore`, which reads and writes an
+  entry or a back-reference of the structure at a physical address and applies
+  a flush, and the capability core's slot store (M2). Every operation that can
+  change a present entry returns a `#[must_use]` `Flush`: `None`,
+  `Page(vaddr)` or `All`. It is the only code that writes user entries,
+  back-references and mapping records.
+- `l4core::vspace::decode` (M5): the PDPT, PageDirectory, PageTable and Frame
+  labels, the label checked before the length and every later error in
+  `docs/abi.md`'s order; `l4core::invoke` sends those capabilities here, and a
+  PML4 capability has no invocations (`IllegalOperation`).
+- Tests: `paging_tests.rs` covers the bounds at both ends and around 2^47,
+  every error row, the record's extremes, each flush, and one test per broken
+  link that expects the panic. `model_tests.rs` is the proptest: 512 random
+  sequences of map, remap and unmap invocations through `l4core::invoke`, and
+  of deletes, revokes preempted at random points and restarted, copies, moves,
+  rotates and swaps through the capability core, with nested CNodes carrying
+  mapped capabilities into Zombie swaps. A model of the mappings predicts each
+  result and flush; after every step memory must equal the model, L1 to L3 and
+  the tree shape must hold, and a TLB model, which cached every translation of
+  the loaded PML4 before the step and before every hook, must agree with the
+  tables once the step's flushes are applied. Planted in M5, a missing
+  `invlpg`, a missing CR3 reload, a back-reference left unrewritten, a skipped
+  unmap and a wrong index each failed it.
+- `kernel/src/arch/x86_64/paging.rs`: `PagingStore` over the direct map;
   `apply(Flush)`, which holds the only `invlpg` and the only CR3 reload;
-  `set_vm_root`, the only other CR3 write after boot (thread switch and PML4
-  finalisation); the M3 table builder, the PAT and
-  CR4 setup. It reads the linker script's section bounds with `lea`, not as
-  addresses of `extern` statics: the compiler assumes distinct statics have
-  distinct addresses and folds `&__kernel_end == &__data_end` to false.
-  `cpu.rs` checks the features.
+  `set_vm_root`, the only other CR3 write after boot (every exit to a thread,
+  idling, and PML4 finalisation); the hooks `init_object`, `finalise` and
+  `moved`; `unmap_rootimage` (boot step 8); the M3 table builder, the PAT and
+  CR4 setup; and `test=vspace`. It reads the linker script's section bounds
+  with `lea`, not as addresses of `extern` statics: the compiler assumes
+  distinct statics have distinct addresses and folds
+  `&__kernel_end == &__data_end` to false. `cpu.rs` checks the features.
 
 | Part | Milestone |
 | --- | --- |
@@ -636,20 +691,20 @@ and dirty bits in, a table whose memory may be retyped. TCG hides both
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Every frame mapping lies in `[USER_MIN, USER_TOP)`; no invocation writes a PML4 entry above 255 | `l4core::vspace` range checks before any walk; host tests at both bounds and around 2^47 | M5 |
-| L1, L2 and L3 hold after every operation | one `core` module writes all entries, back-references and mapping fields; `moved(cap, old_slot, new_slot)` runs after every Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; the M2 proptest covers nested CNode deletion with mapped capabilities in slot 0 and random preemption, and M5 adds mapping state to the model | M2, M5 |
-| Every use of a back-reference or mapping field first checks the link in both directions, and a mismatch panics instead of writing | `l4core::vspace` link checks before each write through a link; a host test breaks a link and expects the panic | M5 |
-| A present entry points at a live object of the right kind | frames and structures detach before they die; L1 to L3; proptest | M5 |
-| A paging structure is mapped at most once, only when empty, and only into a structure reachable from a PML4, so mappings form trees | derivation refuses table capabilities; the Map checks; proptest | M2, M5 |
-| A frame capability maps at most one page; its copies start unmapped | derivation clears the mapping; Map refuses a mapped capability | M2, M5 |
-| A mapping's rights never exceed its capability's; every user-half leaf has U/S = 1 and G = 0 | `core` rights mask and leaf encoder; host tests | M5 |
-| No physical page is mapped both cacheable and uncacheable | the attribute check by `device`; M4 makes no device untyped from a WB direct-map page; host tests | M4, M5 |
+| Every frame mapping lies in `[USER_MIN, USER_TOP)`; no invocation writes a PML4 entry above 255 | the range checks of `l4core::vspace::paging::map_frame` and `map_table` run before any walk, and the table code asserts that no back-reference above 255 is used; host tests `frame_map_errors_in_abi_order` and `table_maps_ignore_the_low_bits_and_reach_the_top` at both bounds and around 2^47; `test=vspace` maps the highest page and is refused the page below the hole | M5 |
+| L1, L2 and L3 hold after every operation | `l4core::vspace::paging` writes all entries, back-references and mapping fields; `moved(cap, old_slot, new_slot)` runs after every Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; the M2 proptest covers nested CNode deletion with mapped capabilities in slot 0 and random preemption; M5's `model_tests.rs` proptest checks L1 to L3 against a model of the mappings after every step, through preempted revokes and Zombie swaps of mapped capabilities | M2, M5 |
+| Every use of a back-reference or mapping field first checks the link in both directions, and a mismatch panics instead of writing | `l4core::vspace::paging` checks the link before each write through it and at each walk step, and `finalise` checks that the slot a back-reference names holds exactly the deleted capability; seven host tests each break a link and expect the panic | M5 |
+| A present entry points at a live object of the right kind | frames and structures detach before they die: the `finalise` hook unmaps them while their slot still holds them (`arch::paging::finalise`); the link checks compare each entry with its capability's object and type; the `model_tests.rs` proptest | M5 |
+| A paging structure is mapped at most once, only when empty, and only into a structure reachable from a PML4, so mappings form trees | derivation refuses table capabilities; `map_table` refuses a mapped or non-empty structure (`InvalidCapability` 0) and walks from the PML4; host test `table_map_errors_in_abi_order`; the proptest checks the tree shape; `test=vspace` | M2, M5 |
+| A frame capability maps at most one page; its copies start unmapped | derivation clears the mapping; `map_frame` refuses a mapped capability (`InvalidCapability` 0; host test `frame_map_errors_in_abi_order`) | M2, M5 |
+| A mapping's rights never exceed its capability's; every user-half leaf has U/S = 1 and G = 0 | the rights mask in `l4core::vspace::paging` and the leaf encoders `user_pte` and `user_pde_2m`; host test `frame_rights_and_attributes_reach_the_entry`; `test=vspace` | M5 |
+| No physical page is mapped both cacheable and uncacheable | `Attributes::decode` allows a RAM frame only `WriteBack` and a device frame only `Uncached` or `WriteCombining`; M4 makes no device untyped from a WB direct-map page; host tests `the_attributes_word` and `frame_map_errors_in_abi_order` | M4, M5 |
 | Paging structures are made only from RAM untyped | the retype rule ([Retype](#retype)) | M2, M4 |
-| Every change to a present user entry is followed by its flush before the next user instruction | `Flush` returned by `core`, applied by `arch`; the TLB model in proptest; review; red-team brief 4 | M5, M10 |
-| The TLB holds user translations only for the PML4 in CR3 | CR4.PCIDE never set; CR3 written on every VSpace change | M3, M5 |
-| CR3 always holds the kernel PML4 or a live PML4 | PML4 finalisation switches CR3 first; the exit path recomputes CR3 from the thread's VSpace slot | M5 |
-| Unmapping or deleting any paging object touches at most 512 entries | `core` loops, no recursion | M5 |
-| A thread without a valid VSpace runs no user code | it runs on the kernel PML4, whose lower half is empty | M5 |
+| Every change to a present user entry is followed by its flush before the next user instruction | `Flush` returned by `core`, applied by `arch::paging::apply` inside the invocation (`PagingStore::flush`) or the hook; the TLB model in the proptest and `the_tlb_model_catches_a_missing_flush`; `test=vspace` remaps a page and deletes a mapped page table; review; red-team brief 4 | M5, M10 |
+| The TLB holds user translations only for the PML4 in CR3 | CR4.PCIDE never set; `set_vm_root` writes CR3 at every exit whose thread's PML4 differs from the loaded one | M3, M5 |
+| CR3 always holds the kernel PML4 or a live PML4 | `arch::paging::finalise` loads the kernel PML4 before the loaded PML4's last capability is finalised; every exit calls `set_vm_root` with the capability in the thread's VSpace slot, and the idle path with none; `test=vspace` deletes the loaded PML4's last capability | M5 |
+| Unmapping or deleting any paging object touches at most 512 entries | one loop over a structure's entries in `l4core::vspace::paging` (256 for a PML4), no recursion | M5 |
+| A thread without a valid VSpace runs no user code | `set_vm_root` loads the kernel PML4, whose lower half is empty, for anything in the VSpace slot but a PML4 capability | M5 |
 
 ### Compared with seL4
 
@@ -690,32 +745,64 @@ loaded from an ELF image embedded in the kernel, in ring 3 (M5).
 | --- | --- | --- |
 | 1 | M0 | `_start` zeroes BSS, switches to the kernel stack and calls `rust_entry`, which sets up COM1; from M7 only in debug kernels ([Debug](#debug)) |
 | 2 | M3 | CPU feature check: refuse to boot if a required feature is missing ([CPU features](#cpu-features)). `Handoff::validate`; panic if the kernel image, the handoff or its memory map ends above the kernel's direct map, `min(phys_map_size, 64 GiB)`, which the loader's 64 GiB allocation bound prevents ([ADR 0006](adr/0006-direct-map-bound.md)); then the handoff and its memory map (at most 256 regions, else panic) are copied into the static `BootState` (the kernel's own `.bss`; no CPU or firmware state changes before the feature check). No code reads `LOADER` memory after this, except the kernel image |
-| 3 | M3 | GDT, TSS, IDT ([Privilege levels](#privilege-levels)) and CR4.MCE; `IA32_GS_BASE` = the per-CPU area; DR7 = `0x400`, its reset value, no breakpoint enabled. The firmware's GDT, IDT and stack are now dead |
+| 3 | M3, M5 | GDT, TSS, IDT ([Privilege levels](#privilege-levels)) and CR4.MCE; `IA32_GS_BASE` = the per-CPU area; DR7 = `0x400`, its reset value, no breakpoint enabled. The firmware's GDT, IDT and stack are now dead. From M5, the syscall MSRs ([Descriptor tables and MSRs](#descriptor-tables-and-msrs), `entry::init`), then CR0, CR4 and XCR0 for x87 and SSE ([Control registers and XCR0 (M5)](#control-registers-and-xcr0-m5), `fpu::init`), so the entry is ready long before anything runs in ring 3 |
 | 4 | M3 | ACPI is parsed through the loader's direct map: the kernel device pages (the local APIC, at most four I/O APICs, the HPET), the ISA overrides and the ECAM ranges ([ACPI and the timer](#acpi-and-the-timer)). Then the kernel's page tables are built in `.bss`, with the kernel device window at `KERNEL_DEVICE_BASE`, and replace the loader's in the order [The kernel half](#the-kernel-half) gives (EFER.NXE and CR0.WP checked, `IA32_PAT`, the tables, CR4.SMEP, SMAP, PGE and UMIP, then CR3); the 1:1 map is gone |
 | 5 | M3 | Hyper-V's leftovers go first, since a synthetic timer the firmware left armed can interrupt, and the time-unhalted timer can raise an NMI ([Firmware leftovers](#firmware-leftovers-m3)); M3 records a hypercall page the firmware locked. Then the local APIC, with LINT0 masked before the PIC is reprogrammed, the PIC, the I/O APICs and the HPET are set up, and the local APIC timer and the TSC are calibrated in the same windows, giving `tsc_hz` ([Local APIC, PIC and I/O APIC (M3)](#local-apic-pic-and-io-apic-m3), [The timer](#the-timer)). The kernel device pages, the MSI window and a locked Hyper-V hypercall page are what step 6's plan keeps in `BootPlan.kernel_reserved`. Only now are `USABLE`, `LOADER` and `ACPI_RECLAIMABLE` pages free |
-| 6 | M4 | `l4core::boot::plan` sizes the boot region; the kernel allocates and zeroes it |
+| 6 | M4, M5 | `.rootimage`'s ELF is checked (`l4core::boot::image::RootImage::check`) and `l4core::boot::plan` sizes the boot region for its needs; the kernel allocates and zeroes it |
 | 7 | M4 | The root CNode is made in the boot region and the fixed capabilities written |
 | 8 | M5 | The root ELF is copied from `.rootimage` into image frames; its VSpace, IPC buffer and TCB are built. `.rootimage` is unmapped from the kernel window, ending with a CR4.PGE toggle ([The kernel half](#the-kernel-half)) |
 | 9 | M4 | `l4core::boot::untyped` computes the untyped; caps go into the CNode, descriptors and the rest of BootInfo into its frames |
-| 10 | M5 | Syscall MSRs are written, `IA32_FS_BASE` and `IA32_KERNEL_GS_BASE` get the root task's bases (0), and the kernel exits to the root task through `iretq` |
+| 10 | M5 | The root TCB goes to the scheduler, and the kernel leaves for it as every kernel entry ends ([Exit](#exit)): its FS and GS bases (0), its PML4 and its FP state are loaded, and it leaves by `iretq` |
 
-In M4, which has no root task, steps 6, 7 and 9 run, the kernel prints the
-BootInfo summary and the self-tests run instead of step 10.
-`boot::make_root_space` (`kernel/src/boot.rs`) runs the three steps in this
-order: `l4core::boot::plan` (step 6), the region zeroed through
-`arch::Objects`, `write_bootinfo` (step 9's untyped, slot plan and BootInfo
-fields, written straight into BootInfo's frames), then `write_root_cnode`,
-which puts the capabilities of steps 7 and 9 in the root CNode together. Each
-`BootError` is a panic with its reason; among them, `plan` refuses a memory
-map that is unsorted, overlapping or not 4 KiB granular, and a physical
-address width outside 32 to 52 bits. With nothing to build for a root task,
-the boot region holds only the root CNode, the IPC buffer frame and the two
-BootInfo frames, 140 KiB: `[0xfec0000, 0xfee3000)` on QEMU and
-`[0x1ff00000, 0x1ff23000)` on the recorded Hyper-V map. Slots 1, 3, 12, 13 and
-14 are null, the `user_image_paging` and `user_image_frames` regions are
-empty, `ipc_buffer`, `user_image_start` and `user_image_end` are 0, and the
-frames in slots 9, 10 and 16 are unmapped. Every boot-made capability is an
-original derivation root.
+The steps run in the order 6, 9, 7, 8, 10. `boot::make_root_space`
+(`kernel/src/boot.rs`) runs `RootImage::check` and `l4core::boot::plan`
+with the image's `RootNeeds` (step 6), zeroes the region through
+`arch::Objects`, then calls `write_bootinfo` (step 9's untyped, slot plan
+and BootInfo fields, written straight into BootInfo's frames) and
+`write_root_cnode`, which puts the capabilities of steps 7 and 9 in the root
+CNode together. Step 9 makes untyped that cover `.rootimage` before step 8
+has unmapped it, which is safe because no untyped can be used before the
+root task runs. Step 8 then:
+
+1. calls the `init_object` hook on the root PML4, which is not retyped, for
+   its kernel half;
+2. maps the paging structures, then each image frame, the IPC buffer and
+   BootInfo's two frames, in the order `l4core::boot::image::root_mappings`
+   gives (tables first), with `l4core::vspace::map_boot_tables` and
+   `map_boot_frame`, which write the mapping records `write_root_cnode`
+   leaves empty, and copies each image page's file bytes into its frame as
+   it maps it (`Objects::copy_into_frame`), the rest staying zero;
+3. unmaps `.rootimage` from the kernel window, clearing its PTEs and
+   toggling CR4.PGE (`RootImageSection::unmap`,
+   `arch::paging::unmap_rootimage`); from then on `arch::Objects`' debug
+   checks count its pages as memory kernel objects may occupy;
+4. makes the root TCB: the `init_object` hook (`tcb::init`, the FP template),
+   `tcb::init_root` ([Root-task entry state](#root-task-entry-state)), its
+   master reply capability inserted as a derivation root in its `reply` slot,
+   as retype gives every other TCB one, copies of root slots 2, 3 and 10 in
+   its slots 0 to 2, each its original's only child, and its IPC buffer
+   address.
+
+Step 10 is `boot::start_root_task`: `sched::make_runnable` on the root TCB,
+then `thread::exit_to_scheduled`. A `test=` the kernel knows runs instead of
+step 10 ([The `debug` feature](#the-debug-feature)). `RootSpace` keeps no
+reference to BootInfo: `make_root_space` returns one for the boot summary
+and the self-tests, and step 10 abandons it with the kernel stack, before
+the root task can write those frames. Each `BootError`, and each refusal of
+the root image, is a panic with its reason; among them, `plan` refuses a
+memory map that is unsorted, overlapping or not 4 KiB granular, and a
+physical address width outside 32 to 52 bits.
+
+The boot region now holds the root task's objects too. At the end of M5,
+with a root image of 39 pages, it is 332 KiB on QEMU,
+`[0xfea0000, 0xfef3000)`: the 128 KiB root CNode, the PML4, one PDPT, one
+page directory and one page table, the IPC buffer, BootInfo's two frames, the
+image frames and the TCB's page. Slot 1 holds the root TCB and slot 3 its
+PML4; slots 12, 13 and 14 are null until M9. The frames in slots 9, 10 and 16, the image
+frames and the paging structures are mapped. Every capability boot puts in
+the root CNode is an original derivation root. (M4, with no root task, had a
+140 KiB region: `[0xfec0000, 0xfee3000)` on QEMU and
+`[0x1ff00000, 0x1ff23000)` on the recorded Hyper-V map.)
 
 ### What each physical page becomes
 
@@ -799,20 +886,43 @@ another.
 
 ### Root-task image and address space
 
-`cargo xtask build` links `user/root` as a static ELF at `0x40_0000`,
-strips it, refuses one whose `PT_LOAD` segments span more than 8 MiB (from
-the first segment's page to the end of the last), and the kernel embeds it
-with `include_bytes!` in `.rootimage`, its own read-only, NX `PT_LOAD`
-segment between `__rootimage_start` and `__rootimage_end`, which starts and
-ends on a page boundary so that no other kernel byte shares its pages. From
-M5 xtask also checks the whole kernel image, `.rootimage` included, against
+`cargo xtask build` builds the user crates for `x86_64-unknown-none` in
+their own target directory, `target/user`, with `-C relocation-model=static
+-C code-model=small`, and links `user/root` as a static ELF at `0x40_0000`
+with `user/link.ld`, which gives text, read-only data and writable data each
+a `PT_LOAD` segment on pages of its own (`xtask/src/compile.rs`). It strips
+the ELF to its ELF header, program headers and segment bytes, zeroing the
+bytes between segments and dropping the section headers
+(`xtask/src/rootimage.rs`), and runs on it the check boot step 8 makes, so an
+image the kernel would refuse, among them one whose `PT_LOAD` segments span
+more than 8 MiB (from the first segment's page to the end of the last), fails
+the build. It writes the result to `target/xtask/rootimage/<profile>/root.elf`,
+and the kernel embeds that file, named by `MICROL4_ROOT_IMAGE`, with
+`include_bytes!` in `.rootimage`, its own read-only, NX `PT_LOAD` segment
+between `__rootimage_start` and `__rootimage_end`, which starts and ends on a
+page boundary so that no other kernel byte shares its pages. From M5 xtask
+also checks the whole kernel image, `.rootimage` included, against
 `KERNEL_IMAGE_MAX` = 16 MiB. Other servers travel inside root's image.
-Step 8 checks the image with `l4core::elf` (ET_EXEC, x86_64, no page shared
-by two segments) and `l4core::boot` (segments inside
-`[USER_MIN, USER_TOP - 12 KiB)`, span at most 8 MiB, no segment both writable
-and executable, entry in an executable segment), copies the file bytes,
-leaves the rest zero, and maps each page with its segment's permissions. A
-page inside the span that no segment covers gets no frame and no mapping.
+Step 8 checks the image with `l4core::boot::image::RootImage::check`:
+`l4core::elf` checks ET_EXEC, x86_64, that no page is shared by two segments
+and that the entry lies in an executable segment, and `RootImage::check`
+that every segment lies inside `[USER_MIN, USER_TOP - 12 KiB)`, that none is
+both writable and executable, and that the span is at most 8 MiB. Step 8
+copies the file bytes, leaves the rest zero, and maps each page with its
+segment's permissions. A page inside the span that no segment covers gets no
+frame and no mapping.
+
+The paging structures are those that translate `[image_start, image_end + 12
+KiB)`: one PDPT per 512 GiB, one page directory per 1 GiB and one page table
+per 2 MiB that the range touches, as seL4's `arch_get_n_paging` counts them
+(`RootImage::needs`; `l4core::vspace::map_boot_tables` refuses any other
+count). A 2 MiB region whose pages no segment covers still gets its page
+table. `l4core::boot::image::root_mappings` lists the root VSpace in slot
+order: every paging structure with the range it translates, then every frame
+with its page, its permissions and, for an image page, the file bytes it
+holds. Host tests check images across 2 MiB, 1 GiB and 512 GiB boundaries, the
+largest and the highest image, a gap between segments, and random images
+(`core/src/boot/image/tests.rs`).
 
 | Root virtual range | Content | Mapping |
 | --- | --- | --- |
@@ -820,8 +930,14 @@ page inside the span that no segment covers gets no frame and no mapping.
 | `image_end` | IPC buffer, one frame | RW, NX |
 | `image_end + 4 KiB` | BootInfo, two frames | RW, NX |
 
-There is no stack. As in seL4, root's `_start` in `libsys` switches to a
-stack in its own `.bss`.
+The kernel gives the root task no stack. As in seL4, root's `_start` in
+`libsys` switches to a stack of its own: 64 KiB in `.libsys_stack`, which
+`user/link.ld` makes a segment of its own one page above the segment below
+it. No segment covers that page, so nothing maps it, and a stack overflow
+faults instead of overwriting what lies below. Between `.bss` and it lie the
+root task's two 16 KiB thread stacks (`.thread_stack.0` and `.1`,
+`user/root/src/spawn.rs`), each a segment above a guard page in the same way.
+The image ends at the top of the libsys stack.
 
 ### Initial CSpace and BootInfo
 
@@ -844,8 +960,8 @@ derivation root, since the root TCB is never retyped (seL4 does the same in
 `l4core::boot::write_root_cnode` writes the root CNode: `root_cap` gives
 each slot's capability, and `cdt::insert_root` puts it in. Each is an
 original with full rights, every untyped has its watermark at its size, and
-every Frame and paging-structure capability is unmapped, so that M5 writes
-the mapping records of those it maps. From M9 the Hypervisor capability
+every Frame and paging-structure capability is unmapped, so that step 8
+writes the mapping records of those it maps. From M9 the Hypervisor capability
 comes in through `RootNeeds::hypervisor`, and only then are the SynIC frames
 laid out.
 
@@ -873,7 +989,9 @@ empty.
 `rip` = ELF entry, `rdi` = BootInfo, `rsp` and other registers 0, RFLAGS
 `0x202`, the FP template of [Initial state](#initial-state), priority and
 MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
-([Root-task entry state](abi.md#root-task-entry-state)).
+([Root-task entry state](abi.md#root-task-entry-state)). `tcb::init_root`
+sets them on a TCB `tcb::init` prepared, and `test=rootimage` reads them
+back.
 
 ### `core/` and `arch/`
 
@@ -882,11 +1000,14 @@ MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
 | Handoff copy into `BootState` (step 2) | `kernel/src/boot.rs`, reading through `arch::read_handoff` and `arch::read_memory_map` | M3 |
 | Steps 3 to 5 | `arch::init` (`arch/x86_64/mod.rs`) over `l4core::{trap, acpi, vspace, window, hyperv, apic, hpet, calibration, timer}`; from M4 it returns `BootFacts`, what steps 6 to 9 need, and sets up `arch::Objects` | M3, M4 |
 | BootInfo, `SlotRegion`, `UntypedDesc`, `InterruptInfo`, slot constants | `l4core::bootinfo`, compile-time asserts | M4 |
-| Boot plan and `kernel_reserved`, page classes, untyped computation, slot plan, BootInfo fields, root capabilities, root layout and ELF checks | `l4core::boot` (`plan`, `page_class`, `runs`, `chunks`, `untyped`, `slot_plan`, `fill_bootinfo`, `write_bootinfo`, `root_cap`, `write_root_cnode`); host tests on the recorded maps and proptest | M4, M5 |
-| The invariants below as checks, written from the rules apart from the planner: `check_plan`, `check_untyped`, `check_bootinfo`, `check_root_cnode` | `l4core::boot::check`, run by every host test and by `test=bootinfo`. `check_root_cnode` applies only right after boot, before any retype; `check_untyped` checks RAM coverage exactly, and device coverage is left to the comparison with the second implementation | M4 |
-| Steps 6, 7 and 9: the region zeroed, BootInfo and the root CNode written; from M5 the image frames | `boot::make_root_space` through `arch::Objects`, and `arch::bootinfo_frames(paddr)`, the one `unsafe` view of BootInfo's frames, a `&'static mut BootInfo` handed out once. From M5 the kernel must stop reading BootInfo through `RootSpace.bootinfo` before the root task can write those frames | M4, M5 |
+| Boot plan and `kernel_reserved`, page classes, untyped computation, slot plan, BootInfo fields, root capabilities | `l4core::boot` (`plan`, `page_class`, `runs`, `chunks`, `untyped`, `slot_plan`, `fill_bootinfo`, `write_bootinfo`, `root_cap`, `write_root_cnode`); host tests on the recorded maps and proptest | M4 |
+| The root image's checks, `RootNeeds`, the root VSpace in slot order and the entry registers | `l4core::boot::image` (`RootImage::check`, `needs`, `root_mappings`), shared with xtask; host tests and proptest over random images | M5 |
+| The invariants below as checks, written from the rules apart from the planner: `check_plan`, `check_untyped`, `check_bootinfo`, `check_root_cnode` | `l4core::boot::check`, run by every host test and by `test=bootinfo`. `check_root_cnode` applies only right after boot, before any retype, and allows the two marks step 8 leaves: the mapping records of the frames and paging structures it mapped, and the root TCB's copy as the only child of root slots 2, 3 and 10 (host test `root_cnode_check_allows_what_step_8_leaves`); `check_untyped` checks RAM coverage exactly, and device coverage is left to the comparison with the second implementation | M4, M5 |
+| Steps 6 to 9: the region zeroed, BootInfo and the root CNode written, the root VSpace mapped, the image copied and the root TCB made | `boot::make_root_space` through `arch::Objects`, and `arch::bootinfo_frames(paddr)`, the one `unsafe` view of BootInfo's frames, a `&'static mut BootInfo` handed out once. `RootSpace` keeps no reference to BootInfo, which the root task can write | M4, M5 |
+| Step 10 | `boot::start_root_task`, then `arch::exit_to_scheduled` | M5 |
 | `test=bootinfo`: the four checks, then every descriptor against kernel memory found without the plan, from GDTR, IDTR, `IA32_GS_BASE`, CR3, the stack symbols and statics translated through the live page tables, and the device window's mapped pages; then the loaded direct map walked over every untyped: every RAM untyped mapped write-back and no device untyped in a write-back page | `kernel/src/selftest.rs`, `arch::kernel_memory` (`selftest` only) | M4 |
-| `.rootimage` section, unmap and flush | `kernel/linker.ld`, `arch` | M5 |
+| `.rootimage` section, unmap and flush | `kernel/linker.ld`; `arch/x86_64/rootimage.rs` (`take_rootimage` hands the section out once, and `RootImageSection::unmap` consumes it, so no borrow of its bytes outlives the mapping); `arch::paging::unmap_rootimage` | M5 |
+| `test=rootimage`: `.rootimage` gone from the kernel window and covered by RAM untyped, its direct-map alias writable; BootInfo naming the image; every image page mapped to a frame that holds what the ELF says with its segment's permissions (a hash step 8 made from the ELF, against the frames read through a walk of the root PML4); the IPC buffer and BootInfo after it; the root TCB as `docs/abi.md` says | `kernel/src/rootimage.rs` (`selftest` only) | M5 |
 
 ### Invariants
 
@@ -898,15 +1019,15 @@ MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
 | RAM untyped lie inside the direct map; no device untyped lies in a write-back direct-map page; no RAM untyped lies in a 2 MiB page holding a kernel device page | `l4core::boot::page_class` with `direct_map_type`; `check_untyped`; host tests on the QEMU and Hyper-V maps; `test=bootinfo` walks the loaded direct map over every untyped | M4 |
 | The kernel image, the handoff and its memory map lie below the direct map's end | the loader's 64 GiB `AllocateMaxAddress` bound; M3 check, panic otherwise | M3 |
 | The kernel image, `.rootimage` included, fits `KERNEL_IMAGE_MAX` = 16 MiB | `kernel/linker.ld` assert (M3); xtask strips `root` and checks the image (M5) | M3, M5 |
-| The root task never holds a capability to kernel memory: kernel image, stacks, descriptor tables, kernel page tables, kernel device pages, or the boot-region pages that hold its CNode, TCB and paging structures (as frames or untyped) | the plan excludes them from every untyped and frame; `test=bootinfo` checks every BootInfo descriptor against the kernel image, the stacks, descriptor tables, page tables and `BootState` in it, the device window's pages, the boot region, the MSI window and `[0, 1 MiB)` | M4, M5 |
+| The root task never holds a capability to kernel memory: kernel image, stacks, descriptor tables, kernel page tables, kernel device pages, or the boot-region pages that hold its CNode, TCB and paging structures (as frames or untyped) | the plan excludes them from every untyped and frame; `test=bootinfo` checks every BootInfo descriptor against the kernel image but `.rootimage`, which step 8 reclaimed, the stacks, descriptor tables, page tables and `BootState` in it, the device window's pages, the boot region, the MSI window and `[0, 1 MiB)` | M4, M5 |
 | No `USABLE`, `LOADER` or `ACPI_RECLAIMABLE` page outside the kernel image is written or handed out before step 5 ends: the firmware's GDT, IDT and stack, the loader's tables, ACPI and any firmware-enabled Hyper-V overlay are dead by then | the step order in `kmain`; the boot plan (step 6) is the first allocator, and `arch::Objects` panics if used before `arch::init` ends; review | M3, M4 |
 | Boot never drops memory silently: it panics if the untyped or slots do not fit | `BootError::TooManyUntyped` and `TooManySlots` from `l4core::boot`; `check_untyped` requires the RAM untyped to cover every byte the rules allow; host tests on the recorded maps and `more_untyped_than_bootinfo_holds` | M4 |
 | BootInfo's layout is identical in the kernel and in `libsys` | one `l4core::bootinfo` type; compile-time offset and size asserts in each build | M4 |
 | Slot `untyped.start + i` holds the untyped `untyped_list[i]` describes, for every `i` below `untyped.end - untyped.start`; every slot in `empty` is null | `slot_plan`, `root_cap` and `write_root_cnode`; `check_bootinfo` and `check_root_cnode` in host tests and `test=bootinfo` | M4 |
 | After step 2 no code reads `LOADER` memory other than the kernel image | `BootState` copy; review | M3 |
-| No page of `.rootimage` is mapped in the kernel window when it becomes untyped | step 8 unmaps and toggles CR4.PGE before step 9 | M5 |
-| The root image cannot map outside `[USER_MIN, USER_TOP)` or make writable text: a writable and executable segment is refused; a page no segment covers is not mapped | `l4core::elf` and `l4core::boot` checks; host tests with a gap between segments | M5 |
-| The root task starts with the registers, priority and capabilities [`abi.md`](abi.md#boot-and-the-root-task) lists | M5 scenario: root prints them and checks slot types | M5 |
+| No page of `.rootimage` is mapped in the kernel window once anything can use the untyped that cover it | step 9 makes those untyped before step 8 unmaps `.rootimage`, but nothing can use an untyped before the root task runs; step 8 clears its PTEs and toggles CR4.PGE (`arch::paging::unmap_rootimage`) before step 10; `test=rootimage` finds it gone from the kernel window and covered by RAM untyped | M5 |
+| The root image cannot map outside `[USER_MIN, USER_TOP)` or make writable text: a writable and executable segment is refused; a page no segment covers is not mapped | `l4core::boot::image::RootImage::check` with `l4core::elf`, run by xtask on every build and by step 8; host tests `segments_must_lie_inside_the_user_range`, `a_writable_and_executable_segment_is_refused`, `a_page_between_segments_gets_no_frame` and proptest `random_images_load_as_their_segments_say`; `test=rootimage` checks every image page's contents and permissions | M5 |
+| The root task starts with the registers, priority and capabilities [`abi.md`](abi.md#boot-and-the-root-task) lists | `tcb::init_root` and step 8; `test=rootimage` reads the root TCB back (`Running` at the entry with `rdi` BootInfo, RFLAGS `0x202`, priority and MCP 255, its IPC buffer, copies of root slots 2, 3 and 10 and its master reply capability), and `test=root` prints BootInfo's slot regions from ring 3 | M5 |
 
 ### Compared with seL4
 
@@ -929,28 +1050,29 @@ MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
 
 ## Kernel entry and exit
 
-Every entry from ring 3 runs `swapgs`, builds one trap frame at the top of
-the single kernel stack and copies it into the current TCB; every exit
-rebuilds the frame from the next thread's TCB and leaves by `sysretq` only if
-that thread entered by `syscall`, else by `iretq`, with RIP always below
-2^47. NMI, #DF, #MC and #DB run on their own IST stacks and never read GS.
+Every entry from ring 3 runs `swapgs`, builds one trap frame at the top of the
+single kernel stack and copies it into the current TCB; every exit rebuilds
+the frame from the next thread's TCB and leaves by `sysretq` only if that
+thread entered by `syscall` and returns below 2^47, else by `iretq`, with RIP
+always below 2^47. NMI, #DF, #MC and #DB run on their own IST stacks and never
+read GS.
 
 ### Descriptor tables and MSRs
 
-The GDT is the one in [Rings and segments](#rings-and-segments): null,
-kernel code `0x08`, kernel data `0x10`, user data `0x18` (selector `0x1B`),
-64-bit user code `0x20` (`0x23`), TSS `0x28`, no 32-bit code descriptor.
-`syscall` loads CS =
-`STAR[47:32]`, SS = CS + 8; `sysretq` loads SS = `STAR[63:48]` + 8, CS =
-`STAR[63:48]` + 16, with RPL 3 (from memory; check in M5). That forces the
-order: kernel data right after kernel code, then user data, then 64-bit user
-code. `STAR[63:48]` names index 2 with RPL 3, `0x13`, which is right whether
-or not `sysretq` forces RPL 3. The selectors are loaded with fixed hidden
-attributes, not read from the GDT; the GDT entries matter for `iretq`. The
-GDT's limit is `0x37`, its seven entries less one byte, not the size of the
-16-byte-aligned static that holds them, whose padding would make selector
-`0x38` look valid: a selector past the TSS descriptor raises #GP, as the
-`trap_general_protection` scenario shows.
+The GDT is the one in [Rings and segments](#rings-and-segments): null, kernel
+code `0x08`, kernel data `0x10`, user data `0x18` (selector `0x1B`), 64-bit
+user code `0x20` (`0x23`), TSS `0x28`, no 32-bit code descriptor. `syscall`
+loads CS = `STAR[47:32]`, SS = CS + 8; `sysretq` loads SS = `STAR[63:48]` + 8,
+CS = `STAR[63:48]` + 16, with RPL 3 (checked in M5 on QEMU: after a `sysretq`
+exit, `test=ring3`'s next exception frame, which the CPU pushed, holds CS
+`0x23` and SS `0x1B`). That forces the order: kernel data right after kernel
+code, then user data, then 64-bit user code. `STAR[63:48]` names index 2 with
+RPL 3, `0x13`, which is right whether or not `sysretq` forces RPL 3. The
+selectors are loaded with fixed hidden attributes, not read from the GDT; the
+GDT entries matter for `iretq`. The GDT's limit is `0x37`, its seven entries
+less one byte, not the size of the 16-byte-aligned static that holds them,
+whose padding would make selector `0x38` look valid: a selector past the TSS
+descriptor raises #GP, as the `trap_general_protection` scenario shows.
 
 | Register | Value | Why |
 | --- | --- | --- |
@@ -958,10 +1080,20 @@ GDT's limit is `0x37`, its seven entries less one byte, not the size of the
 | `IA32_STAR` (`0xC000_0081`) | `0x0013_0008_0000_0000`, as in [Rings and segments](#rings-and-segments) | entry CS `0x08`, SS `0x10`; exit SS `0x13 + 8 = 0x1B`, CS `0x13 + 16 = 0x23` |
 | `IA32_LSTAR` (`0xC000_0082`) | `syscall_entry` | |
 | `IA32_CSTAR` (`0xC000_0083`) | `compat_entry`: `swapgs`, load the kernel stack, panic | unreachable, since no compatibility-mode code segment exists; if reached, it never runs on the user stack |
-| `IA32_FMASK` (`0xC000_0084`) | `0x0025_7FD5`: CF PF AF ZF SF TF IF DF OF IOPL NT RF AC ID, seL4's `FLAGS_SYSCALL_MASK` | IF: the kernel runs with interrupts off. DF: Rust assumes it clear for string operations. TF: no single-step trap inside the kernel. AC: with AC set SMAP is off in ring 0. NT: a later `iretq` with NT set would attempt a task return and fault (from memory). The rest gives a defined state |
-| `IA32_SYSENTER_CS` (`0x174`), `_ESP`, `_EIP` | 0 | firmware may leave them set; with CS 0, `sysenter` faults in ring 3 on Intel and is #UD in long mode on AMD (from memory; check in M5) |
+| `IA32_FMASK` (`0xC000_0084`) | `0x0025_7FD5`: CF PF AF ZF SF TF IF DF OF IOPL NT RF AC ID, seL4's `FLAGS_SYSCALL_MASK` | IF: the kernel runs with interrupts off. DF: Rust assumes it clear for string operations. TF: no single-step trap inside the kernel. AC: with AC set SMAP is off in ring 0. NT: a later `iretq` with NT set would attempt a task return and fault (from memory). The rest gives a defined state. On QEMU a `syscall` with DF, NT and AC set enters with all three clear (`test=ring3`) |
+| `IA32_SYSENTER_CS` (`0x174`), `_ESP`, `_EIP` | 0 | firmware may leave them set; with CS 0, `sysenter` faults in ring 3 on Intel and is #UD in long mode on AMD (from memory; no M5 test runs `sysenter`) |
 | `IA32_GS_BASE` (`0xC000_0101`) | the per-CPU area while in ring 0 | |
 | `IA32_KERNEL_GS_BASE` (`0xC000_0102`) | the current thread's GS base while in ring 0 | swapped in by the exit `swapgs`; written at a thread switch ([FS and GS base](#fs-and-gs-base)) |
+| `IA32_TSC_AUX` (`0xC000_0103`) | 0, if CPUID reports `rdtscp` (`0x8000_0001` EDX bit 27) or `rdpid` (7 ECX bit 22) | both return it in ring 3 ([ADR 0025](adr/0025-user-tsc.md)), so the firmware's value must not reach a thread (`l4core::cpu::Cpuid::has_tsc_aux`) |
+
+`entry::init` (`arch/x86_64/entry.rs`) writes `IA32_STAR`, `IA32_LSTAR`,
+`IA32_CSTAR`, `IA32_FMASK`, the three SYSENTER MSRs and EFER.SCE in boot
+step 3, right after the GDT is loaded, and prints `entry: syscall_entry at
+<address>, IA32_STAR 0x13000800000000, IA32_FMASK 0x257fd5, EFER.SCE on,
+IA32_SYSENTER_CS 0`. It then writes `IA32_TSC_AUX` and prints it read back,
+`entry: IA32_TSC_AUX 0x0, which rdtscp and rdpid read in ring 3`
+(`test=ring3` expects it on QEMU's `-cpu max`), or `entry: no rdtscp or
+rdpid, so no IA32_TSC_AUX`.
 
 TSS: RSP0 = the kernel stack top; IST1 #DF, IST2 NMI, IST3 #MC, IST4 #DB, each
 8 KiB above an unmapped guard page; I/O map base past the limit, so ring 3 has
@@ -1040,25 +1172,60 @@ report) panic from either ring. Every stub, IST ones included, runs
 
 The Rust handlers read CR2 first for #PF, then copy the frame into the current
 TCB's `regs` ([Register frame and restart](#register-frame-and-restart)): for
-`syscall`, `next_ip` = `rcx`, `fault_ip` = `rcx` − 2, `exit` = `Sysret`;
-otherwise `next_ip` = `fault_ip` = the pushed RIP, `exit` = `Iret`. Then they
-dispatch, schedule and exit; nothing stays on the kernel stack between
-entries. The kernel has no SSE code (`kernel/src/main.rs`), so x87 and SSE
-state is untouched until a thread switch swaps it
-([Switching](#switching-m5)).
+`syscall`, `next_ip` = `rcx`, `fault_ip` = `rcx` − 2, `error` = 0, `exit` =
+`Sysret`; otherwise `next_ip` = `fault_ip` = the pushed RIP, `error` = the
+error code, `exit` = `Iret`. FS and GS base stay in their MSRs while the
+thread runs. Then they dispatch, schedule and exit; nothing stays on the
+kernel stack between entries. The kernel has no SSE code
+(`kernel/src/main.rs`), so x87 and SSE state is untouched until a thread
+switch swaps it ([Switching](#switching-m5)).
+
+In code: `syscall_from_user` and `trap_from_user` make an
+`l4core::entry::UserEntry` of the frame with `classify`: `Syscall`,
+`Exception { vector, error, cr2 }` (CR2 kept for #PF only), `Interrupt` for a
+vector of 32 or more, or `Fatal` for NMI, #DF, #MC, a vector that cannot
+occur, or a frame not from ring 3, which panics. A #DB from ring 3 arrives on
+IST4; its frame stays there, and its handling moves to the top of the kernel
+stack first. `entry::from_user` hands the frame to one seam per kind of entry,
+`user_syscall`, `user_exception` and `user_interrupt`. Each saves the frame
+into the current thread's `regs` (`l4core::entry::save`), then hands the work
+to `crate::dispatch` ([System-call dispatch](#system-call-dispatch)) or, for
+an interrupt, to `irq::handle`, whose timer tick runs `sched::tick`, and ends
+with `thread::exit_to_scheduled` ([Exit](#exit)).
 
 ### Exit
 
-`exit_to_user(t)` writes the trap frame at the top of the kernel stack from
-`t.regs` through `l4core::entry::exit_frame`, a pure function:
+Every entry ends in `thread::exit_to_scheduled` (`arch/x86_64/thread.rs`):
+
+1. `sched::schedule` picks the thread to run, or none for the idle thread;
+   debug builds then check the scheduler with `sched::check_exit`.
+2. `tcb::activate`: a `Restart` thread continues at `fault_ip` and becomes
+   `Running`.
+3. If the thread is not the one whose FS and GS bases are in the MSRs, that
+   one's bases are read back into its TCB and the new one's written
+   ([FS and GS base](#fs-and-gs-base)).
+4. On every exit, `set_vm_root` with the capability in the thread's VSpace
+   slot, since `TCB_Configure` or `TCB_SetSpace` on the caller changes it
+   without a reschedule ([TLB maintenance](#tlb-maintenance)), and
+   `fpu::switch_to` ([Switching](#switching-m5)).
+5. `exit_to_user` with the thread's registers. With nothing runnable,
+   `set_vm_root` loads the kernel PML4 and `trap::idle` resets RSP to the
+   stack top and runs `idle_loop`: `sti; hlt` in a loop. The idle thread owns
+   no FP state and no bases, so A, idle, A switches neither.
+
+`exit_to_user(&regs)` writes the trap frame in its own stack frame from the
+registers, through `l4core::entry::exit_frame`, a pure function, and jumps to
+the exit stub with the frame as its stack:
 
 - `rip` = `next_ip`, `rsp` = `rsp`, each replaced by 0 if at or above
   `0x0000_8000_0000_0000`, the sanitiser's rule
   ([User register set and sanitising](#user-register-set-and-sanitising)). A
   debug
-  kernel prints a warning when this fires. Without a kernel bug it fires
-  only for an `rsp` the thread set itself, or for a `rip` restarted after a
-  fault on an upper-half fetch; otherwise a writer forgot to sanitise.
+  kernel prints a warning the first time each fires in a boot, not again,
+  since a thread can make the `rsp` one fire on every system call. Without
+  a kernel bug it fires only for an `rsp` the thread set itself, or for a
+  `rip` restarted after a fault on an upper-half fetch; otherwise a writer
+  forgot to sanitise.
 - `rflags` = `(rflags & 0x0024_0DD5) | 0x0202`: CF PF AF ZF SF TF DF OF AC
   ID, which ring 3 can set itself with `popfq`, are kept; IF and bit 1 are
   forced on; IOPL, NT, RF, VM, VIF and VIP are forced off (ring 3 can set NT
@@ -1067,7 +1234,14 @@ state is untouched until a thread switch swaps it
   does (`src/arch/x86/machine/registerset.c`). `exit_frame` applied after it
   changes nothing.
 - `cs` = `0x23`, `ss` = `0x1B`, constants, never from the TCB.
-- The path is `Sysret` if `t.regs.exit` is `Sysret`, else `Iret`.
+- The path is `Sysret` only if `exit` is `Sysret` and `next_ip` is below
+  2^47, else `Iret`. A `syscall` in the last bytes below 2^47, which
+  `USER_TOP` keeps unmapped, returns to 2^47: the thread leaves by `iretq`
+  to RIP 0, so RCX is never non-canonical at a `sysretq` even if a writer
+  forgot to sanitise (`test=ring3` maps that page to show it).
+- On the `Sysret` path the frame's `rcx` and `r11` are the RIP and RFLAGS
+  `sysretq` loads into them, so the frame is the thread's state after the
+  exit either way.
 
 ```
 exit_sysret:                    exit_iret:
@@ -1088,8 +1262,11 @@ register write sets `exit` = `Iret`
 ([Register frame and restart](#register-frame-and-restart)), as seL4's
 `Mode_postModifyRegisters` forces its interrupt path
 (`src/arch/x86/64/kernel/thread.c`). `Iret` is the zero value of `exit`, so a
-newly retyped TCB leaves by `iretq`. With nothing runnable, `exit_to_idle`
-resets RSP to the stack top and runs `idle_loop`: `sti; hlt` in a loop.
+newly retyped TCB leaves by `iretq`. A `sysretq` that restores TF traps at
+the return address, before the next instruction runs (QEMU, `test=ring3`),
+where an `iretq` that restores TF traps after one instruction (from memory).
+On QEMU `test=ring3` leaves by both many times, and checks every frame and
+register at the next entry.
 
 ### The non-canonical RCX problem
 
@@ -1105,13 +1282,14 @@ a `syscall` in the last mappable page returns below 2^47
 sanitised ([User register set and
 sanitising](#user-register-set-and-sanitising)). With constant CS and SS,
 canonical RIP and RSP and masked RFLAGS, `iretq` cannot fault in ring 0 either
-(from memory; check in M5).
+(from memory; on QEMU none of `test=ring3`'s `iretq` exits faults in ring 0,
+the one to RIP 0 included, whose fetch faults in ring 3).
 
 ### NMI, double fault, machine check and debug
 
 | Vector | Stack | From ring 3 | From ring 0 |
 | --- | --- | --- | --- |
-| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults); QEMU 8.2's TCG raises #UD for `int1` in ring 0, so M10 brief 5 rechecks `int1` from ring 3) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there; from memory, check in M5), `iretq` at once; otherwise panic |
+| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults); QEMU 8.2's TCG raises #UD for `int1` in ring 0, so M10 brief 5 rechecks `int1` from ring 3) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there) or the first instruction of the #BP stub (`mov ss` with TF set, then `int3`; below), `iretq` at once with the saved state unchanged (`l4core::entry::single_step_into_syscall_entry`, `single_step_into_breakpoint_stub`, `entry::return_to_kernel`); otherwise panic, on the #DB stub's own first instruction too. QEMU takes no trap at either: `test=ring3` runs a `syscall` with TF set, counts no ring-0 #DB, and takes the single step in ring 3 at the return address, and `test=redteam-movss` sees every `mov ss` probe's single step in ring 3. On Hyper-V, open until the M5 Hyper-V check boots `test=ring3` and `test=redteam-movss` |
 | 2, NMI | IST2 | panic | panic |
 | 8, #DF | IST1 | panic | panic |
 | 18, #MC | IST3 | panic | panic |
@@ -1131,8 +1309,28 @@ report instead of shutting down (from memory: TCG cannot raise a real machine
 check, and the `trap_machine_check` scenario enters the handler with
 `int 18`). OVMF already sets it (CR4 is `0x668` at handover, read under GDB
 in M3); the kernel sets it regardless. DR7 keeps its
-reset value `0x400`, no breakpoint enabled ([Invocations](#invocations)), so the
-single-step case is the only ring-0 #DB.
+reset value `0x400`, no breakpoint enabled ([Invocations](#invocations)), so
+a ring-0 #DB can only be a thread's own single step that the CPU carried into
+the kernel. A `syscall` with TF set may raise one at `syscall_entry`. A load
+of SS (`mov ss` or `pop ss`) holds a pending single step until the next
+instruction has finished, so with TF set, `mov ss` followed by an instruction
+that enters the kernel delivers the #DB on the entry's first instruction, in
+ring 0, with GS still the user's (CVE-2018-8897's mechanism, there with a data
+breakpoint; [the M5 red-team finding](redteam/m5-movss-db.md)). Only two
+instructions enter directly: `syscall`, at `syscall_entry`, and `int3`, at the
+#BP stub, the only gate with DPL 3. The #DB at the #BP stub is taken on IST4
+after the CPU pushed the #BP frame at the top of the kernel stack and cleared
+TF; the handler `iretq`s to the stub, which then enters as for any `int3`, its
+frame's ring-3 CS giving it its `swapgs`, and the thread gets UserException 3.
+The single step itself is dropped, as at `syscall_entry`. Every other ring-0
+#DB still panics. `int n` on a DPL-0 gate raises #GP, which drops the pending
+single step (Linux's `tools/testing/selftests/x86/mov_ss_trap.c` notes); and
+`mov ss; int1` raises a #DB from ring 3 into which, by the SDM's description of
+pending debug exceptions, the CPU folds the pending single step. A second #DB
+on the #DB stub's first instruction would have been delivered on IST4 over the
+first one's frame, so the kernel must never return from it, and panics. Both
+are open until the M5 Hyper-V check boots `test=redteam-movss`, whose probes
+2 (`int 0x80`) and 3 (`int1`) would panic if they were wrong.
 
 ### Interrupts and exceptions taken in ring 0
 
@@ -1142,7 +1340,10 @@ nested-interrupt path like seL4's `nested_interrupt`. A vector of 32 or more
 from ring 0 must have RIP inside `idle_loop`; its frame is discarded and the
 interrupt path runs ([Idle thread](#idle-thread)). Any other ring-0 vector is
 a kernel bug: panic with vector, error code, CR2, RIP, RSP and the decoded #PF
-bits (M3's page-fault scenario), without reading GS.
+bits (M3's page-fault scenario), without reading GS. After the interrupt
+path, `interrupt_from_idle` runs an M4 self-test's resume hook if one is
+installed, and otherwise `thread::exit_to_scheduled`, so a thread the
+interrupt woke, or one a preemption point cut short, runs on.
 
 ### System-call dispatch
 
@@ -1152,7 +1353,7 @@ the system call or none; none raises an `UnknownSyscall` fault
 
 | System call | Kernel action |
 | --- | --- |
-| `Call`, `Send`, `NBSend` | look up `rdi` (up to 64 bits, stopping at the first slot that is not a CNode) and dispatch on its type: Endpoint, Notification, Reply ([IPC](#ipc), [Notifications](#notifications)); any other object decodes `label` within its type's range ([Invocation label index](abi.md#invocation-label-index)), else `IllegalOperation`. `Call` gets the result or error as a kernel reply; `Send` and `NBSend` drop it |
+| `Call`, `Send`, `NBSend` | look up `rdi` (up to 64 bits, stopping at the first slot that is not a CNode), then, if the caller has a readable IPC buffer, the `extra_caps` pointers in `caps_or_badges`, and dispatch on the type of the capability `rdi` names: Endpoint, Notification, Reply ([IPC](#ipc), [Notifications](#notifications)); any other object decodes `label` within its type's range ([Invocation label index](abi.md#invocation-label-index)), else `IllegalOperation`, with MR0 to MR3 from the registers and MR4 and up from the IPC buffer. `Call` gets the result or error as a kernel reply; `Send` and `NBSend` drop it. Until M6 a Notification capability is a kernel object without invocations ([Decoding a system call](#decoding-a-system-call)) |
 | `Recv`, `NBRecv` | Endpoint or Notification receive ([Receive phase](#receive-phase), [Wait and poll](#wait-and-poll)) |
 | `Reply` | the caller slot's reply capability ([Reply capabilities](#reply-capabilities)) |
 | `ReplyRecv` | `Reply`, then `Recv` on `rdi` |
@@ -1163,6 +1364,41 @@ What each lookup or rights failure produces is in the table [Errors, faults
 and silent drops](abi.md#errors-faults-and-silent-drops). An operation that
 reaches a preemption point leaves the thread `Restart`, so it re-executes
 `syscall` from `fault_ip` with its argument registers unchanged.
+
+All of this is `l4core::syscall`, as functions of the current thread and its
+saved registers: `handle_syscall(e, debug)` and `handle_exception(e, vector,
+error, cr2)` return an `Outcome`, and `kernel/src/dispatch.rs` does what only
+the kernel can with it:
+
+| `Outcome` | The kernel's part |
+| --- | --- |
+| `Done` | nothing |
+| `Preempted` | counts the call, for the `dispatch:` line before `DEBUG HALT` ([Debug](#debug)) |
+| `Debug(PutChar(b))`, `Debug(Halt(status))`, `Debug(DumpScheduler)` | performs the debug system call for the current thread, whose registers stay as they are |
+| `Stopped(DoubleFault)` | a fault found no handler and the thread is `Inactive`; a debug kernel prints both faults and where the thread stopped |
+
+- The kernel's reply: after a successful invocation the kernel writes the
+  reply, `rsi` = `MessageInfo` with label 0 and the result length and
+  `rdi` = 0, and after a failed one the error reply, only for a `Call` whose
+  caller is still `Running`. ReadRegisters has already written its result
+  words as MR0 and up; a self-Suspend by `Call` writes its own empty reply
+  before it stops ([Suspend, Resume and
+  deletion](#suspend-resume-and-deletion)).
+- `invoked_by_call`: some TCB invocations act only for a `Call`:
+  ReadRegisters writes its results and a self-Suspend its reply. They ask
+  `Threads::invoked_by_call`, which is `l4core::syscall::invoked_by_call`:
+  whether the current thread's saved `rdx` is `Call`'s number. Every system
+  call preserves `rdx`, and no invocation writes its caller's, so the answer
+  holds for the whole invocation. With no current thread, a self-test's
+  invocation, it is false.
+- Where a preempted call takes its interrupt: the preemption point only polls
+  the IRR. The entry ends as every entry does: the scheduler picks a thread,
+  usually the caller again, and the pending interrupt is taken as soon as a
+  thread runs with IF = 1, which for the caller is at the `syscall`
+  instruction it is about to run again, or in `idle_loop`. Its handler runs,
+  the timer's tick included, and the caller re-executes its `syscall` when it
+  next runs. `test=root` shows this on QEMU: its first `Untyped_Retype` clears
+  the largest untyped and is preempted and restarted again and again.
 
 The decoder for Untyped and CNode capabilities, from M4, is
 `l4core::invoke::invoke(k, slot, &Message { label, mrs, extra_caps })`. The
@@ -1192,14 +1428,20 @@ Each is seL4's order except the `node_depth` 0 case
 ([Memory and retype](#memory-and-retype), Compared with seL4); seL4 decodes
 the two M6 methods.
 
-Before M5 nothing runs in ring 3, so only a self-test calls `invoke`, and it
-restarts a preempted call as a thread will. The preemption point polls the
+From M5 `invoke` takes a TCB capability to `l4core::tcb::invoke` and a Frame,
+PDPT, PageDirectory or PageTable capability to `l4core::vspace::invoke`, and
+needs `K: Kernel + PagingStore + Threads`; a Reply's `length` counts the
+result words, MR0 and up.
+
+Before M5 nothing ran in ring 3, so only a self-test called `invoke`, and it
+restarted a preempted call as a thread does. The preemption point polls the
 IRR and never enables interrupts; the `Preempted` call returns to the idle
 loop, which takes the interrupt, and after `irq::handle` the idle path calls
 a resume hook the test installed (`arch::set_resume_hook`). The hook restarts
 the call from its unchanged arguments, looking its slots up and decoding it
 again. A preemption the test injected with nothing pending waits for the
-next timer tick. M5's `schedule()` replaces the hook.
+next timer tick. M4's self-tests still restart their calls this way; without
+a hook, the idle path ends in `thread::exit_to_scheduled`.
 
 ### `core/` and `arch/`
 
@@ -1207,29 +1449,33 @@ next timer tick. M5's `schedule()` replaces the hook.
 | --- | --- | --- |
 | GDT, TSS, IDT, IST stacks, `PerCpu`, the stubs and their two shared entries, ring-0 exception decode, NMI, #DF, #MC handlers, idle loop and its interrupt path | `arch/x86_64/{gdt,idt,trap,irq}.rs` | M3 |
 | Descriptor encodings, the vector map, error-code and fatal-vector masks for the stubs, the trap frame and the fatal report | `l4core::trap`, host tests | M3 |
-| Syscall MSRs, `syscall_entry`, user trap entry, `exit_sysret`, `exit_iret` | `arch/x86_64/entry.rs` | M5 |
-| `Syscall::from_number`, `exit_frame` | `l4core::abi`, `l4core::entry`; host tests at `2^47 - 1`, `2^47`, `2^64 - 2^47`, and proptest over all `u64` | M5 |
+| Syscall MSRs (`init`), `syscall_entry`, `compat_entry`, `exit_sysret`, `exit_iret`, the ring-0 #DB return at `syscall_entry` and the #BP stub; the seams `user_syscall`, `user_exception`, `user_interrupt`; `exit_to_user`, `load_user_bases`, `save_user_bases` | `arch/x86_64/entry.rs`; `trap_from_user` in `trap.rs` hands ring-3 traps to it | M5 |
+| The end of every entry: `exit_to_scheduled`, the thread switch, idling on the kernel PML4 | `arch/x86_64/thread.rs` | M5 |
+| `Syscall::from_number`; `STAR`, `FMASK`, the RFLAGS masks, `classify`, `save`, `exit_frame`, `single_step_into_syscall_entry`, `single_step_into_breakpoint_stub` | `l4core::abi`, `l4core::entry`; host tests at `2^47 - 1`, `2^47`, `2^64 - 2^47`, and proptest over all `u64` | M5 |
+| Dispatch: `handle_syscall`, `handle_exception`, `Outcome`, `invoked_by_call` | `l4core::syscall`; host tests of every system call over fake memory | M5 |
+| What only the kernel does with an `Outcome`: debug system calls, the report of a stopped thread, the count of preempted calls | `kernel/src/dispatch.rs` | M5 |
+| `test=ring3`: the paths between ring 3 and the kernel, before any real thread exists, in 24 steps through a hook that takes every entry from ring 3 | `arch/x86_64/ring3.rs` (`selftest` only) | M5 |
 | The Untyped and CNode decoder: `invoke`, `Message`, `ExtraCap`, `Reply`, `InvokeError`, the labels in `invoke::label` | `l4core::invoke`; host tests of every error row and of errors that occur together, the depth limit, retype, revoke and delete preempted at every point and restarted by decoding again, and proptest over random messages | M4 |
-| The resume hook on the idle path, after `irq::handle`, which restarts a self-test's preempted call until M5's `schedule()` replaces it | `arch/x86_64/trap.rs` (`interrupt_from_idle`, `set_resume_hook`), `selftest` only | M4 |
+| The resume hook on the idle path, after `irq::handle`, which restarts an M4 self-test's preempted call; without one, the idle path ends in the scheduler | `arch/x86_64/trap.rs` (`interrupt_from_idle`, `set_resume_hook`), `selftest` only | M4 |
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| `sysretq` never runs with RCX at or above 2^47 | `l4core::entry::exit_frame`; host tests and proptest; M10 brief 5 scenario: `syscall` in the last mappable page, and WriteRegisters with a non-canonical RIP | M5, M10 |
-| `sysretq`, `iretq` and the FS and GS base `wrmsr`s at a switch cannot fault in ring 0 | `exit_frame` (constant CS and SS, canonical RIP and RSP, masked RFLAGS); the FS and GS base sanitiser ([FS and GS base](#fs-and-gs-base)) | M5 |
-| User code always runs with IF = 1, IOPL = 0, NT = 0 and the user selectors | `exit_frame`; proptest | M5 |
-| Kernel code always runs with IF = 0 outside `idle_loop`, and with DF = AC = TF = NT = 0 | `IA32_FMASK`; `clac` and `cld` in every IDT stub, IST ones included; review | M3, M5 |
+| `sysretq` never runs with RCX at or above 2^47 | `l4core::entry::exit_frame`, which takes `iretq` when `next_ip` is at or above 2^47; host tests and proptest; `test=ring3` makes a `syscall` that returns to 2^47 and leaves by `iretq`; M10 brief 5 scenario: `syscall` in the last mappable page, and WriteRegisters with a non-canonical RIP | M5, M10 |
+| `sysretq`, `iretq` and the FS and GS base `wrmsr`s at a switch cannot fault in ring 0 | `exit_frame` (constant CS and SS, canonical RIP and RSP, masked RFLAGS); the FS and GS base sanitiser, and `entry::load_user_bases` writes only lower-half bases ([FS and GS base](#fs-and-gs-base)); `test=ring3`'s exits by both paths | M5 |
+| User code always runs with IF = 1, IOPL = 0, NT = 0 and the user selectors | `exit_frame`; host test `exit_rflags_keep_only_what_ring_3_may_set` and proptest; `test=ring3` returns from a `syscall` made with NT set without it | M5 |
+| Kernel code always runs with IF = 0 outside `idle_loop`, and with DF = AC = TF = NT = 0 | `IA32_FMASK`; `clac` and `cld` in every IDT stub, IST ones included; review; `test=ring3` reads RFLAGS at every entry from ring 3 | M3, M5 |
 | `int n` from ring 3 reaches no handler but #BP's, which treats it as the `int3` trap it is | every gate DPL 0 but vector 3's | M3 |
 | Vectors 9, 15, 17 and 20 to 31 never reach a fault handler or the interrupt path, and no injected vector makes the kernel misread a frame | no-error-code stubs for 17, 21, 29, 30; panic from either ring; red-team brief 7 | M3, M10 |
-| NMI, #DF, #MC and #DB never run on the interrupted RSP and never read GS | IST1 to IST4; review; M10 brief 5 | M3, M5 |
-| GS points at `PerCpu` whenever a ring-0 path outside the IST handlers and the two windows reads it | `swapgs` exactly once per ring-3 entry and exit, keyed on saved CS; review; M10 brief 5 | M5 |
-| `sysenter`, compatibility-mode `syscall` and far transfers cannot enter ring 0 | `IA32_SYSENTER_CS` = 0; no 32-bit code descriptor; `IA32_CSTAR` stub | M5 |
+| NMI, #DF, #MC and #DB never run on the interrupted RSP and never read GS | IST1 to IST4; a #DB from ring 3 is handled on the kernel stack, its frame left on IST4 (`trap_from_user`), which `test=ring3` checks; review; M10 brief 5 | M3, M5 |
+| GS points at `PerCpu` whenever a ring-0 path outside the IST handlers and the two windows reads it | `swapgs` exactly once per ring-3 entry and exit, keyed on saved CS; `test=ring3` reads `IA32_GS_BASE` at every entry from ring 3; review; M10 brief 5 | M5 |
+| `sysenter`, compatibility-mode `syscall` and far transfers cannot enter ring 0 | `entry::init` writes `IA32_SYSENTER_CS` = 0, which the boot summary prints; no 32-bit code descriptor; the `IA32_CSTAR` stub, `compat_entry`, panics off the user's stack | M5 |
 | A ring-0 interrupt is accepted only from `idle_loop`; every other ring-0 exception panics with a decoded report | `trap_from_kernel` RIP check; M3 page-fault scenario | M3 |
 | An overflow of the kernel stack or of the NMI, #MC or #DB IST stack ends in a #DF report, and an overflow of the #DF stack in a second #DF over the first, which stops the machine with the first report possibly cut short; never in silent corruption | a guard page below each of the five stacks, reserved by the linker script and skipped by the M3 table builder; #DF on IST1; the panic path's re-entry guard; M3 scenarios overflow the #DF stack (`df_stack`), the kernel stack (`stack_overflow`) and, from a `test=` hook, the NMI stack after an NMI the kernel sends itself through the ICR (`nmi_stack`), naming its own APIC ID, since the self shorthand is valid only for fixed delivery | M3 |
-| The kernel stack holds no state across entries | every entry starts at RSP0 or the stack top; exits rebuild the frame from the TCB | M5 |
-| An unknown or, without `debug`, a debug system call number reaches no handler and raises `UnknownSyscall` | `Syscall::from_number`; host tests for both builds | M5 |
-| A preempted system call restarts with the caller's arguments | `fault_ip`, `Restart` ([Register frame and restart](#register-frame-and-restart)); M5 self-test | M5 |
+| The kernel stack holds no state across entries | every entry starts at RSP0 or the stack top; `exit_to_user` rebuilds the frame from the TCB and abandons the stack; `test=ring3` checks that each entry's frame lies at the top of the stack its entry uses | M5 |
+| An unknown or, without `debug`, a debug system call number reaches no handler and raises `UnknownSyscall` | `Syscall::from_number`; host tests for both builds; host test `a_number_that_names_no_system_call_is_an_unknown_syscall_fault` through `l4core::syscall` | M5 |
+| A preempted system call restarts with the caller's arguments | `fault_ip`, `Restart` ([Register frame and restart](#register-frame-and-restart)), set by `l4core::syscall` and undone by `tcb::activate`; host test `a_preempted_invocation_restarts_its_syscall_and_finishes`; `test=root`'s `Untyped_Retype`, preempted and restarted from ring 3 | M5 |
 
 ### Compared with seL4
 
@@ -1239,7 +1485,7 @@ next timer tick. M5's `schedule()` replaces the hook.
 | User context pushed straight into the TCB with RSP as the pointer (`handle_fastsyscall`, `LOAD_USER_CONTEXT`) | trap frame on the kernel stack, copied into the TCB in Rust | one frame layout for every entry, logic in Rust; costs a 22-word copy |
 | Every IDT gate on IST1, a six-word IRQ stack (`init_tss`, `init_idt_entry` in `src/arch/x86/64/kernel/vspace.c`) | RSP0 for ring-3 entries; IST only for #DF, NMI, #MC, #DB | a nested exception cannot overwrite another's frame |
 | `sysretq` after `xor rsp, rsp`; libsel4 keeps RSP in RBX across `syscall` (`restore_user_context`, `syscalls_syscall.h`) | the kernel saves and restores RSP; RBX preserved | the register table in [System calls](abi.md#system-calls) |
-| `IA32_STAR[63:48]` = `SEL_CS_3` (`0x2B`), so `sysretq` loads CS selector `0x3B`, GDT_FS's slot, and SS `0x33`, while `iretq` uses CS `0x2B` from the TCB (`init_syscall_msrs`, `src/arch/x86/64/kernel/vspace.c`; `include/arch/x86/arch/64/mode/object/structures.h`; `Arch_initContext`; SYSRET arithmetic from memory) | `0x13`: selectors agree on both paths. Like seL4, the field holds an RPL-3 selector | one user CS value |
+| `IA32_STAR[63:48]` = `SEL_CS_3` (`0x2B`), so `sysretq` loads CS selector `0x3B`, GDT_FS's slot, and SS `0x33`, while `iretq` uses CS `0x2B` from the TCB (`init_syscall_msrs`, `src/arch/x86/64/kernel/vspace.c`; `include/arch/x86/arch/64/mode/object/structures.h`; `Arch_initContext`; the SYSRET arithmetic checked on QEMU in M5, [Descriptor tables and MSRs](#descriptor-tables-and-msrs)) | `0x13`: selectors agree on both paths. Like seL4, the field holds an RPL-3 selector | one user CS value |
 | System call numbers are negative: `Call` −1 to `NBRecv` −8, debug calls after them (`syscall.xml`; `SysCall == -1` is asserted in `include/arch/arm/arch/64/mode/fastpath/fastpath.h`) | positive: 1 to 8, debug 16 to 18 | [ADR 0022](adr/0022-abi-v0-numbering.md) |
 | Optional `sysenter` entry (`CONFIG_SYSENTER`, `handle_syscall` in `traps.S`) | none: `IA32_SYSENTER_CS` = 0 | one entry instruction |
 | TSS I/O map base inside the TSS, bitmap all ones (`init_tss`) | I/O map base past the limit | the same effect, no bitmap to keep |
@@ -1384,17 +1630,33 @@ address and every range `zero` clears against `l4core::objmem::ObjectMemory`,
 computed once at the end of step 5: the `USABLE`, `LOADER` and
 `ACPI_RECLAIMABLE` memory of the map, merged, clipped to
 `[1 MiB, direct map end)`, without the kernel image and a hypercall page the
-firmware locked, as sorted ranges, so each check is one binary search. The
-IRQ node lies in the kernel image, so M7 must add its static range for slot
-addresses. M4 leaves the hooks inert, each match arm naming the milestone
-that fills it: `finalise` does nothing and returns no cleanup for any type;
-for an Untyped, IRQControl, IOPortControl or Hypervisor capability, which
-`core/` passes with `last` set on every deletion, it never will. `after_delete`,
-`moved` and `init_object` do nothing. Debug builds assert that no Frame or
-paging-structure capability passed to `finalise` or `moved` is mapped, since
-nothing is mapped before M5. `preempt` reads the IRR; with `selftest` it also
-counts polls, times the stretches between them and can report a preemption
-with nothing pending, for the self-tests.
+firmware locked, as sorted ranges, so each check is one binary search. From
+boot step 8 they also accept `.rootimage`'s reclaimed pages, which lie in the
+kernel image. The IRQ node lies in the kernel image too, so M7 must add its
+static range for slot addresses.
+
+M4 left the hooks inert. From M5 they are live, and each arm not yet filled
+names its milestone:
+
+| Hook | Capability | What it does (M5) |
+| --- | --- | --- |
+| `init_object` | TCB | `tcb::init` (a full slice, RFLAGS `0x202`), `fpu::init_area` (the FP template; a zeroed MXCSR would unmask every SIMD exception), and in debug builds a place in the debug list |
+| `init_object` | PML4 | the kernel's half, entries 256 to 511 (`arch::paging::init_object`) |
+| `finalise` | TCB, last | `tcb::suspend` (IPC cancelled, off its ready queue, `Inactive`), `fpu::forget` and `thread::forget` (its FP and FS and GS base ownership dropped without saving), and off the debug list |
+| `finalise` | Endpoint, last; Reply | `ipc::finalise`: an endpoint's queue is released with `cancel_all_ipc`; a reply capability needs nothing |
+| `finalise` | Frame, paging structure, PML4 | `arch::paging::finalise`: a mapped Frame or structure is unmapped, and a PML4's last capability empties its user half, loading the kernel PML4 first if CR3 holds it |
+| `moved` | Frame, paging structure | `arch::paging::moved`: a mapped capability's back-reference follows it |
+
+`finalise` returns no cleanup for any type before M7. For an Untyped,
+IRQControl, IOPortControl or Hypervisor capability, which `core/` passes with
+`last` set on every deletion, it never does anything. Notifications (M6),
+IRQHandlers and IOPorts (M7) keep inert arms, and `after_delete` does
+nothing before M7. `arch::Objects` also implements `Tcbs`, `Scheduling`,
+`Threads`, `IpcEnv` and `PagingStore`. The scheduler lives in a static that
+only `Objects` reaches, which is sound while kernel code uses one `Objects`
+at a time for scheduler calls. `preempt` reads the IRR; with `selftest` it
+also counts polls, times the stretches between them and can report a
+preemption with nothing pending, for the self-tests.
 
 ### Deletion and finalisation
 
@@ -1468,7 +1730,8 @@ M2: representation, slot traits, finality and the Zombie algorithm, with a
 test `Kernel` that records hook calls. M4: CNode layout and the `arch`
 implementations, `arch::Objects` with `l4core::objmem` behind its debug
 assertions, every hook still inert. Then the hooks: M5 for TCBs, Endpoints,
-Reply capabilities and paging objects; M6 for Notifications and
+Reply capabilities and paging objects (`arch/x86_64/objects.rs`, with
+`paging.rs`, `fpu.rs` and `thread.rs`); M6 for Notifications and
 `CNode_SaveCaller`; M7 for IRQHandlers, IOPorts and the IRQ node; M9 for
 Hypervisor capabilities.
 
@@ -1477,18 +1740,18 @@ Hypervisor capabilities.
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | A capability never outlives its object: an object's memory is reused only when the untyped covering it is reset, which needs it to have no descendants, and every capability to an object in that region, except a reply capability (next row), is a descendant | `l4core` retype, insert and delete; proptest against `model/` with object liveness | M2 |
-| Reply capabilities, the one exception (a master is a derivation root), never outlive their TCB: TCB finalisation deletes the outstanding reply capability (suspend, `cancel_ipc`) and the Zombie deletes the master before the TCB's last capability's slot empties | threads and IPC finalisation; proptest deleting TCBs blocked in `Call` | M2, M5 |
+| Reply capabilities, the one exception (a master is a derivation root), never outlive their TCB: TCB finalisation deletes the outstanding reply capability (suspend, `cancel_ipc`) and the Zombie deletes the master before the TCB's last capability's slot empties | the TCB `finalise` hook's `tcb::suspend`, which calls `ipc::cancel_ipc`; host tests `suspending_a_caller_deletes_the_reply_capability_to_it` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`; `test=fault`; from M6 proptest deleting TCBs blocked in `Call` | M2, M5 |
 | No kernel object lies at physical address 0 | `l4core::boot::page_class` makes no untyped below 1 MiB, which `check_untyped` checks in host tests and `test=bootinfo`; `core/` handles are `NonZeroU64` | M2, M4 |
-| No kernel reference (queue, binding, mapping) survives the last capability to its target | `finalise` hooks called by `core/` delete; proptest counts finalisations; each subsystem's tests | M2, M5 to M7, M9 |
-| A back-reference never names an empty slot | `finalise` runs before unlink and zeroing; proptest with mapped capabilities ([Address spaces](#address-spaces)) | M2, M5 |
+| No kernel reference (queue, binding, mapping) survives the last capability to its target | `finalise` hooks called by `core/` delete (M5: TCBs, Endpoints, Frames and paging structures, above); proptest counts finalisations; each subsystem's tests, M5's in `core/src/{tcb,ipc,syscall}/tests.rs` and the `vspace` proptest | M2, M5 to M7, M9 |
+| A back-reference never names an empty slot | `finalise` runs before unlink and zeroing, and the paging `finalise` unmaps through the slot its capability still occupies; the `vspace` proptest with mapped capabilities ([Address spaces](#address-spaces)) | M2, M5 |
 | The last capability to an object is finalised exactly once, before its slot empties | `is_final` and the Zombie algorithm; proptest with random preemption | M2 |
 | Every TCB, Endpoint, Notification, CNode and paging structure lies in RAM inside the direct map, below 64 GiB | retype refuses kernel objects from device untyped; RAM untyped only below the direct map's end, `min(phys_map_size, 64 GiB)` (`page_class`, checked by `check_untyped` in host tests and `test=bootinfo`); in debug builds `arch::Objects` checks every slot and zeroed range against `ObjectMemory` | M2, M4 |
-| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, the current thread, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch::Objects` check every slot address against `l4core::objmem::ObjectMemory` (M4), which M7 widens to the IRQ node | M2, M4, M5, M7 |
+| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, the current thread, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch::Objects` check every slot address against `l4core::objmem::ObjectMemory` (M4), which M7 widens to the IRQ node; `l4core::vspace::paging` uses a back-reference only after checking that its slot holds the capability whose record names that entry (M5) | M2, M4, M5, M7 |
 | Capabilities are created only by boot, retype, IRQControl and IOPortControl invocations, `Call` and fault delivery (reply capabilities), and deletion (Zombies); every other capability is derived from one its holder has | the only callers of `insert_root` and `insert_derived`; red-team brief 1 | M2, M10 |
 | Destroying a CNode or TCB is preemptible, recurses at most two levels, and keeps every invariant at each step | Zombie algorithm; proptest with random preemption points over nested and cyclic containers, including deleting a slot inside the container its own deletion destroys | M2 |
-| No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; TCB finalisation suspends first; proptest | M2, M5 |
+| No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; the TCB `finalise` hook suspends the thread before `core/` clears its slots; proptest | M2, M5 |
 | The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container; proptest | M2, M7 |
-| Every relocation of a capability to another slot calls `moved(cap, old_slot, new_slot)` before the next preemption point, so back-references stay exact | one `l4core::cdt` move and one swap function, used by Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; proptest over nested CNode deletion with a mapped capability in slot 0 of the nested CNode, rotates and swaps of mapped capabilities, and untyped revoke, at random preemption points; red-team brief 4 | M2, M5, M6, M10 |
+| Every relocation of a capability to another slot calls `moved(cap, old_slot, new_slot)` before the next preemption point, so back-references stay exact | one `l4core::cdt` move and one swap function, used by Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; `arch::paging::moved` rewrites the back-reference; proptest over nested CNode deletion with a mapped capability in slot 0 of the nested CNode, rotates and swaps of mapped capabilities, and untyped revoke, at random preemption points (the `vspace` proptest from M5); host test `moves_rotates_and_swaps_rewrite_back_references`; red-team brief 4 | M2, M5, M6, M10 |
 
 ### Compared with seL4
 
@@ -1597,10 +1860,10 @@ and retypes again.
 | An untyped with children is never reset or copied | `has_children` in retype and `derive`; proptest | M2 |
 | Retype never allocates outside its untyped, and its arithmetic cannot overflow | `size_bits` at most 47, `num_objects` at most 256, the shift test of step 2; proptest with extreme arguments; red-team brief 3 | M2, M10 |
 | Every object is aligned to its size | align-up in step 4; proptest | M2 |
-| RAM at or above a watermark is zero, so every new object starts zeroed | reset clears before lowering the watermark; fake memory checked after each step; `test=retype` fills the first run's objects outside their slots, revokes U, and finds the 2,098 KiB the second run makes there all zero | M2, M4 |
+| RAM at or above a watermark is zero, so every new object starts zeroed | reset clears before lowering the watermark; fake memory checked after each step; `test=retype` fills the first run's objects where nothing reads them before a reset (frames, TCBs' registers and XSAVE areas, PML4s' back-references 256 to 511), revokes U, and finds the 2,067 KiB the second run makes there zero, or as retype makes them (a TCB's RFLAGS and FP template) | M2, M4 |
 | Device untyped yields only Frames and device untyped, and is never cleared | type check in retype; device bit inherited; red-team brief 3 | M2, M10 |
 | A preempted reset leaves a consistent untyped, and the restarted retype completes it | top-down chunks; proptest with random preemption | M2 |
-| Revoking an untyped and retyping it again gives the same objects at the same addresses | `test=retype`: 27 calls through `l4core::invoke` per run with CPtrs into the root CNode: U (the largest RAM untyped, 64 MiB on QEMU) into every object type, the CNode methods between the root CNode and a new CNode C, the child untyped retyped, a copy of root slot 9 and a mint of root slot 2 put in C, and three calls that must fail. The second run's slots (all four words and the parent) equal the first's. After each revoke the 26 slots the test filled are empty, every boot capability, U included, is the first run's capability as a root without links, slots 9 and 2 have no children (so only C's Zombie can have deleted their copies), and `cdt::check_slot` holds for every recorded slot and every root CNode slot. The test waits, interrupts off, until the timer is pending, so the first poll of U's first reset is always preempted by an interrupt; injected preemptions follow, and each call restarts from the idle path. A core with CNode Zombies disabled, or with the reset's clearing removed, fails it. `l4core::invoke` host tests restart retype, revoke and delete at every preemption point and end with the unpreempted call's memory and hook calls | M4 |
+| Revoking an untyped and retyping it again gives the same objects at the same addresses | `test=retype`: 27 calls through `l4core::invoke` per run with CPtrs into the root CNode: U (the largest RAM untyped, 64 MiB on QEMU) into every object type, the CNode methods between the root CNode and a new CNode C, the child untyped retyped, a copy of root slot 9 and a mint of root slot 2 put in C, and three calls that must fail. The second run's slots (all four words and the parent) equal the first's. After each revoke the 26 slots the test filled are empty, every boot capability, U included, is the first run's capability as a root without links (from M5, but for the root TCB's copies of root slots 2, 3 and 10), slots 9 and 2 have no children (so only C's Zombie can have deleted their copies), and `cdt::check_slot` holds for every recorded slot and every root CNode slot. The test waits, interrupts off, until the timer is pending, so the first poll of U's first reset is always preempted by an interrupt; injected preemptions follow, and each call restarts from the idle path. A core with CNode Zombies disabled, or with the reset's clearing removed, fails it. `l4core::invoke` host tests restart retype, revoke and delete at every preemption point and end with the unpreempted call's memory and hook calls | M4 |
 
 ### Compared with seL4
 
@@ -1879,13 +2142,13 @@ IRQ-node install. M9: Hypervisor narrowing.
 | Revoke deletes exactly the capabilities derived, directly or not, from the slot, unless it is a partial revoke ([Slot operations](#slot-operations)) | `low`-run walk; proptest against `model/`'s transitive parent map | M2 |
 | Deleting a capability changes no survivor's ancestry except that its children pass to its nearest surviving ancestor | `low` update in unlink; proptest | M2 |
 | Rights never grow, a badge is set once, only Mint sets a badge, and a Hypervisor Mint never widens | `derive`, Mint and Mutate rules; proptest; badge scenario (M6); `core::hyperv` host tests; red-team brief 1 | M2, M6, M9, M10 |
-| A PDPT, PageDirectory or PageTable capability is never derived, and a derived Frame capability is never mapped | `derive`; proptest; red-team brief 4 | M2, M5, M10 |
+| A PDPT, PageDirectory or PageTable capability is never derived, and a derived Frame capability is never mapped | `derive`, which gives an unmapped copy of a Frame; the `vspace` proptest copies mapped capabilities and checks every mapping record against its model; red-team brief 4 | M2, M5, M10 |
 | A plain copy never has children, so holding one gives no power over other copies | the `original` rule; proptest | M2 |
 | All capabilities to one object are adjacent, so `is_final` is exact | insertion next to the source; proptest compares `is_final` with `model/` | M2 |
 | The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step, through the decoder too (`random_messages_keep_every_slot_consistent`); debug asserts | M2, M4 |
 | No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless it is a partial revoke ([Slot operations](#slot-operations)) | single-step revoke with restart; red-team brief 2 | M2, M5, M6, M10 |
 | `depth` never exceeds 4095 and never wraps, so no capability leaves its ancestors' runs | one child-insert function in `l4core::cdt` checks the limit; proptest drives a chain to 4095 by copy and delete; red-team brief 1 | M2, M10 |
-| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5) and `IRQHandler_SetNotification` (M7); IPC transfer skips the capability (M6); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
+| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5; host test `installs_stop_at_the_depth_limit`) and `IRQHandler_SetNotification` (M7); IPC transfer skips the capability (M6); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
 
 ### Compared with seL4
 
@@ -1910,14 +2173,14 @@ and FPU-flag invocations.
 ### TCB layout
 
 Only the size is ABI. The layout is internal, except that [Slots](#slots)
-relies on the slots being at offset 0; `kernel/src/arch/x86_64/` pins it
-with compile-time asserts.
+relies on the slots being at offset 0; `l4core::tcb` pins it with
+compile-time asserts in every build.
 
 | Offset | Bytes | Field | Contents |
 | --- | --- | --- | --- |
 | 0 | 160 | `slots[5]` | capability slots, 32 bytes each, the CNode slot format, so a Zombie treats TCB and CNode slots alike |
 | 160 | 192 | `regs` | user register frame, 24 words |
-| 352 | at most 256 | scalars | `state` (with the blocking data of [Thread states used by IPC](#thread-states-used-by-ipc)), `priority`, `mcp`, `time_slice`, `queued`, `fault` and `lookup_failure` (pending fault), `fault_ep` (CPtr), `ipc_buffer` (user address, 0 for none), `bound_notification`, `sched_prev`/`sched_next`, `ep_prev`/`ep_next` |
+| 352 | at most 256 | scalars | 21 words in `[352, 520)` (`l4core::tcb::field`): `state` with the blocking data of [Thread states used by IPC](#thread-states-used-by-ipc) in three words (the tag and the `can_grant`, `can_grant_reply` and `is_call` bits, the endpoint or notification, the badge), `priority`, `mcp`, `time_slice`, `queued`, `sched_prev`/`sched_next`, `ep_prev`/`ep_next`, `fault` (seven words: the fault type, 0 for none, and its data, a CapFault's lookup failure included), `fault_ep` (CPtr), `ipc_buffer` (user address, 0 for none), `bound_notification`; bytes 520 to 607 are spare |
 | 608 | 16 | `debug_prev`, `debug_next` | debug builds only: the list of every TCB that `DebugDumpScheduler` walks (seL4 `ksDebugTCBs`, `tcbDebugAppend` at retype, `tcbDebugRemove` in `finaliseCap`); bytes 624 to 1023 are spare |
 | 1024 | 1024 | `xsave` | XSAVE area, standard format, 64-byte aligned because the object is 2 KiB aligned; 576 bytes used |
 
@@ -1954,9 +2217,11 @@ IllegalOperation. No CPtr can name a TCB slot.
 
 ### Register frame and restart
 
-`regs` holds the 15 general registers, `rsp`, `rflags`, `fault_ip`,
-`next_ip`, `fs_base`, `gs_base`, the exception error code and `exit`: 23
-words, padded to 24.
+`regs` (`l4core::regs::Regs`) holds the 15 general registers, in the M3 trap
+frame's order so that entry copies them as a block, then `rsp`, `rflags`,
+`fault_ip`, `next_ip`, `fs_base`, `gs_base`, the exception error code and
+`exit`: 23 words, padded to 24. `exit` is a word, `Iret` = 0 and `Sysret` =
+1, so a zeroed TCB leaves by `iretq`, and any other value reads as `Iret`.
 
 - `fault_ip` is the instruction that entered the kernel: the `syscall`
   (`rcx` − 2) or the RIP the CPU pushed. `next_ip` is where the thread
@@ -1968,10 +2233,17 @@ words, padded to 24.
   repeat a finished system call (seL4 `suspend`, `src/kernel/thread.c`).
 - The user-visible `rip` is `next_ip` for a `Running` thread, else `fault_ip`;
   writing `rip` sets both.
-- `exit` tells the exit path ([Exit](#exit)) whether `sysretq` may be
-  used. Writing a thread's registers (WriteRegisters, CopyRegisters, a
+- `exit` tells the exit path ([Exit](#exit)) whether `sysretq` may be used.
+  Writing a thread's registers (WriteRegisters, CopyRegisters, a
   register-setting fault reply) forces `iretq`, because `sysretq` would
-  overwrite `rcx` and `r11`.
+  overwrite `rcx` and `r11`. WriteRegisters forces it even when it writes no
+  register, as seL4 does, and so do CopyRegisters and every fault reply,
+  whatever they set. SetTLSBase does not, since `sysretq` leaves FS base
+  alone, and neither do the writes of message registers, `rdi` and `rsi` by
+  IPC and kernel replies, since `sysretq` changes only `rcx` and `r11`.
+- `Regs::set_user` is the one writer of user-visible registers: it applies
+  `sanitise`, the `rip` rule and the forced `iretq`. The message registers
+  MR0 to MR3 are `r10`, `r8`, `r9` and `r15`.
 
 ### User register set and sanitising
 
@@ -1980,11 +2252,12 @@ Read/Write/CopyRegisters use seL4's 20-word order
 `rax` to `r15`, `fs_base`, `gs_base`. CS and SS are not in it; every
 user thread runs on the user selectors. Every value the kernel installs, from
 WriteRegisters, CopyRegisters, SetTLSBase or a fault reply, goes through
-`l4core::regs::sanitise`:
+`l4core::regs::sanitise` (host tests at the boundaries, and proptest over
+every word):
 
 | Register | Rule | Why |
 | --- | --- | --- |
-| `rip`, `rsp`, `fs_base`, `gs_base` | a value ≥ `0x0000_8000_0000_0000` becomes 0 | `sysretq` to a non-canonical RIP takes #GP in ring 0 on the user stack (Intel; from memory, check in M5); lower-half FS and GS bases make a `swapgs` mistake harmless under SMAP |
+| `rip`, `rsp`, `fs_base`, `gs_base` | a value ≥ `0x0000_8000_0000_0000` becomes 0 | `sysretq` to a non-canonical RIP takes #GP in ring 0 on the user stack (Intel; from memory, H9); lower-half FS and GS bases make a `swapgs` mistake harmless under SMAP |
 | `rflags` | `(v & 0x0CD5) \| 0x0202` | the user sets CF, PF, AF, ZF, SF, DF, OF; bit 1 and IF forced on; TF, IOPL, NT, RF, VM, AC, VIF, VIP, ID forced off. IOPL 0 keeps port I/O behind IOPort capabilities. The same result as seL4's `sanitiseRegister` (`src/arch/x86/machine/registerset.c`) |
 | the rest | unchanged | |
 
@@ -2003,7 +2276,18 @@ reset a base to 0, so on a switch away from a thread the kernel reads
 IA32_FS_BASE and IA32_KERNEL_GS_BASE (the user GS base between the entry and
 exit `swapgs`) into the TCB, skipping a TCB finalised in this entry, and on a
 switch to a thread it writes them back. SetTLSBase on the current thread also
-writes IA32_FS_BASE at once. (MSR behaviour from memory; check in M5.)
+writes IA32_FS_BASE at once (`Threads::set_current_fs_base`). Checked in M5
+on QEMU: `test=ring3` loads FS and GS with a selector in ring 3, which zeroes
+IA32_FS_BASE and IA32_KERNEL_GS_BASE, and the kernel writes them back from
+the thread's registers.
+
+In code (`arch/x86_64/thread.rs`), a static names the thread whose bases are
+in the MSRs. The switch in `exit_to_scheduled` saves that thread's bases
+with `entry::save_user_bases` and loads the next one's with
+`entry::load_user_bases`, which writes 0 for a base at or above 2^47, only
+when the thread changes. TCB finalisation clears the static
+(`thread::forget`), so a finalised TCB's bases are never saved, and the idle
+thread, which has none, leaves it alone.
 
 ### Invocations
 
@@ -2020,20 +2304,44 @@ UnsetBreakpoint, ConfigureSingleStepping (no hardware debug API, so DR7 keeps
 its reset value `0x400`, with no breakpoint enabled); SetEPTRoot (no VT-x); SetFlags (every thread has FP state);
 SetTimeoutEndpoint (MCS). Nothing is added.
 
+`l4core::tcb::invocation` decodes a message into a `TcbInvocation` or the
+first error in `docs/abi.md`'s order, changing nothing (`decode`), then
+performs it (`perform`). Where the ABI leaves an order or a choice open:
+
+- The label comes first: a label outside `0x20` to `0x2D`, and
+  BindNotification and UnbindNotification until M6, are `IllegalOperation`
+  before any length check.
+- Every check of Configure, SetSpace and SetIPCBuffer, the depth limit
+  included, runs in `decode`, before any slot is emptied, in seL4's order:
+  the buffer, the long-running delete, the CSpace root, the VSpace root.
+- Only slot 0's deletion is checked for being long-running: slot 1 can hold
+  only a PML4, whose deletion never is.
+- ReadRegisters writes its results only for a `Call`; a `Send` leaves the
+  caller's registers alone, as for any dropped reply.
+
+Host tests check every error row in the ABI's order, and that a failed
+invocation changes nothing (`core/src/tcb/tests.rs`).
+
 ### Creation and configuration
 
 Untyped_Retype zeroes the TCB, then sets `Inactive`, priority 0, MCP 0, a full
 slice and `rflags = 0x202`, copies the FP template into `xsave`, puts the
 thread's reply master in its `reply` slot ([Reply
 capabilities](#reply-capabilities)), and in debug builds appends the TCB to
-the debug list. `exit` is `Iret`, its zero value.
-The creator calls Configure, SetSchedParams, and WriteRegisters with
-`rip`, `rsp` and `resume_target`.
+the debug list. `exit` is `Iret`, its zero value. Retype inserts the master;
+the kernel's `init_object` hook does the rest (`tcb::init`, `fpu::init_area`,
+[How `core/` reaches kernel memory](#how-core-reaches-kernel-memory)). The
+creator calls Configure, SetSchedParams, and WriteRegisters with `rip`, `rsp`
+and `resume_target`.
 
 The IPC buffer frame (Configure, SetIPCBuffer) must be a non-device Frame that
 is not one of the two SynIC pages, whose physical addresses the kernel records
 at boot; those are refused with InvalidCapability, because the hypervisor
-writes them and the kernel must never read one as an IPC buffer.
+writes them and the kernel must never read one as an IPC buffer. The check
+refuses a frame that contains either page anywhere, not only one whose base
+is the page. The two lie in the boot region, which no untyped covers, so
+only the SynIC frame capabilities and their copies can contain them. The
+`Threads::synic_pages` hook gives the addresses, none before M9.
 
 Installing a root or buffer first deletes the slot's old capability, which
 may finalise its object, so afterwards the kernel re-checks that the source
@@ -2060,10 +2368,11 @@ fetch; with an empty CSpace slot every lookup fails. Neither is a kernel error.
 Cancelling IPC clears a pending fault in every state, so a thread suspended
 while its fault message waits never sends it later.
 
-Deleting the last capability to a TCB unbinds its notification, suspends it,
-removes it from the debug list (debug builds), drops FP ownership without
-saving, clears a scheduler action naming it, then deletes the five slots with
-the long-running delete of
+Deleting the last capability to a TCB unbinds its notification (M6), suspends
+it (`tcb::suspend`, which also clears a scheduler action naming it), drops FP
+ownership and FS and GS base ownership without saving (`fpu::forget`,
+`thread::forget`), removes it from the debug list (debug builds), then deletes
+the five slots with the long-running delete of
 [Deletion and finalisation](#deletion-and-finalisation) (seL4 `finaliseCap`,
 `src/object/objecttype.c`). Afterwards nothing in the kernel names the TCB,
 except `current` until the kernel entry ends. A thread deleting its own last
@@ -2079,31 +2388,52 @@ TCB capability resumes it (it re-executes the faulting instruction) or
 suspends it. If the fault endpoint is deleted, threads queued on it restart,
 fault again, find no endpoint and become `Inactive`.
 
+`test=fault` shows the handler's side on QEMU. The faulting thread runs above
+its handler, so the handler runs only once the fault has blocked the thread,
+and a `DebugDumpScheduler` before the kill shows it `BlockedOnReply`. The
+handler reads the faulting
+thread's registers, whose `rip` is the faulting instruction, kills it with
+`TCB_Suspend`, which cancels its fault IPC and deletes the reply capability,
+and then replies with label 0 through an empty caller slot, which does
+nothing; the thread stays stopped.
+
 ### `core/` and `arch/`
 
-`l4core::regs` (M5) holds the register-set order, `sanitise`, and the fault
-encoder and reply decoder. `l4core::tcb` (M5) decodes each TCB invocation into
-a typed request or an error; the M10 fuzzer targets it. `arch` (M5) owns the
-frame layout, XSAVE, MSRs and control registers. `core` names TCBs by `TcbRef`
-handles (physical addresses) and reaches fields through a `Tcbs` trait, which
-the kernel implements in `arch` over the direct map and host tests over a
-`Vec`.
+- `l4core::regs` (M5): `Regs`; `UserReg`, the user register set in the ABI's
+  order (seL4's `seL4_UserContext`); `sanitise`; `Regs::user` and `set_user`,
+  the `rip` rule; `restart` and `stop_running`; the message registers; `Fault`
+  with `from_exception` and its TCB record; `fault_message`, the encoder; and
+  `fault_reply`, the reply decoder, which returns `FaultOutcome::Restart` or
+  `Inactive`.
+- `l4core::tcb` (M5): the layout offsets (`field`); `ThreadState` with its
+  blocking data; the handles `TcbRef`, `EpRef` and `NtfnRef`, physical
+  addresses; `Tcbs`, which reads and writes a word at a multiple of 8 in
+  `[160, 1024)` and builds the typed accessors on it; `Threads`, a `Kernel`
+  and `Scheduling` with the hooks the kernel and IPC fill (`cancel_ipc`,
+  `invoked_by_call`, `synic_pages`, `set_current_fs_base`,
+  `write_buffer_word`); `init`, `init_root`, `suspend`, `restart`, `activate`,
+  `buffer_word` and `set_mr`. `tcb::invocation` decodes and performs the
+  invocations, which `l4core::invoke` sends to it; the M10 fuzzer targets it.
+- `arch` (M5): `arch::Objects` implements `Tcbs` over the direct map, and
+  `Threads`; `fpu.rs` owns XSAVE and the control registers, `entry.rs` the
+  MSRs and the frame, `thread.rs` the switch. Host tests implement the traits
+  over fake memory (`l4core::testing`).
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Every register value installed for ring 3 passes `sanitise`: `rip`, `rsp`, FS and GS base below 2^47; RFLAGS with IF = 1, IOPL = 0, TF = NT = AC = 0 | `l4core::regs::sanitise` called by every writer; proptest | M5 |
-| A user thread always runs in ring 3 on the user CS and SS; no invocation names CS or SS | register set excludes them; frame initialised at retype | M5 |
-| Returning to ring 3 never faults in ring 0 | sanitiser plus the exit path's checks; red-team scenario resuming threads with random registers | M5, M10 |
-| User FS and GS bases stay below 2^47, and CR4.FSGSBASE = 0 | sanitiser; arch init; boot self-test reads CR4 | M5 |
-| In a TCB that is not itself being destroyed, slot 0 holds only a CNode or a Zombie left by an interrupted deletion, slot 1 only a VSpace root, slot 2 only a non-device Frame that is not a SynIC page, or nothing; no CPtr names a TCB slot | `l4core::tcb` decode checks, host tests | M5 |
-| The kernel never uses a SynIC message or event page as an IPC buffer | SetIPCBuffer and Configure compare the frame with the addresses recorded at boot; host test | M5, M9 |
-| No TCB slot install exceeds `MAX_DERIVATION_DEPTH` | the one child-insert function in `l4core::cdt`; host test at depth 4095 | M5 |
-| At every kernel exit after a TCB is finalised, no ready or endpoint queue, reply capability, scheduler action, `current`, FP owner or debug list names it; nor, from M6, any notification queue or bound notification | finalisation sequence; scheduler proptest and scenarios with deletes (M5); IPC state-machine proptest (M6); red-team brief 2 | M5, M6 |
-| A suspended or deleted thread has no pending fault | `cancel_ipc` clears `fault` | M5 |
-| A thread that suspends itself and is resumed continues after its `syscall` with a NoError reply | Suspend writes the reply first; `l4core::tcb` host test; QEMU scenario `suspend_self` | M5 |
-| User threads cannot set debug registers; DR7 keeps its reset value `0x400`, with no breakpoint enabled | no invocation writes them | M5 |
+| Every register value installed for ring 3 passes `sanitise`: `rip`, `rsp`, FS and GS base below 2^47; RFLAGS with IF = 1, IOPL = 0, TF = NT = AC = 0 | `Regs::set_user`, the one writer of user-visible registers, applies `l4core::regs::sanitise`, and SetTLSBase sanitises its value; host tests `sanitise_at_the_canonical_boundaries`, `write_registers_sanitises_and_forces_iret` and `fault_reply_values_are_sanitised`, and proptest `sanitise_holds_for_any_word` | M5 |
+| A user thread always runs in ring 3 on the user CS and SS; no invocation names CS or SS | register set excludes them; `exit_frame` writes the selectors as constants; `test=ring3` finds them in every frame from ring 3 | M5 |
+| Returning to ring 3 never faults in ring 0 | sanitiser plus the exit path's checks; `test=ring3`'s exits by both paths, one to RIP 0; red-team scenario resuming threads with random registers | M5, M10 |
+| User FS and GS bases stay below 2^47, and CR4.FSGSBASE = 0 | sanitiser, and `entry::load_user_bases` writes 0 for a base at or above 2^47; `fpu::init` clears CR4.FSGSBASE in boot step 3 and `fpu::check_control_state` reads it back; the boot summary prints CR4 | M5 |
+| In a TCB that is not itself being destroyed, slot 0 holds only a CNode or a Zombie left by an interrupted deletion, slot 1 only a VSpace root, slot 2 only a non-device Frame that is not a SynIC page, or nothing; no CPtr names a TCB slot | `l4core::tcb::invocation::decode` checks; host tests `configure_errors_in_order`, `set_space_errors_in_order`, `set_ipc_buffer_errors_in_order` and `configure_refuses_a_long_running_cspace_deletion` | M5 |
+| The kernel never uses a SynIC message or event page as an IPC buffer | SetIPCBuffer and Configure refuse a frame containing either page the kernel records at boot (`Threads::synic_pages`, none before M9); host tests `set_ipc_buffer_errors_in_order` and `configure_errors_in_order` | M5, M9 |
+| No TCB slot install exceeds `MAX_DERIVATION_DEPTH` | the one child-insert function in `l4core::cdt`; host test `installs_stop_at_the_depth_limit`: a source at 4094 installs at 4095, one at 4095 is refused | M5 |
+| At every kernel exit after a TCB is finalised, no ready or endpoint queue, reply capability, scheduler action, `current`, FP owner or debug list names it; nor, from M6, any notification queue or bound notification | the TCB `finalise` hook ([How `core/` reaches kernel memory](#how-core-reaches-kernel-memory)); host tests `a_thread_that_deletes_its_own_tcb_gets_no_reply` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`, which check the scheduler's and IPC's invariants at every exit; IPC state-machine proptest (M6); red-team brief 2 | M5, M6 |
+| A suspended or deleted thread has no pending fault | `ipc::cancel_ipc` clears `fault` in every state; host test `a_handler_that_suspends_the_faulting_thread_cancels_its_reply`; `test=fault` | M5 |
+| A thread that suspends itself and is resumed continues after its `syscall` with a NoError reply | Suspend by `Call` writes the reply first; host tests `a_thread_that_suspends_itself_resumes_after_its_syscall_with_no_error` and `a_thread_that_suspends_itself_by_call_resumes_after_its_syscall` | M5 |
+| User threads cannot set debug registers; DR7 keeps its reset value `0x400`, with no breakpoint enabled | no invocation writes them; `gdt::init` writes `0x400` in boot step 3 | M5 |
 
 ### Compared with seL4
 
@@ -2191,11 +2521,17 @@ ReplyRecv at once when the caller blocks. Every other wake-up waits its turn.
 ### Timer tick
 
 The local APIC timer runs at 100 Hz from M3 ([The timer](#the-timer)), and its
-interrupt calls `sched::tick()` on each tick. Unless idle, `tick` decrements
-the current thread's `time_slice`; at 0 it refills it with `TIME_SLICE_TICKS` =
-1 and ends the slice. Slices are charged in whole ticks: a thread switched in
-just before a tick loses most of its slice, and one that always blocks just
-before the tick is never charged. seL4's non-MCS scheduler has the same
+interrupt calls `sched::tick()` on each tick (`irq::tick`), whether it was
+taken in ring 3 or in the idle loop. Unless idle, `tick` decrements the
+current thread's `time_slice`; at 0 it refills it with `TIME_SLICE_TICKS` = 1
+and ends the slice. Only a runnable current thread is charged: a thread that
+stopped earlier in the same entry, suspending or deleting itself, must not
+be queued. On QEMU `test=threads` shows the slice at work: two threads at
+priority 100 each spin 40 ms between their lines with no system call, and
+the test passes only if each saw the other run in between at least three
+times. Slices are charged in whole ticks: a thread switched in just before
+a tick loses most of its slice, and one that always blocks just before the
+tick is never charged. seL4's non-MCS scheduler has the same
 property at 2 ms; it is accepted here and checked by red-team brief 9
 ([Open questions](#open-questions)).
 
@@ -2204,7 +2540,8 @@ property at 2 ms; it is accepted here and checked by red-team brief 9
 The idle thread is a kernel context in static memory, not a TCB object: never
 queued, below every priority, with no capabilities and no FP state. It runs in
 ring 0 on the kernel's own page tables, which have no lower-half entries after
-M3, so a VSpace deleted while the kernel idles is never live in CR3. It runs a
+M3, so a VSpace deleted while the kernel idles is never live in CR3:
+`thread::exit_to_scheduled` loads the kernel PML4 before it idles. It runs a
 `sti; hlt` loop. An interrupt taken there discards the idle frame and runs the
 normal interrupt path, after which `schedule()` picks a thread or idles again.
 The entry and exit paths for this are in [Interrupts and exceptions taken in
@@ -2213,24 +2550,30 @@ ring 0](#interrupts-and-exceptions-taken-in-ring-0) and
 
 ### `core/` and `arch/`
 
-`l4core::sched` (M5) holds the queues, bitmap, `action`, the decision, `tick`,
-`yield` and `check_prio`, generic over the `Tcbs` trait; proptest runs random
-operation sequences against a model of 256 `VecDeque`s and checks the
-invariants after every step. `arch` (M5) does the switch itself (CR3 through
-`set_vm_root` ([Where the code lives](#where-the-code-lives)), FS and GS
-base, FP state), the idle loop and the tick glue.
+`l4core::sched` (M5) holds `Scheduler` (the queues, bitmap, `action` and the
+current thread, `None` for the idle thread), `enqueue`, `append`, `dequeue`,
+`reschedule`, `make_runnable`, `set_thread_state`, `schedule`, which returns
+the thread to run or `None` to idle, `tick`, `yield_now`, `set_priority`,
+`check_prio`, and the checks `check` and `check_exit`, generic over
+`Scheduling`, a `Tcbs` that also holds the scheduler. Proptest runs 512
+random sequences of up to 200 operations against a model of 256
+`VecDeque`s and checks the invariants after every step. `arch` (M5) keeps
+the `Scheduler` in a static that only `arch::Objects` reaches, and does the
+switch itself in `thread::exit_to_scheduled` (CR3 through `set_vm_root`
+([Where the code lives](#where-the-code-lives)), FS and GS base, FP state),
+the idle loop and the tick glue.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| At every kernel exit the current thread is runnable or idle, and no queued thread has a higher priority | `l4core::sched::schedule`, proptest against the model | M5 |
-| At every kernel exit, each runnable thread but the current one is in exactly the queue of its priority, no other thread is queued, and bitmap bit `p` is set exactly when queue `p` is non-empty | `l4core::sched`, proptest | M5 |
-| `SwitchTo(t)` names a runnable, unqueued thread other than the current one | `make_runnable` and Suspend; proptest | M5 |
-| No invocation sets a priority or MCP above the authority's MCP | `l4core::sched::check_prio`, `u8` types, host tests | M5 |
-| A thread at the highest runnable priority waits at most one slice per other thread at that priority, plus one tick | tail rule and tick; QEMU scenario `sched_rr` (two threads interleave) | M5 |
-| A lower-priority thread never runs while a higher-priority thread is runnable | decision rule; QEMU scenario `sched_prio`; red-team brief 9 | M5, M10 |
-| The idle thread is never queued, never owns FP state, holds no capabilities | not a TCB object (type) | M5 |
+| At every kernel exit the current thread is runnable or idle, and no queued thread has a higher priority | `l4core::sched::schedule`; `sched::check_exit`, which debug kernels run at every exit; proptest against the model | M5 |
+| At every kernel exit, each runnable thread but the current one is in exactly the queue of its priority, no other thread is queued, and bitmap bit `p` is set exactly when queue `p` is non-empty | `l4core::sched`; `sched::check` within `check_exit` at every exit in debug kernels; proptest | M5 |
+| `SwitchTo(t)` names a runnable, unqueued thread other than the current one | `make_runnable` and `set_thread_state`; `sched::check`; proptest | M5 |
+| No invocation sets a priority or MCP above the authority's MCP | `l4core::sched::check_prio`, `u8` types; host tests `check_prio_bounds_by_the_authority_mcp` and `priority_setters_errors_in_order` | M5 |
+| A thread at the highest runnable priority waits at most one slice per other thread at that priority, plus one tick | tail rule and tick; host test `equal_priorities_take_turns_one_tick_each`; `test=threads` (two threads at one priority interleave under preemption) | M5 |
+| A lower-priority thread never runs while a higher-priority thread is runnable | decision rule; proptest against the model; red-team brief 9 | M5, M10 |
+| The idle thread is never queued, never owns FP state, holds no capabilities | not a TCB object (type): the scheduler names it as no current thread, and the exit path switches no FP state for it | M5 |
 
 ### Compared with seL4
 
@@ -2260,19 +2603,29 @@ is about to run, with no #NM trap. The kernel never uses FP or SIMD registers.
 | CR4.FSGSBASE, CR4.PKE | 0 | [FS and GS base](#fs-and-gs-base); PKRU stays disabled |
 | XCR0 | `0x3` | x87 and SSE; every other component disabled |
 
-(Bit meanings from memory; check in M5.) The M3 feature check already
-requires CPUID.1:ECX.XSAVE (bit 26) ([CPU features](#cpu-features)). M5 checks
-that CPUID.(EAX=0xD, ECX=0).EAX has bits 0 and 1 before XSETBV (as seL4's
-`Arch_initFpu` checks its feature mask), writes XCR0, and reads
-CPUID.(EAX=0xD, ECX=0).EBX, the area size for the enabled features: it
-panics if that exceeds the TCB's 1024-byte reserve (for x87 and SSE it is
-576). From M5 the boot summary also prints XCR0 and the size, for the
-Hyper-V check. QEMU's default TCG model, `qemu64`, lacks XSAVE
-[H1], so from M3 xtask's `base_command()` passes
-`-cpu max,la57=off`, and a scenario `cpu_refuse` uses the `qemu_args:` key to
-boot `-cpu qemu64` and expect the kernel's one refusal line, which names XSAVE
-among the missing features. The Hyper-V VM runs with processor
-compatibility mode off (`tools/hyperv/New-L4Vm.ps1`).
+`fpu::init` (`arch/x86_64/fpu.rs`) sets them in boot step 3, and
+`fpu::check_control_state` reads CR0, CR4 and XCR0 back and panics on any
+difference. On QEMU the boot summary's CR0 `0x80010033` and CR4 `0x340ee8`
+show MP, NE, OSFXSR, OSXMMEXCPT and OSXSAVE set and EM, TS, AM, FSGSBASE and
+PKE clear. Of the bit meanings, M5 checked on QEMU that with CR0.NE an
+unmasked x87 exception raises #MF in ring 3 (`test=ring3`); that
+CR4.OSXMMEXCPT makes an unmasked SIMD exception raise #XM is open until the M5
+Hyper-V check boots `test=ring3`, since QEMU's TCG raises no SIMD exception
+([FP exceptions](#fp-exceptions)). The rest are from memory. The M3 feature
+check already requires CPUID.1:ECX.XSAVE (bit 26) ([CPU
+features](#cpu-features)). M5 checks that CPUID.(EAX=0xD, ECX=0).EAX has bits
+0 and 1 before XSETBV (as seL4's `Arch_initFpu` checks its feature mask),
+writes XCR0, and reads CPUID.(EAX=0xD, ECX=0).EBX, the area size for the
+enabled features: it panics unless that is at least 576 and at most the TCB's
+1024-byte reserve (for x87 and SSE it is 576; `l4core::fpu`'s
+`check_supported` and `check_size`). From M5 the boot summary also prints XCR0
+and the size, for the Hyper-V check: `fpu: XCR0 0x3 of 0x21f supported, XSAVE
+area 576 bytes of the TCB's 1024` on QEMU under `-cpu max,la57=off`. QEMU's
+default TCG model, `qemu64`, lacks XSAVE [H1], so from M3 xtask's
+`base_command()` passes `-cpu max,la57=off`, and a scenario `cpu_refuse` uses
+the `qemu_args:` key to boot `-cpu qemu64` and expect the kernel's one refusal
+line, which names XSAVE among the missing features. The Hyper-V VM runs with
+processor compatibility mode off (`tools/hyperv/New-L4Vm.ps1`).
 
 Only x87 and SSE, seL4's default (`XSAVE_FEATURE_SET` 3, `XSAVE_SIZE` 576 in
 `src/arch/x86/config.cmake`), so QEMU TCG and every Hyper-V host behave alike
@@ -2284,14 +2637,16 @@ would fit the reserve later without changing `TCB_BITS`.
 `fpu_owner` names the TCB whose state is in the registers, or none. Before
 returning to user thread `t` with `fpu_owner != t`, the kernel XSAVE64s the
 owner's state into its `xsave` (if there is an owner), XRSTOR64s `t`'s, and
-sets `fpu_owner = t`, with XCR0 as the feature mask. The idle thread and the
-kernel never take ownership, so A, idle, A costs nothing. Every switch between
-two user threads swaps the state and nothing traps: PLAN.md's eager switching,
-with seL4's owner tracking (`lazyFPURestore`, `include/machine/fpu.h`).
-Deleting the owner clears `fpu_owner` without saving; the next XRSTOR64 loads
-every enabled component, so nothing of it survives. Plain XSAVE64 (seL4's
-default too) exists wherever XSAVE does, keeps fixed offsets, and avoids
-reasoning about XSAVEOPT's modified optimisation.
+sets `fpu_owner = t`, with XCR0 as the feature mask (`fpu::switch_to`, from
+`thread::exit_to_scheduled` at every exit to a thread; `fpu::forget` at TCB
+finalisation; `fpu::init_area` writes the template into a new TCB). The idle
+thread and the kernel never take ownership, so A, idle, A costs nothing. Every
+switch between two user threads swaps the state and nothing traps: PLAN.md's
+eager switching, with seL4's owner tracking (`lazyFPURestore`,
+`include/machine/fpu.h`). Deleting the owner clears `fpu_owner` without
+saving; the next XRSTOR64 loads every enabled component, so nothing of it
+survives. Plain XSAVE64 (seL4's default too) exists wherever XSAVE does, keeps
+fixed offsets, and avoids reasoning about XSAVEOPT's modified optimisation.
 
 ### Initial state
 
@@ -2301,42 +2656,53 @@ XCOMP_BV and reserved header bytes 0. A new thread starts with every x87 and
 SIMD exception masked, 64-bit precision, round to nearest and zeroed
 registers, as in seL4 after `finit` and `MXCSR_INIT_VALUE`
 (`src/arch/x86/machine/fpu.c`), but the kernel executes no x87 or SSE
-instruction to make it. (Offsets from memory; a host test pins them, and an M5
-scenario reads FCW and MXCSR in a new thread.)
+instruction to make it. Host tests pin the offsets (`l4core::fpu`,
+`offsets_are_the_sdm_layout`, `the_template_is_the_abi_initial_state`), and
+M5 checked them on QEMU: `test=ring3`'s first thread reads FCW `0x37F` and
+MXCSR `0x1F80` from the template with `fnstcw` and `stmxcsr`, and XMM0,
+XMM15, ST0, ST1 and MXCSR values it sets are found at their offsets after
+XSAVE64.
 
 ### FP exceptions
 
 #MF (16, an unmasked x87 exception at the thread's next waiting x87
 instruction) and #XM (19) become UserException with code 0; #UD from disabled
 AVX becomes UserException 6. #NM cannot happen; if it does it is
-UserException 7. XSAVE64 and XRSTOR64 do not raise a pending x87 exception
-(from memory; check in M5), so it travels with its thread's state. No
-invocation exposes FP state, so a handler cannot read FSW or MXCSR
-([Open questions](#open-questions)).
+UserException 7. XSAVE64 and XRSTOR64 do not raise a pending x87 exception,
+so it travels with its thread's state. Checked in M5 on QEMU: `test=ring3`
+carries a pending, unmasked x87 divide by zero (FCW `0x37b`, FSW `0xb8a4`)
+across XSAVE64 and XRSTOR64 with nothing raised in ring 0, and the thread
+takes #MF at its next `fwait`. QEMU's TCG raises no SIMD exception: a
+`divsd` by zero with ZM clear sets ZE in MXCSR and nothing traps, so the #XM
+path is open until the M5 Hyper-V check boots `test=ring3`. No invocation
+exposes FP state, so a handler cannot read FSW or MXCSR ([Open
+questions](#open-questions)).
 
 ### The kernel never touches SSE; the user target
 
 `x86_64-unknown-none` turns off MMX and SSE and selects soft float,
 `kernel/src/main.rs` refuses to compile with `target_feature = "sse"`, and
-kernel assembly uses only XSAVE64, XRSTOR64, XSETBV and XGETBV. So a user
-thread's state stays live across kernel entries and is swapped only when the
-thread changes. Default for M5: user crates also build for
-`x86_64-unknown-none` through M10, since no planned program needs floating
-point. The kernel switches the state regardless, because isolation must not
-depend on what user code executes, so a later SSE target needs no kernel
-change.
+kernel assembly uses only XSAVE64, XRSTOR64, XSETBV and XGETBV, all in
+`arch/x86_64/fpu.rs`. So a user thread's state stays live across kernel
+entries and is swapped only when the thread changes. User crates also build
+for `x86_64-unknown-none` through M10, since no planned program needs
+floating point; xtask adds `-C relocation-model=static -C code-model=small`,
+as they are linked at `0x40_0000`, not in the top 2 GiB
+([Root-task image and address space](#root-task-image-and-address-space)).
+The kernel switches the state regardless, because isolation must not depend
+on what user code executes, so a later SSE target needs no kernel change.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| A thread never observes another thread's x87 or SSE state, a deleted thread's included | XRSTOR64 with XCR0 whenever ownership changes; owner cleared on delete; QEMU scenario `fp_isolation` (two threads keep distinct XMM and x87 values across preemption) | M5 |
-| The kernel executes no FP or SIMD instruction but XSAVE64, XRSTOR64, XSETBV, XGETBV | `x86_64-unknown-none` and `compile_error!` on SSE (both in place since M0); review of `arch` assembly | M5 |
-| XRSTOR64 in the kernel never faults | areas written only by XSAVE64 or from the template; no invocation exposes them; host test of the template's header and MXCSR | M5 |
-| XCR0 is `0x3` and the enabled area fits the TCB's reserve | boot check of CPUID leaf 0xD | M5 |
+| A thread never observes another thread's x87 or SSE state, a deleted thread's included | `fpu::switch_to` XRSTOR64s with XCR0 whenever ownership changes, at every exit to a thread; `fpu::forget` clears the owner when its TCB is finalised; `test=isolation` has the scheduler preempt and switch two threads for 160 ms, and each keeps its own XMM0 to XMM15, ST0, ST1, MXCSR and FCW (and its FS and GS bases, twelve general registers, DF and AC), as does the root task; `test=ring3` switches to another TCB's initial state and back by hand, and checks XMM0, XMM15, ST0, ST1 and MXCSR in both areas and in the thread | M5 |
+| The kernel executes no FP or SIMD instruction but XSAVE64, XRSTOR64, XSETBV, XGETBV | `x86_64-unknown-none` and `compile_error!` on SSE (both in place since M0); the four live only in `arch/x86_64/fpu.rs`; review of `arch` assembly | M5 |
+| XRSTOR64 in the kernel never faults | areas written only by XSAVE64 or from the template (`fpu::init_area`); no invocation exposes them; host tests `xrstor_accepts_the_template` and `the_template_is_the_abi_initial_state` | M5 |
+| XCR0 is `0x3` and the enabled area fits the TCB's reserve | `fpu::init`'s check of CPUID leaf 0xD (`l4core::fpu::check_supported`, `check_size`, host test `cpuid_checks`); the `fpu:` boot summary line | M5 |
 | The kernel refuses to boot on a CPU without XSAVE, with its one refusal line, rather than fault later | the M3 feature check ([Privilege levels](#privilege-levels)); QEMU scenario `cpu_refuse` (`qemu_args: -cpu qemu64`) | M3 |
-| The FP owner is never a finalised TCB | TCB finalisation clears it | M5 |
-| CR0.TS = CR0.EM = 0, CR0.NE = 1, CR4.OSFXSR = OSXMMEXCPT = OSXSAVE = 1 from boot on | arch init; boot self-test reads them back | M5 |
+| The FP owner is never a finalised TCB | the TCB `finalise` hook calls `fpu::forget` | M5 |
+| CR0.TS = CR0.EM = 0, CR0.NE = 1, CR4.OSFXSR = OSXMMEXCPT = OSXSAVE = 1 from boot on | `fpu::init` in boot step 3; `fpu::check_control_state` reads them back on every boot; the boot summary prints CR0 and CR4, and scenarios match the line | M5 |
 
 ### Compared with seL4
 
@@ -2373,9 +2739,9 @@ seL4's DebugException, and 0 and 6 up are never sent.
 | Vector from ring 3 | Result |
 | --- | --- |
 | 0 #DE, 6 #UD, 16 #MF, 19 #XM | UserException, code 0 |
-| 1 #DB | UserException, code 0: TF single-step or `int1`. #DB runs on IST4; a ring-0 #DB returns only when its saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set) and panics otherwise |
+| 1 #DB | UserException, code 0: TF single-step or `int1`. #DB runs on IST4; a ring-0 #DB returns only when its saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set) or the #BP stub's first instruction (`mov ss` with TF set, then `int3`, which then gives UserException 3), and panics otherwise |
 | 3 #BP | UserException, code 0, `rip` past the `int3`: vector 3 is the only DPL-3 gate |
-| 10 #TS, 11 #NP, 12 #SS, 13 #GP | UserException with the error code; `int n` for any `n` but 3 hits a DPL-0 gate and arrives as #GP with code `8n + 2` |
+| 10 #TS, 11 #NP, 12 #SS, 13 #GP | UserException with the error code; `int n` for any `n` but 3 hits a DPL-0 gate and arrives as #GP with code `8n + 2` (on QEMU `int 0x80` gives `0x402`, `test=ring3`) |
 | 14 #PF | VMFault: CR2, the error code, its bit 4 as the instruction-fetch flag |
 | 4 #OF, 5 #BR, 7 #NM | cannot occur (no compatibility-mode code segment, CR0.TS = 0); UserException with code 0 if they do |
 | 17 #AC, 20 #VE, 21 #CP, 29, 30, and the reserved vectors 9, 15, 22 to 28, 31 | cannot occur (CR0.AM = 0, no #VE enabled, CET off, no SEV); the kernel panics if one does, from either ring |
@@ -2399,7 +2765,16 @@ seL4's DebugException, and 0 and 6 up are never sent.
 
 Delivery touches only kernel memory (the faulting TCB, the endpoint, the
 handler's registers and IPC buffer frame through the direct map), so it cannot
-fault and never blocks the kernel.
+fault and never blocks the kernel. In code: `l4core::entry::classify` makes
+a ring-3 exception an `Exception { vector, error, cr2 }`,
+`l4core::syscall::handle_exception` turns it into a `Fault`
+(`Fault::from_exception`), and `l4core::ipc::deliver_fault` runs the three
+steps; an unknown system call and a failed lookup reach `deliver_fault` from
+`handle_syscall`. On QEMU `test=fault` shows a VMFault delivered to a
+handler thread through a fault endpoint with only Write and GrantReply, with
+the words [Fault messages](abi.md#fault-messages) gives: label 5, length 4,
+badge 0, the faulting instruction, the address, prefetch 0 and an error code
+of `0x4`, a user-mode read of a page not present.
 
 ### Reply
 
@@ -2423,30 +2798,33 @@ system call a handler adds 2 to MR15. Registers set by a reply go through
 
 - If the lookup fails or finds anything but a suitable endpoint, the thread
   becomes `Inactive`; there is no second-level handler. Debug builds print both
-  faults and `rip` (seL4 `handleDoubleFault`, `src/kernel/faulthandler.c`).
-  The root task's `fault_ep` is 0, so a fault stops it.
+  faults and `rip` (seL4 `handleDoubleFault`, `src/kernel/faulthandler.c`):
+  `deliver_fault` returns a `DoubleFault`, and `kernel/src/dispatch.rs` prints
+  `thread <TCB> stopped at <fault_ip>: <fault>; its fault endpoint: <lookup
+  failure>`. The root task's `fault_ep` is 0, so a fault stops it.
 - A handler that faults sends to its own fault endpoint. A thread that handles
   its own faults deadlocks with itself, a user error the kernel ignores.
 - A ring-0 exception is a kernel bug and panics.
 
 ### `core/` and `arch/`
 
-`arch` turns a ring-3 vector, error code and CR2 into a `Fault` (M3 decodes,
-M5 classifies). `l4core::regs` holds `Fault`, the encoder and the reply
-decoder (M5). Delivery, reply capabilities and fault replies are built in M5
-with the endpoint path they need; from M6 they are operations of the IPC
-state machine in `l4core` under its proptest.
+`arch` hands a ring-3 vector, error code and CR2 to `l4core::entry::classify`
+(M3 decodes, M5 classifies). `l4core::regs` holds `Fault`, the encoder
+(`fault_message`) and the reply decoder (`fault_reply`) (M5). Delivery
+(`ipc::deliver_fault`), reply capabilities and fault replies are built in M5
+with the endpoint path they need, in `l4core::ipc`, under host tests; from
+M6 the IPC state machine's proptest covers them too.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Every ring-3 exception the configuration allows, and every failed lookup, ends with a fault message on an endpoint the thread could Call, or with the thread `Inactive`; never with a kernel panic | fault path in `l4core` and `arch`; QEMU scenarios `vmfault`, `fault_no_handler` and one per reachable vector (M5); IPC state-machine proptest (M6) | M5, M6 |
-| A fault is sent only to an endpoint capability with Write plus Grant or GrantReply, checked at fault time | delivery step 1; host test | M5 |
-| A fault message carries only the faulting thread's own registers and fault data | encoder reads only the faulting TCB; host tests | M5 |
-| A fault reply changes only the registers its fault type names, through `sanitise`, and only label 0 restarts | `l4core::regs` reply decoder, host tests | M5 |
-| Fault delivery never blocks or faults the kernel and allocates nothing | delivery is a Call that blocks the faulting thread and touches kernel memory only | M5 |
-| A ring-0 #DB returns only to `syscall_entry`; every other ring-0 #DB, and any of vectors 9, 15, 17 or 20 to 31, panics | IDT handlers (M3); QEMU scenario: a thread runs `syscall` with TF set and is single-stepped into its own handler (M5) | M3, M5 |
+| Every ring-3 exception the configuration allows, and every failed lookup, ends with a fault message on an endpoint the thread could Call, or with the thread `Inactive`; never with a kernel panic | `l4core::entry::classify`, `l4core::syscall` and `ipc::deliver_fault`; host tests `exceptions_classify_as_docs_abi_says`, the fault tests in `core/src/ipc/tests.rs` and `a_pointer_that_does_not_resolve_faults_except_for_nbsend`; `test=fault` (a VMFault reaches its handler); `test=ring3` raises #BP, #MF, #DB, #PF, #UD and #GP from ring 3 into its own hook; IPC state-machine proptest (M6) | M5, M6 |
+| A fault is sent only to an endpoint capability with Write plus Grant or GrantReply, checked at fault time | delivery step 1 (`deliver_fault`); host test `a_fault_without_a_suitable_handler_stops_the_thread`; `test=fault`'s fault endpoint has Write and GrantReply only | M5 |
+| A fault message carries only the faulting thread's own registers and fault data | `l4core::regs::fault_message` reads only the fault and the faulting thread's registers; host test `fault_messages_carry_the_abi_words` | M5 |
+| A fault reply changes only the registers its fault type names, through `sanitise`, and only label 0 restarts | `l4core::regs::fault_reply`; host tests `a_fault_reply_sets_only_the_registers_its_type_names`, `fault_reply_values_are_sanitised` and `a_fault_reply_with_another_label_stops_the_thread` | M5 |
+| Fault delivery never blocks or faults the kernel and allocates nothing | delivery is a Call that blocks the faulting thread and touches kernel memory only; `deliver_fault` has no preemption point, and its time is bounded by the lookup and the message | M5 |
+| A ring-0 #DB returns only to `syscall_entry` or to the #BP stub's first instruction, never to the #DB stub's; every other ring-0 #DB, and any of vectors 9, 15, 17 or 20 to 31, panics | IDT handlers (M3); `l4core::entry::single_step_into_syscall_entry` and `single_step_into_breakpoint_stub` in `trap_from_kernel`, host tests `single_step_into_syscall_entry_needs_db_ring_0_and_that_rip` and `single_step_into_breakpoint_stub_needs_db_ring_0_and_vector_3s_stub`; `test=ring3` runs `syscall` with TF set and takes the single step in ring 3 (QEMU raises no ring-0 #DB there); `test=redteam-movss` runs `mov ss` with TF set before `syscall`, `int3`, `int 0x80`, `int1` and `ud2` (QEMU raises the #DB in ring 3; the Hyper-V check runs it on a real CPU) | M3, M5 |
 | No user action makes the kernel take an exception in ring 0 | the kernel never dereferences user addresses; syscall fuzzer; red-team briefs 5 and 6 | M10 |
 
 ### Compared with seL4
@@ -2473,7 +2851,10 @@ notifications and tests the whole machine on the host under proptest.
 
 ### Endpoint states and queues
 
-An endpoint has a state and one queue of TCBs, oldest first.
+An endpoint has a state and one queue of TCBs, oldest first. It is four
+words (`l4core::ipc::ep_field`): the queue's head and tail, the state and a
+reserved word. Zeroed memory is an `Idle`, empty endpoint, so retype needs no
+initialisation, and a state word no writer stores reads as `Idle`.
 
 | State | Queue | Every queued thread is |
 | --- | --- | --- |
@@ -2546,6 +2927,12 @@ What each failure produces (a capability fault, an error reply, or nothing) is
 listed in [Errors, faults and silent
 drops](abi.md#errors-faults-and-silent-drops). `Reply` and the reply phase of
 `ReplyRecv` take no capability: they use the caller slot.
+
+Until M6 builds notifications, a Notification capability is a kernel object
+without invocations: `Call` on it returns `IllegalOperation`, `Send` and
+`NBSend` drop it, and a receive on it is a capability fault, as on any
+capability that is not an endpoint. `l4core::syscall` does this decoding
+([System-call dispatch](#system-call-dispatch)).
 
 ### Send phase
 
@@ -2758,79 +3145,94 @@ rule.
 
 ### Priorities
 
-IPC does no priority inheritance or donation
-([ADR 0018](adr/0018-ipc-priorities.md)). A woken thread is passed to the
+IPC does no priority inheritance or donation ([ADR
+0018](adr/0018-ipc-priorities.md)). A woken thread is passed to the
 scheduler's `make_runnable`. IPC never switches threads itself; the
-scheduler's tie rule
-([Scheduler action and decision](#scheduler-action-and-decision)) runs a
-`Call` or `ReplyRecv` partner at once. IPC never reads or changes a priority
-or timeslice. Inversion is avoided by configuration: `root` gives each
-server a priority at least that of every client, an immediate priority
-ceiling, and the maximum controlled priority
-([Priorities and MCP](#priorities-and-mcp)) stops a client raising itself
-past it.
+scheduler's tie rule ([Scheduler action and
+decision](#scheduler-action-and-decision)) runs a `Call` or `ReplyRecv`
+partner at once. IPC never reads or changes a priority or timeslice. `IpcEnv`
+extends `Threads`, which can set priorities, so the type does not show this;
+the host tests check after every step that no priority changed ([Where the
+code lives](#where-the-code-lives-1)). Inversion is avoided by configuration:
+`root` gives each server a priority at least that of every client, an
+immediate priority ceiling, and the maximum controlled priority ([Priorities
+and MCP](#priorities-and-mcp)) stops a client raising itself past it.
 
 ### Where the code lives
 
 | Part | Where | Milestone |
 | --- | --- | --- |
-| `MessageInfo` packing, IPC buffer word indices, message-register mapping | `l4core::ipc`, shared with `libsys` | M5 |
-| Endpoint and thread-state types; `Send`, `NBSend`, `Call`, `Recv`, `NBRecv`, `Reply`, `ReplyRecv` on endpoints without capability transfer; reply capabilities; fault delivery; `cancel_ipc`, `cancel_all_ipc` | `l4core::ipc`, generic over `IpcEnv` | M5 |
+| `MessageInfo` packing, IPC buffer word indices (`word::*`, pinned by offset asserts), message-register mapping (`mr_location`, `delivered_length`) | `l4core::ipc::message`, shared with `libsys` | M5 |
+| Endpoint and thread-state types; `Send`, `NBSend`, `Call`, `Recv`, `NBRecv`, `Reply`, `ReplyRecv` on endpoints without capability transfer; reply capabilities; fault delivery; `cancel_ipc`, `cancel_all_ipc`; `check`, the invariants below as a function | `l4core::ipc` (`endpoint.rs`: the endpoint, its queue, `IpcEnv`, `EndpointCap`; `machine.rs`: `send`, `receive`, `reply`, `transfer`, `cancel_ipc`, `cancel_all_ipc`, `finalise`, `deliver_fault`, `check`), generic over `IpcEnv` | M5 |
 | Capability transfer and unwrapping, badge tests, notifications and binding, `CNode_SaveCaller`, `cancel_badged_sends`, `cancel_all_signals` | `l4core::ipc` | M6 |
 | Reference model and the IPC state-machine proptest | `model/`; tests in `core/` | M6 |
-| `IpcEnv` for the kernel: object access, saved register frames, IPC buffer frames | `kernel/src/arch/x86_64/` | M5, M6 |
-| System-call dispatch, capability lookup, rights checks | kernel, safe code calling `l4core` | M5, M6 |
+| `IpcEnv` and `Threads` for the kernel: endpoint words, IPC buffer words, saved register frames, the scheduler | `arch::Objects` (`kernel/src/arch/x86_64/objects.rs`) | M5, M6 |
+| System-call dispatch, capability lookup, rights checks | `l4core::syscall`, host-tested; the kernel's `dispatch.rs` acts on its `Outcome` | M5, M6 |
 
 M5 builds what its done-when test needs: a page fault reaches a handler
 thread through an endpoint, which needs fault delivery and reply
 capabilities, and the handler kills the faulting thread, which is
-`BlockedOnReply` and so needs `cancel_ipc`. Once user code can delete an
-endpoint, its finalisation needs `cancel_all_ipc`. M5's host tests cover
-these functions; M6 adds the rest and the proptest.
+`BlockedOnReply` and so needs `cancel_ipc` (`test=fault`). Once user code can
+delete an endpoint, its finalisation needs `cancel_all_ipc`. M5's host tests
+cover these functions; M6 adds the rest and the proptest.
 
 `core/` names objects by physical-address handles (`TcbRef`, `EpRef`,
 `NtfnRef`) that wrap `NonZeroU64`: no kernel object lies at physical address
-0, because M4 makes no untyped below 1 MiB, so a stored 0 means none.
-Handles are made only from a capability of the matching type or from links
-IPC maintains. `IpcEnv` extends the capability core's `Kernel` trait: it
-loads and stores endpoints, notifications and the TCB's IPC fields by value,
-reads and writes message words by index (0 to 3 in saved registers, 4 to 119
-in the buffer, `None` without a usable buffer), and calls the scheduler
-(`make_runnable`, dequeue). As for slots, `arch/` reads and writes through
-raw pointers into the direct map and never forms a Rust reference into an
-object or an IPC buffer. Buffers may alias: two threads may name the same
-1 KiB (sender and receiver included), and a DMA-capable device may write it.
-The `SAFETY:` argument is the no-dangling invariant below and the rule that
-no object lies at address 0; `model/` implements the same trait over maps.
-Proptest runs random system calls by a few threads on a few endpoints and
-notifications, mixed with kernel signals, binds, suspends, deletions and
-badge cancellations; each step lets any `Running` thread act,
-so the model does not depend on the scheduler's choice. After every step it
-compares thread states, queues, notification words, caller slots and
-delivered registers with the model.
+0, because M4 makes no untyped below 1 MiB, so a stored 0 means none. Handles
+are made only from a capability of the matching type or from links IPC
+maintains. `IpcEnv` extends `l4core::tcb::Threads`, and so the capability
+core's `Kernel`, `Scheduling` and `Tcbs`: it adds the endpoint words
+(`endpoint_word`, `set_endpoint_word`) and the read side of IPC buffers
+(`read_buffer_word`). The TCB's IPC fields come through `Tcbs`; a message word
+is found by index with `tcb::buffer_word` (0 to 3 in saved registers, 4 to 119
+in the buffer, `None` without a usable buffer) and written with
+`Threads::write_buffer_word`; the scheduler is called through `l4core::sched`
+(`make_runnable`, `set_thread_state`). Since `Threads` can set priorities, the
+type no longer shows that IPC changes none ([ADR
+0018](adr/0018-ipc-priorities.md)); the host tests check it after every step
+instead. As for slots, `arch/` reads and writes through raw pointers into the
+direct map and never forms a Rust reference into an object or an IPC buffer.
+Buffers may alias: two threads may name the same 1 KiB (sender and receiver
+included), and a DMA-capable device may write it. The `SAFETY:` argument is
+the no-dangling invariant below and the rule that no object lies at address 0;
+from M6 `model/` implements the same trait over maps.
+
+M5's host tests (`core/src/ipc/tests.rs`, `core/src/syscall/tests.rs`) cover
+every call, its errors and silent drops, the caller slot, `ReplyRecv` and its
+restart, each fault type with restart and stop, a handler deleting or
+suspending the faulting thread, a missing handler, an endpoint deleted with
+threads queued, queue order and preemption, and self-suspend and self-delete.
+At every kernel exit they check the scheduler's and IPC's invariants
+(`sched::check_exit`, `ipc::check`) and that no priority changed. From M6,
+proptest runs random system calls by a few threads on a few endpoints and
+notifications, mixed with kernel signals, binds, suspends, deletions and badge
+cancellations; each step lets any `Running` thread act, so the model does not
+depend on the scheduler's choice. After every step it compares thread states,
+queues, notification words, caller slots and delivered registers with the
+model.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | No kernel object lies at physical address 0 | M4 untyped builder, host test; `core/` handles are `NonZeroU64` | M2, M4 |
-| A thread is in at most one queue, and it is in object `O`'s queue exactly when it is `BlockedOnSend`, `BlockedOnReceive` or `BlockedOnNotification` on `O` | `l4core::ipc` queue functions and their host tests; proptest against `model/` after every step | M5, M6 |
-| An endpoint is `Idle` exactly when its queue is empty; in `Send` every queued thread is `BlockedOnSend` on it, in `Recv` every one is `BlockedOnReceive` | `l4core::ipc` and host tests; proptest | M5, M6 |
-| Queued threads are served in arrival order | host tests; proptest against the model's FIFO queues | M5, M6 |
-| No queue, link or reply capability refers to a deleted endpoint, notification or TCB: finalisation empties queues and bindings, and deleting a TCB cancels its IPC, before the memory can be retyped | `cancel_ipc` and `cancel_all_ipc` from finalisation (M5); `cancel_all_signals` and unbind (M6); proptest with deletions; red-team brief 2 | M5, M6, M10 |
-| A reply capability, other than a master, exists only while the thread it names is `BlockedOnReply`, and there is at most one per thread | `send`, `receive`, `reply`, `cancel_ipc` and their host tests; proptest | M5, M6 |
-| Every TCB's `reply` slot holds its own master reply capability, a derivation root at depth 0, from retype (or, for the root task's TCB, from boot) until finalisation; nothing but that finalisation copies, moves, revokes or deletes a master, and only a master has a reply capability derived from it | TCB retype; the capability core refuses masters as sources and inserts reply capabilities only under one; proptest | M5, M6 |
-| A thread `BlockedOnReceive` has an empty caller slot | receive step 1, host test; proptest | M5, M6 |
-| The receiver gets the first delivered-length words of the sender's message and nothing else from any thread; its other message registers keep its own values | `transfer` and host tests; proptest comparing register sets; ping-pong scenario | M5, M6 |
-| The kernel reads an IPC buffer only through a non-device frame capability in the TCB's IPC buffer slot, writes it only with Write, and touches only its 128 words | `IpcEnv` buffer accessor takes a word index below 128; `TCB_SetIPCBuffer` checks ([Creation and configuration](#creation-and-configuration)) | M5 |
+| A thread is in at most one queue, and it is in object `O`'s queue exactly when it is `BlockedOnSend`, `BlockedOnReceive` or `BlockedOnNotification` on `O` | `l4core::ipc` queue functions; `ipc::check` at every kernel exit of the host tests; proptest against `model/` after every step (M6) | M5, M6 |
+| An endpoint is `Idle` exactly when its queue is empty; in `Send` every queued thread is `BlockedOnSend` on it, in `Recv` every one is `BlockedOnReceive` | `l4core::ipc`; `ipc::check` in the host tests (`check_finds_broken_states` shows it catches each breach); proptest (M6) | M5, M6 |
+| Queued threads are served in arrival order | host tests `queues_are_fifo_whatever_the_priority` and `deleting_an_endpoint_restarts_every_queued_thread_in_order`; proptest against the model's FIFO queues (M6) | M5, M6 |
+| No queue, link or reply capability refers to a deleted endpoint, notification or TCB: finalisation empties queues and bindings, and deleting a TCB cancels its IPC, before the memory can be retyped | `cancel_all_ipc` from an endpoint's last capability (`ipc::finalise`) and `cancel_ipc` from the TCB's (`tcb::suspend`) (M5); host tests `deleting_an_endpoint_restarts_its_receivers` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`; `cancel_all_signals` and unbind (M6); proptest with deletions; red-team brief 2 | M5, M6, M10 |
+| A reply capability, other than a master, exists only while the thread it names is `BlockedOnReply`, and there is at most one per thread | `send`, `receive`, `reply`, `cancel_ipc`; `ipc::check` in the host tests; proptest (M6) | M5, M6 |
+| Every TCB's `reply` slot holds its own master reply capability, a derivation root at depth 0, from retype (or, for the root task's TCB, from boot) until finalisation; nothing but that finalisation copies, moves, revokes or deletes a master, and only a master has a reply capability derived from it | TCB retype inserts the master as a root, and boot step 8 the root TCB's; the capability core refuses masters as sources and inserts reply capabilities only under one; `ipc::check`; host test `tcb_retype_makes_a_reply_master_root`; proptest (M6) | M5, M6 |
+| A thread `BlockedOnReceive` has an empty caller slot | receive step 1; `ipc::check`; host test `receiving_again_before_replying_gives_up_the_reply`; proptest (M6) | M5, M6 |
+| The receiver gets the first delivered-length words of the sender's message and nothing else from any thread; its other message registers keep its own values | `transfer`; host tests `a_send_to_a_waiting_receiver_moves_the_message` and `nbrecv_with_nothing_pending_returns_zeros_and_keeps_the_message_registers`; proptest comparing register sets and ping-pong scenario (M6) | M5, M6 |
+| The kernel reads an IPC buffer only through a non-device frame capability in the TCB's IPC buffer slot, writes it only with Write, and touches only its 128 words | `l4core::tcb::buffer_word` takes a word index below 128 and needs Read, and Write to write (host test `buffer_words_need_a_frame_with_the_rights`); `TCB_SetIPCBuffer` checks ([Creation and configuration](#creation-and-configuration)) | M5 |
 | A capability moves by IPC only if the sender's capability has Grant, only into an empty slot the receiver named, at most one per message, with unchanged rights and badge, derived from the sender's capability by `derive` and `insert_derived` below `MAX_DERIVATION_DEPTH` | transfer loop; proptest; capability-transfer scenario; red-team brief 1 | M6, M10 |
 | Only an endpoint capability to the endpoint carrying the message is unwrapped, and the receiver learns only its badge | transfer loop; proptest | M6 |
-| The badge a receiver sees is the badge of the capability the sender invoked, or 0 for a reply; no sender can choose it | `send` stores the capability's badge (M5); badge scenario (M6) | M5, M6 |
-| `Send` and `Call` need Write, `Call` also Grant or GrantReply, receiving needs Read, and a fault endpoint needs Write and Grant or GrantReply, checked at fault time | dispatcher and fault-path checks; syscall fuzzer, red-team brief 6 | M5, M10 |
-| A thread leaves a blocked state only by completing its operation or through `cancel_ipc`, `cancel_all_ipc`, `cancel_badged_sends` or `cancel_all_signals`, so a restarted thread re-executes its system call with its own arguments | `l4core::ipc` state machine and host tests; proptest | M5, M6 |
-| A thread's fault record is set only while it is `BlockedOnSend` or `BlockedOnReply` for that fault | `send`, `reply`, `cancel_*` and host tests; proptest | M5, M6 |
-| Every IPC system call finishes in one kernel entry, in time bounded by the message (120 words, 3 capabilities) or, for a cancellation, by its queue, which holds at most the TCBs that exist (2^18 in 512 MiB with `TCB_BITS` = 11); no argument makes the kernel block or panic | no other loop in `l4core::ipc`; syscall fuzzer, red-team brief 6; worst-case cancellation measured by red-team brief 9 | M5, M6, M10 |
-| IPC never changes a thread's priority or timeslice | `IpcEnv` has no method that can; red-team brief 9 | M5, M10 |
+| The badge a receiver sees is the badge of the capability the sender invoked, or 0 for a reply; no sender can choose it | `send` stores the capability's badge in `BlockedOnSend` (M5; host test `the_badge_is_the_one_the_sender_invoked_when_it_sent`); badge scenario (M6) | M5, M6 |
+| `Send` and `Call` need Write, `Call` also Grant or GrantReply, receiving needs Read, and a fault endpoint needs Write and Grant or GrantReply, checked at fault time | `l4core::syscall` and `ipc::deliver_fault` (`EndpointCap::can_send`, `can_call`, `can_receive`); host tests `call_needs_write_and_grant_or_grant_reply`, `send_needs_write_but_no_grant` and `receiving_needs_read`; syscall fuzzer, red-team brief 6 | M5, M10 |
+| A thread leaves a blocked state only by completing its operation or through `cancel_ipc`, `cancel_all_ipc`, `cancel_badged_sends` or `cancel_all_signals`, so a restarted thread re-executes its system call with its own arguments | `l4core::ipc` state machine; host tests `suspend_takes_a_thread_out_of_its_queue_and_resume_restarts_it` and `a_restarted_reply_recv_is_harmless`; proptest (M6) | M5, M6 |
+| A thread's fault record is set only while it is `BlockedOnSend` or `BlockedOnReply` for that fault | `deliver_fault`, `reply`, `cancel_*`; `ipc::check` in the host tests; proptest (M6) | M5, M6 |
+| Every IPC system call finishes in one kernel entry, in time bounded by the message (120 words, 3 capabilities) or, for a cancellation, by its queue, which holds at most the TCBs that exist (2^18 in 512 MiB with `TCB_BITS` = 11); no argument makes the kernel block or panic | no preemption point and no other loop in `l4core::ipc`; syscall fuzzer, red-team brief 6; worst-case cancellation measured by red-team brief 9 | M5, M6, M10 |
+| IPC never changes a thread's priority or timeslice | no function in `l4core::ipc` sets either; `IpcEnv` extends `Threads`, which can, so the type no longer enforces it ([ADR 0018](adr/0018-ipc-priorities.md)), and the host tests check after every step that no priority changed; red-team brief 9 | M5, M10 |
 
 ### Compared with seL4
 
@@ -2975,7 +3377,7 @@ its handler ([ADR 0019](adr/0019-irqcontrol.md)).
 
 | Vectors | Use | Handling |
 | --- | --- | --- |
-| `0x00`-`0x1F` | CPU exceptions | from ring 3: a fault to the thread's handler ([Faults](#faults)), except NMI, #DF and #MC, which panic ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)); 9, 15, 17 and 20 to 31 cannot occur and panic from either ring; from ring 0: panic with the decoded frame (M3), except a `#DB` at `syscall_entry`, which returns ([Kernel entry and exit](#kernel-entry-and-exit)) |
+| `0x00`-`0x1F` | CPU exceptions | from ring 3: a fault to the thread's handler ([Faults](#faults)), except NMI, #DF and #MC, which panic ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)); 9, 15, 17 and 20 to 31 cannot occur and panic from either ring; from ring 0: panic with the decoded frame (M3), except a `#DB` at `syscall_entry` or at the #BP stub's first instruction, which returns ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)) |
 | `0x20`-`0x2F` | 8259 PIC, remapped here and masked | never expected; spurious: no EOI unless the vector's ISR bit is set (an injected MSI) |
 | `0x30`-`0xEF` | 192 device vectors, allocated by the kernel to I/O APIC pins, MSIs and SINTs | IRQ number = vector - `0x30`; see [Delivery](#delivery-1) |
 | `0xF0`-`0xFC` | reserved for IPIs (multi-core stretch goal) | unexpected: logged in debug builds, EOI |
@@ -2992,7 +3394,8 @@ handler. `int1` raises `#DB` without a DPL check (from memory; M10 brief 5
 checks it from ring 3, since QEMU 8.2's TCG raises `#UD` for `int1` in ring 0,
 and the `trap_debug` scenario single-steps instead): from ring 3 it is
 UserException 1; a ring-0 `#DB` returns only when
-the saved RIP is exactly `syscall_entry`, and any other panics. Vectors 9, 15,
+the saved RIP is exactly `syscall_entry` or the #BP stub's first instruction,
+and any other panics. Vectors 9, 15,
 17 (`#AC`, CR0.AM = 0) and 20 to 31 (`#VE` not enabled, `#CP` without CET, 29
 and 30 SEV only, the rest reserved) cannot occur; only an injected MSI reaches them, and the
 kernel panics. Their gates take the no-error-code entry, so the panic reads
@@ -3265,7 +3668,7 @@ message decoding, with host tests and a proptest against a set model;
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| User code never executes `in` or `out`: user RFLAGS.IOPL is 0 and the TSS has no I/O bitmap | TSS setup (M3); RFLAGS sanitised on `WriteRegisters` and every return (M5); red-team briefs 5 and 7 | M3, M5, M10 |
+| User code never executes `in` or `out`: user RFLAGS.IOPL is 0 and the TSS has no I/O bitmap | TSS setup (M3); RFLAGS sanitised on `WriteRegisters` (`l4core::regs::sanitise`) and every return (`l4core::entry::exit_frame`) (M5); red-team briefs 5 and 7 | M3, M5, M10 |
 | An IOPort invocation touches only ports inside its capability's range, width included, with no wrap past `0xFFFF` | `core::ioport` checks, proptest | M7 |
 | Issued ranges are pairwise disjoint and contain no kernel-reserved port | bitmap check in `Issue`, proptest | M7 |
 | A range becomes issuable again only once its last IOPort capability is deleted | finalise path, `core::ioport` test | M7 |
@@ -3616,24 +4019,29 @@ only when a holder of an IOPort capability for it (`uart`) invokes it
 ### The `debug` feature
 
 `kernel/Cargo.toml` has had `debug` and `selftest`, which implies `debug`,
-since M4. `debug` gates nothing yet: until M7 builds a kernel without it,
-every kernel prints. `selftest` gates every `test=` arm and all test-only
-kernel code: `kernel/src/selftest.rs`, the trap, paging, timer and NMI-stack
-tests and the tick and resume hooks in `arch`, the preemption-point
-statistics and injected preemptions, `arch::kernel_memory` and the stack-use
-report after a panic. A kernel without it answers any `test=` with a line
-saying it has no self-tests and fails the run, so a scenario fails at once.
-xtask builds the kernel with `--features selftest` for `test`, `run`, `gdb`,
-`image`, `build` and `acpidump` (the Hyper-V check reads COM1), and
-`cargo xtask clippy` lints it twice, with `selftest` and with no features,
-so that every `cfg` compiles both ways; M7 adds a build without `debug`.
-From M7, only with `debug` does the kernel contain `arch/x86_64/serial.rs`
-(the only file naming ports `0x3F8` to `0x3FF`), `kprintln!`'s writer, the
-panic message, the boot summary, the report of a fault with no handler
-([Missing handlers and double faults](#missing-handlers-and-double-faults)),
-system calls 16 to 18 and the TCB list they walk. Without it `kprintln!`
-expands to `if false { let _ = format_args!(...); }`, which type-checks its
-arguments and emits nothing, and a panic only exits with failure.
+since M4. From M5 `debug` gates the debug system calls, which only a `debug`
+kernel decodes, and the TCB list they walk; until M7 builds a kernel without
+it, every kernel prints. `selftest` gates every `test=` arm and all test-only
+kernel code: `kernel/src/selftest.rs` and `kernel/src/rootimage.rs`, the trap,
+paging, timer, NMI-stack, ring-3 and address-space tests and the tick, resume
+and user-entry hooks in `arch`, the preemption-point statistics and injected
+preemptions, `arch::kernel_memory` and the stack-use report after a panic.
+From M5 a `test=` name the kernel does not know goes to the root task, which
+reads it from BootInfo: the kernel prints `test=<name>: not a kernel
+self-test; the root task runs it` and runs boot step 10; the root task
+fails a name it does not know. A kernel without `selftest` knows no
+test, so it says it has no self-tests and passes every `test=` to the root
+task. xtask builds the kernel with `--features selftest` for `test`, `run`,
+`gdb`, `image`, `build` and `acpidump` (the Hyper-V check reads COM1), and
+`cargo xtask clippy` lints it twice, with `selftest` and with no features, so
+that every `cfg` compiles both ways; M7 adds a build without `debug`. From M7,
+only with `debug` does the kernel contain `arch/x86_64/serial.rs` (the only
+file naming ports `0x3F8` to `0x3FF`), `kprintln!`'s writer, the panic
+message, the boot summary, the report of a fault with no handler ([Missing
+handlers and double faults](#missing-handlers-and-double-faults)), system
+calls 16 to 18 and the TCB list they walk. Without it `kprintln!` expands to
+`if false { let _ = format_args!(...); }`, which type-checks its arguments and
+emits nothing, and a panic only exits with failure.
 
 The boot summary, which scenarios match line by line, grows by milestone: M0's
 lines (image, memory map, framebuffer, hypervisor, command line); from
@@ -3653,7 +4061,16 @@ RAM, the MiB of device memory and the `2^phys_addr_bits` bound (106 to 110
 untyped on QEMU, with the loader's allocations); the framebuffer's range and
 its device untyped, listed first, or `no framebuffer`, or a warning that it
 gets no untyped and why; and one line per non-empty slot region with its
-first and last slot and its size; from M5 XCR0 and the XSAVE size.
+first and last slot and its size. From M5, right after the command line,
+boot step 3 prints `entry: syscall_entry at <address>, IA32_STAR
+0x13000800000000, IA32_FMASK 0x257fd5, EFER.SCE on, IA32_SYSENTER_CS 0` and
+`fpu: XCR0 0x3 of <supported> supported, XSAVE area 576 bytes of the TCB's
+1024`; after the BootInfo lines come `boot: root task: image <start>-<end>,
+entry <entry>; TCB at <address>, PML4 at <address>, <p> PDPT, <d> PD, <t> PT,
+<n> image frames` and `boot: .rootimage <start>-<end> unmapped from the kernel
+window and reclaimed as RAM untyped`, and step 10 prints `boot: entering the
+root task at <entry> in ring 3`. `DebugHalt` prints `dispatch: invocations
+preempted and restarted: <n>` before its own line.
 
 ### Debug system calls
 
@@ -3661,16 +4078,22 @@ first and last slot and its size; from M5 XCR0 and the XSAVE size.
 | --- | --- | --- | --- | --- |
 | 16 | `DebugPutChar` | `rdi` bits 0 to 7 | writes the byte to COM1, `\n` as `\r\n` | all registers preserved except `rcx`, `r11` |
 | 17 | `DebugHalt` | `rdi`: status | prints `DEBUG HALT <status> from TCB <address>`, then `arch::exit`: status 0 is success, any other failure; under QEMU the run ends, elsewhere the machine halts | does not return |
-| 18 | `DebugDumpScheduler` | none | prints one line per TCB: address, state, priority, `next_ip` or `fault_ip`, and whether current | as 16 |
+| 18 | `DebugDumpScheduler` | none | prints one line per TCB, newest first: address, state, priority, `next_ip` or `fault_ip`, and whether current (`tcb <address>: <state>, priority <p>, at <address>`, and a `*` after the caller's) | as 16 |
 
 They take no capability: in a debug kernel any thread may print, dump and
 halt. Interrupts are off throughout, so one call's output is never split.
-`DebugDumpScheduler` walks a list of every TCB whose two link words live in
-the TCB's debug-only tail, as seL4 keeps `ksDebugTCBs`. Numbers 19 to 31
-stay reserved; there is no `DebugNameThread`. A user-space test ends a QEMU
-run with `DebugHalt(0)` after printing `TEST PASS`. In debug scenarios
-the kernel's writer and `uart` share COM1: the kernel only polls LSR and
-writes THR, so they coexist, with lines possibly interleaved.
+`l4core::syscall::handle_syscall` returns them as `Outcome::Debug` without
+touching a register, and `kernel/src/dispatch.rs` performs them for the
+current thread (`serial::put_byte` for `DebugPutChar`). `DebugDumpScheduler`
+walks a list of every TCB whose two link words live in the TCB's debug-only
+tail, as seL4 keeps `ksDebugTCBs`. The walk has no preemption point, so its
+time grows with the number of TCBs, which any thread with untyped memory can
+raise, and any thread can call it in a loop; accepted, as these calls exist
+only in a debug kernel, which makes no timing promise (M5 review). Numbers 19 to 31 stay reserved; there is no
+`DebugNameThread`. A user-space test ends a QEMU run with `DebugHalt(0)` after
+printing `TEST PASS`. In debug scenarios the kernel's writer and `uart` share
+COM1: the kernel only polls LSR and writes THR, so they coexist, with lines
+possibly interleaved.
 
 ### A release kernel without UART code
 
@@ -3690,10 +4113,10 @@ IOPortControl.
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")`; xtask disassembly check (no `in` or `out` outside the IOPort path, no `0x3F8` to `0x3FF` moved into `dx`, no `serial` symbol); release scenario | M7 |
-| Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test; release scenario | M5, M7 |
-| `DebugPutChar` and `DebugDumpScheduler` change no register a thread can rely on | debug scenario comparing registers before and after | M5 |
-| Debug system calls read no user memory and take no capability | handlers use only registers and kernel state; review | M5 |
-| The TCB size is the same with and without `debug` | the debug list's two link words live in the TCB's debug-only tail; compile-time size assert | M5 |
+| Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test `debug_numbers_need_a_debug_kernel`; release scenario | M5, M7 |
+| `DebugPutChar` and `DebugDumpScheduler` change no register a thread can rely on | `l4core::syscall` returns them without writing a register, and `dispatch` writes none; host test `debug_system_calls_go_back_to_the_kernel` | M5 |
+| Debug system calls read no user memory and take no capability | `dispatch::debug_call` uses only `rdi`'s value and kernel state; review | M5 |
+| The TCB size is the same with and without `debug` | the debug list's two link words live in the TCB's debug-only tail at offset 608 in every build; `l4core::tcb`'s compile-time layout asserts | M5 |
 | A debug kernel's boot summary shows the CPU features, control registers and Meltdown status it booted with | summary lines; M3 scenarios match them, including a `-cpu qemu64` refusal through `qemu_args:` | M3 |
 
 ### Compared with seL4
@@ -3727,17 +4150,18 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Are boot-created objects (root CNode, TCB, VSpace, BootInfo) covered by an untyped? | If they are, revoking that untyped destroys the root task; if not, their memory is never reclaimed | M4 (answered) | Answered in M4: as seL4, they come from the boot region, outside every untyped, and their capabilities are derivation roots. `check_untyped` and `test=bootinfo` check that no untyped covers the region, and `check_root_cnode` that every boot capability is an original at depth 0 with no links |
 | Are 448 untyped descriptors enough? | Boot panics if not | M4, from the recorded QEMU and Hyper-V memory maps (answered) | Answered in M4: yes, by several times on both targets. At every physical address width from 36 to 52 bits, QEMU's recorded map gives 106 to 148 untyped, 342 to 300 below 448, and Hyper-V's 73 to 115, 375 to 333 below ([Untyped](#untyped)). If a machine needs more, BootInfo grows to four pages as version 2 |
 | What if the framebuffer shares a 2 MiB page with RAM-like memory? | It could not be device untyped without aliasing the write-back direct map, so `fb` could not run | M4 (answered) | Answered in M4: no untyped covers it, `framebuffer_untyped` is empty, BootInfo's `framebuffer` still describes it, and the boot summary prints a `bootinfo: warning:` line with the reason (host test `framebuffer_sharing_a_2mib_page_with_ram`). Not seen: QEMU's framebuffer at 2 GiB gets 6 device untyped, and Hyper-V's at `0xF8000000` 2 on the recorded map |
-| Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5: a scenario sets TF and calls `Yield`, on QEMU and Hyper-V | No trap is taken; the RIP special case stays as insurance |
-| Is `swapgs` worth keeping on one core? | seL4's uniprocessor build avoids it and a class of mistakes with it | M5 | Keep it for the multi-core stretch goal; the IST handlers never read GS |
-| Which register is a cancelled thread's restart point? | Cancelled threads become `Restart` and re-execute `syscall`; IPC relies on their argument registers being untouched | M5 | Restart `rip` is the saved user `rcx` minus 2, the length of `syscall`; IPC writes a blocked thread's registers only on completion |
-| In what order are each invocation's errors checked? | The M10 fuzzer's model needs it | M5 | The order `docs/abi.md` lists them in; the TCB invocations that install capabilities give an explicit order, seL4's (buffer, long-running delete, CSpace root, VSpace root) |
-| Enable AVX? | It costs 256 more bytes of save and restore per switch and makes behaviour differ between hosts | M5, with the user-target decision | No; it fits the 1024-byte XSAVE reserve if it is wanted later |
-| Which target do user crates build for? | A target with SSE needs the XSAVE switching to be exercised | M5 | `x86_64-unknown-none` for every user crate through M10; nothing planned needs floating point |
-| Are Read and Write the only Frame rights? | The capability header has four rights bits, all assigned | M5 | Yes; execute permission comes from a map attribute, off by default |
-| Should a populated paging structure be movable between VSpaces? | It would let a table holder expose frames whose capabilities it does not hold | M5 | No: Map requires an empty structure, and Unmap empties it |
-| May device frames be mapped write-back? | Device memory that is really memory would run uncached | M5 | No; neither target needs it. Revisit with an ADR if a driver does |
-| Should page 0 be mappable? | Some programs place data at 0 | M5 | No; no program here needs it |
-| Should `Frame_Remap` on an unmapped capability return `InvalidCapability`, as Map does for a capability in the wrong mapping state? | One error convention is simpler for `libsys` | M5 | Keep `IllegalOperation`, as seL4 does for an operation the capability's state does not allow |
+| Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5 on QEMU (answered); Hyper-V (open) | Answered on QEMU in M5: no. `test=ring3` runs a `syscall` with TF set and counts no ring-0 #DB; `sysretq` restores TF, and the thread traps at the return address before its next instruction runs. The RIP special case stays as insurance. Open on Hyper-V until the M5 Hyper-V check boots `test=ring3`. The same question for `mov ss` with TF set, then `int3`, `int n` or `int1`, is open until it boots `test=redteam-movss` ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)) |
+| Does an unmasked SIMD exception raise #XM with CR4.OSXMMEXCPT set? | QEMU's TCG raises no SIMD exception, so the #XM path, UserException 19, has not run | M5 Hyper-V check (open) | Open until the M5 Hyper-V check boots `test=ring3`, whose step 9 expects #XM; on QEMU a `divsd` by zero with ZM clear only sets ZE ([FP exceptions](#fp-exceptions)) |
+| Is `swapgs` worth keeping on one core? | seL4's uniprocessor build avoids it and a class of mistakes with it | M5 (answered) | Answered in M5: kept, for the multi-core stretch goal. `swapgs` runs once per entry from ring 3 and once per exit, the IST handlers never read GS, and `test=ring3` checks `IA32_GS_BASE` at every entry from ring 3 |
+| Which register is a cancelled thread's restart point? | Cancelled threads become `Restart` and re-execute `syscall`; IPC relies on their argument registers being untouched | M5 (answered) | Answered in M5: `fault_ip`, the saved user `rcx` minus 2, the length of `syscall` (`l4core::entry::save`); `tcb::activate` sets `next_ip` to it when a `Restart` thread next runs. IPC writes a blocked thread's registers only on completion (host tests in `core/src/ipc/tests.rs`) |
+| In what order are each invocation's errors checked? | The M10 fuzzer's model needs it | M5 (answered) | Answered in M5: the order `docs/abi.md` lists them in, with the label first; the TCB invocations that install capabilities check seL4's order (buffer, long-running delete, CSpace root, VSpace root) before any slot changes. The other choices the ABI leaves open are in [Invocations](#invocations); host tests check every error row of the TCB and paging invocations in order |
+| Enable AVX? | It costs 256 more bytes of save and restore per switch and makes behaviour differ between hosts | M5 (answered) | Answered in M5: no; XCR0 is `0x3` (QEMU's `-cpu max` offers `0x21f`). AVX fits the 1024-byte XSAVE reserve if it is wanted later |
+| Which target do user crates build for? | A target with SSE needs the XSAVE switching to be exercised | M5 (answered) | Answered in M5: `x86_64-unknown-none` for every user crate through M10, with the static relocation model and the small code model; nothing planned needs floating point |
+| Are Read and Write the only Frame rights? | The capability header has four rights bits, all assigned | M5 (answered) | Answered in M5: yes; execute permission is bit 3 of the attributes word, off by default (`l4core::vspace::paging::Attributes`) |
+| Should a populated paging structure be movable between VSpaces? | It would let a table holder expose frames whose capabilities it does not hold | M5 (answered) | Answered in M5: no. Map refuses a structure that is mapped or not empty (`InvalidCapability` 0), and Unmap empties it |
+| May device frames be mapped write-back? | Device memory that is really memory would run uncached | M5 (answered) | Answered in M5: no; a device frame maps only `Uncached` or `WriteCombining`. Neither target needs more. Revisit with an ADR if a driver does |
+| Should page 0 be mappable? | Some programs place data at 0 | M5 (answered) | Answered in M5: no; `Frame_Map` below `USER_MIN` is `InvalidArgument` 0. No program here needs page 0 |
+| Should `Frame_Remap` on an unmapped capability return `InvalidCapability`, as Map does for a capability in the wrong mapping state? | One error convention is simpler for `libsys` | M5 (answered) | Answered in M5: it returns `IllegalOperation`, as seL4 does for an operation the capability's state does not allow |
 | Should a caller whose reply capability is destroyed be woken with an error? | A server that receives again, deletes the reply or dies leaves its client blocked until someone suspends it | M6 | No, as seL4: any error label would be indistinguishable from a reply; a client needing a timeout uses a watchdog thread holding its TCB capability |
 | How does a server tell "nothing pending" from a message or signal with badge 0? | `NBRecv` returns badge 0 both for nothing and for unbadged senders | M6, `libsys` | `root` gives every client and signaller of a polled object a non-zero badge |
 | What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 | Reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint; a saved reply capability vanishes when its client is suspended or deleted |

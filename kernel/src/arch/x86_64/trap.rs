@@ -11,15 +11,18 @@
 //!
 //! - `trap_common_entry`, for every vector but NMI, `#DF` and `#MC`, runs
 //!   `swapgs` if the saved CS is ring 3, then calls [`trap_from_kernel`] or
-//!   [`trap_from_user`].
+//!   [`trap_from_user`]. The second hands the frame to
+//!   [`super::entry`], which owns every entry from ring 3.
 //! - `trap_fatal_entry`, for NMI, `#DF` and `#MC`, which arrive on their IST
 //!   stacks, calls [`trap_fatal`] without `swapgs`; nothing after it reads
 //!   GS.
 //!
 //! No handler returns. A ring-0 trap is a kernel bug and panics with one
 //! report, except an interrupt taken in the idle loop, which runs the
-//! interrupt path and idles again on a fresh stack. Before M5 nothing runs in
-//! ring 3, so a trap from ring 3 panics too.
+//! interrupt path and idles again on a fresh stack, and two single-step
+//! `#DB`s a thread with TF set can raise in ring 0, which return at once:
+//! a `syscall`'s at `syscall_entry`, and the one `mov ss` defers past an
+//! `int3`, on the first instruction of the `#BP` stub.
 //!
 //! With `selftest`, the test hooks of `tests/qemu/` live here too: the
 //! traps a `test=` raises, the idle and fatal-handler tests, and the resume
@@ -30,7 +33,7 @@ use core::ops::Range;
 
 use l4core::trap::{self as t, KernelTrap, Report, TrapFrame};
 
-use super::{cpu, gdt, irq};
+use super::{cpu, entry, gdt, irq};
 
 #[cfg(feature = "selftest")]
 pub use self::selftest::{
@@ -194,7 +197,7 @@ fn idle_range() -> Range<u64> {
 }
 
 /// The report of a fatal trap at `frame`.
-fn report(frame: &TrapFrame, cr2: u64) -> Report<'_> {
+pub(super) fn report(frame: &TrapFrame, cr2: u64) -> Report<'_> {
     Report {
         frame,
         cr2,
@@ -211,7 +214,19 @@ extern "C" fn trap_from_kernel(frame: *const TrapFrame) -> ! {
     // initialised, and not referred to by anything else. Nothing writes it
     // while this reference lives.
     let frame = unsafe { &*frame };
-    // M5: a #DB whose RIP is exactly `syscall_entry` returns here.
+    if l4core::entry::single_step_into_syscall_entry(frame, entry::syscall_entry_addr())
+        || l4core::entry::single_step_into_breakpoint_stub(frame, stubs())
+    {
+        // SAFETY: a `#DB` on IST4 at the first instruction of
+        // `syscall_entry`, before its `swapgs`, or of the `#BP` stub, whose
+        // frame from ring 3 the CPU had just pushed at the top of the
+        // kernel stack: the frame is the one `trap_common_entry` pushed,
+        // nothing has been done since but read CR2, and either entry runs
+        // from its start as if no trap had been taken. The `#BP` frame is
+        // on the kernel stack, which this handler did not touch, not on
+        // IST4, so the `#DB` overwrote nothing.
+        unsafe { entry::return_to_kernel(frame) }
+    }
     match t::kernel_trap(frame, &idle_range()) {
         KernelTrap::IdleInterrupt(vector) => {
             // SAFETY: the interrupt came from the idle loop, which holds
@@ -223,14 +238,33 @@ extern "C" fn trap_from_kernel(frame: *const TrapFrame) -> ! {
     }
 }
 
-/// A trap with a ring-3 saved CS, after `swapgs`. Ring 3 does not exist
-/// before M5, which copies the frame into the current thread and turns the
-/// trap into a fault, so this is a kernel bug.
+/// A trap with a ring-3 saved CS, after `swapgs`: an exception the thread
+/// caused or an interrupt taken while it ran. The frame is at the top of
+/// the kernel stack (RSP0), except for `#DB`, whose gate uses IST4: that
+/// one continues on the kernel stack (`docs/design.md`, "NMI, double
+/// fault, machine check and debug"). Then [`entry::from_user`] takes it.
 extern "C" fn trap_from_user(frame: *const TrapFrame) -> ! {
+    // CR2 first: nothing here may fault before it is read.
     let cr2 = cpu::read_cr2();
     // SAFETY: as in `trap_from_kernel`.
     let frame = unsafe { &*frame };
-    panic!("trap from ring 3 before M5: {}", report(frame, cr2))
+    if frame.vector == u64::from(t::DEBUG) {
+        // SAFETY: the thread was in ring 3, so the kernel stack holds
+        // nothing; the frame stays on IST4, which only a `#DB` uses, and
+        // none can be raised in ring 0 but at `syscall_entry` or the `#BP`
+        // stub, neither of which runs before this frame is read.
+        unsafe { on_fresh_stack(debug_from_user, frame as *const TrapFrame as u64) }
+    }
+    entry::from_user(frame, l4core::entry::classify(frame, cr2))
+}
+
+/// A `#DB` from ring 3, moved to the top of the kernel stack; `frame` is
+/// the address of its frame on IST4.
+extern "C" fn debug_from_user(frame: u64) -> ! {
+    // SAFETY: `trap_from_user` passes the frame `trap_common_entry` pushed
+    // on IST4, which nothing has written since and nothing else refers to.
+    let frame = unsafe { &*(frame as *const TrapFrame) };
+    entry::from_user(frame, l4core::entry::classify(frame, 0))
 }
 
 /// NMI, `#DF` and `#MC`, from either ring, on their own IST stacks. Fatal;
@@ -307,8 +341,9 @@ pub fn idle() -> ! {
 
 /// The interrupt path for an interrupt taken in the idle loop, at the top of
 /// the kernel stack with interrupts off. After the interrupt, the resume
-/// hook a self-test installed, if any, runs; it restarts the operation an
-/// interrupt preempted, as a thread's restarted `syscall` will from M5.
+/// hook an M4 self-test installed, if any, runs, and restarts the operation
+/// an interrupt preempted; otherwise the scheduler runs, and a thread the
+/// interrupt woke, or one preempted in a system call, goes on.
 extern "C" fn interrupt_from_idle(vector: u64) -> ! {
     #[cfg(feature = "selftest")]
     let (rsp, rflags) = (selftest::rsp(), selftest::rflags());
@@ -321,9 +356,8 @@ extern "C" fn interrupt_from_idle(vector: u64) -> ! {
             resume()
         }
     }
-    // M5: `schedule()` picks a thread here and exits to it, or idles; it
-    // replaces the resume hook.
-    idle()
+    // The scheduler picks a thread and exits to it, or idles again.
+    super::thread::exit_to_scheduled()
 }
 
 /// The test hooks (`tests/qemu/`), with `selftest` only.

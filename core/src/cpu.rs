@@ -122,6 +122,14 @@ impl Cpuid {
     pub fn has_arch_capabilities(&self) -> bool {
         self.leaf7_edx & (1 << 29) != 0
     }
+
+    /// Whether `IA32_TSC_AUX` (MSR `0xC000_0103`) exists, which ring 3
+    /// reads with `rdtscp` (leaf `0x8000_0001` EDX bit 27) or `rdpid`
+    /// (leaf 7 ECX bit 22): either one makes the kernel write it, so the
+    /// firmware's value never reaches a thread (ADR 0025).
+    pub fn has_tsc_aux(&self) -> bool {
+        self.ext1_edx & (1 << 27) != 0 || self.leaf7_ecx & (1 << 22) != 0
+    }
 }
 
 /// A set of [`Feature`]s, displayed in [`Feature::ALL`] order.
@@ -256,6 +264,32 @@ mod tests {
         c.leaf7_ecx = 0;
         assert_eq!(c.lacks(), None);
         assert_eq!(c.present().to_string(), "NX PGE PAT SMEP SMAP XSAVE");
+    }
+
+    #[test]
+    fn tsc_aux_exists_with_rdtscp_or_rdpid() {
+        // `full` has neither bit.
+        assert!(!full().has_tsc_aux());
+        assert!(!Cpuid::default().has_tsc_aux());
+        let rdtscp = Cpuid {
+            ext1_edx: 1 << 27,
+            ..Cpuid::default()
+        };
+        let rdpid = Cpuid {
+            leaf7_ecx: 1 << 22,
+            ..Cpuid::default()
+        };
+        assert!(rdtscp.has_tsc_aux());
+        assert!(rdpid.has_tsc_aux());
+        // Neighbouring bits are something else.
+        for (ext1_edx, leaf7_ecx) in [(1 << 26, 0), (1 << 28, 0), (0, 1 << 21), (0, 1 << 23)] {
+            let c = Cpuid {
+                ext1_edx,
+                leaf7_ecx,
+                ..Cpuid::default()
+            };
+            assert!(!c.has_tsc_aux(), "{c:?}");
+        }
     }
 
     #[test]

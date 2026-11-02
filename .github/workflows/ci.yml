@@ -37,16 +37,23 @@ jobs:
           name: microl4-vhdx
           path: target/xtask/image/disk.vhdx
           if-no-files-found: error
-      # The optional M4 Hyper-V check (tools/hyperv/README.md): one boot
-      # prints the BootInfo summary and runs the retype, revoke and retype
-      # self-test, with its restarts and the longest stretch between polls.
-      - name: Build the M4 check image
-        run: cargo xtask image --cmdline "test=retype"
-      - name: Upload the M4 check VHDX
+      # The M5 Hyper-V check (tools/hyperv/README.md, "At the M5 check"):
+      # one VHDX per test, each in a folder named after it. threads and
+      # fault are M5's done-when; ring3, tlb, isolation and redteam-movss
+      # show what QEMU cannot: TF at syscall_entry, #XM, UMIP, a real TLB,
+      # XSAVE switching, and the #DB a mov ss defers into ring 0.
+      - name: Build the M5 check images
+        run: |
+          for test in threads fault ring3 tlb isolation redteam-movss; do
+            cargo xtask image --cmdline "test=$test"
+            mkdir -p "target/xtask/m5-check/$test"
+            mv target/xtask/image/disk.vhdx "target/xtask/m5-check/$test/disk.vhdx"
+          done
+      - name: Upload the M5 check VHDXs
         uses: actions/upload-artifact@v4
         with:
-          name: microl4-vhdx-m4-check
-          path: target/xtask/image/disk.vhdx
+          name: microl4-vhdx-m5-check
+          path: target/xtask/m5-check
           if-no-files-found: error
 
   lint:
@@ -63,11 +70,21 @@ jobs:
       - run: cargo xtask clippy
 
   miri:
-    name: Miri on core
+    # Two shards, so each stays well inside the time limit as tests grow:
+    # the M5 thread, IPC and address-space modules, and everything else.
+    name: Miri on core (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: threads, IPC and paging
+            args: "ipc:: syscall:: tcb:: sched:: regs:: vspace::"
+          - shard: the rest
+            args: "--skip ipc:: --skip syscall:: --skip tcb:: --skip sched:: --skip regs:: --skip vspace::"
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly with Miri
         run: rustup toolchain install nightly --profile minimal --component miri
-      - run: cargo +nightly miri test --package l4core
+      - run: cargo +nightly miri test --package l4core -- ${{ matrix.args }}

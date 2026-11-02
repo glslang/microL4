@@ -1,0 +1,32 @@
+# What boot step 8 made of the root image (M5). `cargo xtask build` built
+# user/root, stripped and checked it, and the kernel embedded it in
+# .rootimage; step 8 copied it into the root task's frames, mapped its
+# VSpace, made its TCB and unmapped .rootimage. The test finds .rootimage
+# gone from the kernel window and covered by RAM untyped, BootInfo naming
+# the image, every image page of the root VSpace mapped to a frame that
+# holds what the ELF says with its segment's permissions (a hash step 8
+# made from the ELF, against the frames read through a walk of the root
+# PML4), the IPC buffer and BootInfo after it, and the root TCB ready to
+# run as docs/abi.md says.
+cmdline: test=rootimage
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=rootimage"
+expect: boot: root task: image 0x400000-
+expect: rootimage: .rootimage was 0xffffffff8
+expect: rootimage: unmapped from the kernel window;
+expect: RAM untyped cover its
+expect: rootimage: its direct-map alias is writable: zeroed through it
+expect: rootimage: the root ELF's image 0x400000-
+expect: , entry 0x400000; IPC buffer at
+expect: rootimage: 0x400000- # the text frames
+expect: , RX
+expect: , RW, NX # the data, then the stack above an unmapped guard page
+expect: rootimage: its
+expect: image pages hold what the ELF says, with its segments' permissions
+expect: maps the IPC buffer and BootInfo's two frames, RW, NX
+expect: rootimage: the root TCB at
+expect: is Running at 0x400000 with rdi
+expect: RFLAGS 0x202, priority and MCP 255, its IPC buffer at
+expect: its slots hold copies of root slots 2, 3 and 10, and its master reply capability
+expect: TEST PASS

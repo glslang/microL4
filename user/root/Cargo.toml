@@ -1,0 +1,23 @@
+[package]
+name = "root"
+description = "The microL4 root task, the first user program, embedded in the kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The tests' verdicts, which need no kernel: host-tested with
+# `cargo test -p root --lib`.
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[[bin]]
+name = "root"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libsys = { path = "../libsys" }

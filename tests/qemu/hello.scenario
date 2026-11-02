@@ -1,9 +1,11 @@
 # The kernel boots on QEMU, reports what the loader handed over, the
-# interrupt controllers, the HPET and the timer it calibrated, the CPU
-# state it set up, and the BootInfo summary of boot steps 6, 7 and 9 (the
-# boot region, the untyped, the framebuffer's untyped and the slot
-# regions), and says hello. The CI-built VHDX runs the same command line
-# on Hyper-V.
+# syscall MSRs, XCR0 and the XSAVE area size (M5), the interrupt
+# controllers, the HPET and the timer it calibrated, the CPU state it set
+# up (CR4 with OSXSAVE and EFER with SCE from M5), and the BootInfo
+# summary of boot steps 6 to 9 (the boot region, the untyped, the
+# framebuffer's untyped and the slot regions) with the root task they
+# built from .rootimage, which is then unmapped (M5), and says hello. The
+# CI-built VHDX runs the same command line on Hyper-V.
 cmdline: test=hello
 exit: success
 expect: loader: microL4 loader
@@ -13,6 +15,10 @@ expect: cpu: features NX PGE PAT SMEP SMAP XSAVE
 expect: memory:
 expect: cpu: hypervisor QEMU
 expect: cmdline: "test=hello"
+expect: entry: syscall_entry at 0xffffffff8 # its address moves with the image
+expect: , IA32_STAR 0x13000800000000, IA32_FMASK 0x257fd5, EFER.SCE on, IA32_SYSENTER_CS 0
+expect: fpu: XCR0 0x3 of
+expect: supported, XSAVE area 576 bytes of the TCB's 1024
 expect: hyperv: no TLFS interface: highest leaf 0x40000001, below 0x40000005
 expect: apic: IA32_APIC_BASE 0xfee00900 at handover: xAPIC
 expect: apic: xAPIC ID 0, version 0x50014, 6 LVT entries, all masked; TPR 0, SVR 0x1ff, LVT error 0xfe
@@ -26,20 +32,32 @@ expect: timer: calibrating against the HPET at 100000000 Hz
 expect: timer: LAPIC timer
 expect: timer: periodic at 100 Hz: divide by 1, vector 0xfd
 expect: cpu: physical address width 40 bits
-expect: cpu: CR0 0x80010033 CR4 0x300ee8 EFER 0xd00
+expect: cpu: CR0 0x80010033 CR4 0x340ee8 EFER 0xd01
 expect: cpu: IA32_APIC_BASE
 expect: cpu: meltdown:
-expect: bootinfo: boot region 0xfec0000-0xfee3000, 140 KiB: root CNode at 0xfec0000, IPC buffer at 0xfee0000, BootInfo at 0xfee1000
+expect: bootinfo: boot region 0xf # its size and place move with the root image's
+expect: KiB: root CNode at
+expect: , IPC buffer at
+expect: , BootInfo at
 expect: bootinfo:  # the untyped count, which moves with the loader's allocations
 expect: untyped:
 expect: KiB of RAM,
 expect: MiB of device memory, below 2^40
 expect: bootinfo: framebuffer 0x80000000-0x803e8000: 6 device untyped, listed first
 expect: bootinfo: slots 16-16: extra_bootinfo_frames, 1 slot
-expect: bootinfo: slots 17-
+expect: bootinfo: slots 17-19: user_image_paging, 3 slots
+expect: bootinfo: slots 20- # the image frames, as many as the root image's pages
+expect: : user_image_frames,
 expect: : untyped,
-expect: bootinfo: slots 17-22: framebuffer_untyped, 6 slots
+expect: : framebuffer_untyped, 6 slots
 expect: bootinfo: slots
 expect: -4095: empty,
+expect: boot: root task: image 0x400000-
+expect: , entry 0x400000; TCB at
+expect: , PML4 at
+expect: , 1 PDPT, 1 PD, 1 PT,
+expect: image frames
+expect: boot: .rootimage
+expect: unmapped from the kernel window and reclaimed as RAM untyped
 expect: hello from microL4
 expect: TEST PASS

@@ -913,6 +913,95 @@ fn root_cnode_slots() {
     );
 }
 
+/// Boot step 8 (M5) leaves mapping records in the frames and paging
+/// structures it maps, and the root TCB's copies of root slots 2, 3 and 10
+/// as their only children: `check_root_cnode` allows both and nothing
+/// else.
+#[test]
+fn root_cnode_check_allows_what_step_8_leaves() {
+    use crate::cap::{TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_VSPACE};
+    use crate::tcb::TcbRef;
+
+    let mut input = Boot::Q35.input(40);
+    input.root = RootNeeds {
+        tcb: true,
+        pml4: true,
+        pdpts: 1,
+        pds: 1,
+        pts: 1,
+        image_frames: 2,
+        hypervisor: None,
+    };
+    let plan = plan(input).unwrap();
+    let mut bi = BootInfo::ZERO;
+    let (_, slots) = write_bootinfo(&mut bi, &plan, &facts(InterruptInfo::ZERO)).unwrap();
+    let l = plan.layout;
+    let t = TcbRef::new(l.tcb.unwrap()).unwrap();
+    let fresh = || {
+        let r = l.region;
+        let mut mem = FakeMemory::new(r.start, r.end - r.start);
+        write_root_cnode(&mut mem, &plan, &slots, bi.untyped());
+        mem
+    };
+    let step_8 = |mem: &mut FakeMemory| {
+        for slot in [slots.user_image_paging.start, slots.user_image_frames.start] {
+            let mut s = mem.load(l.slot(slot));
+            s.cap = s.cap.with_data(0x1234_5001);
+            mem.store(l.slot(slot), s);
+        }
+        for (from, to) in [
+            (CAP_INIT_CNODE, TCB_SLOT_CSPACE),
+            (CAP_INIT_VSPACE, TCB_SLOT_VSPACE),
+            (CAP_INIT_IPC_BUFFER, TCB_SLOT_IPC_BUFFER),
+        ] {
+            let cap = crate::cnode::derive(mem, l.slot(from)).unwrap();
+            crate::cdt::insert_derived(mem, l.slot(from), t.slot(to), cap, false).unwrap();
+        }
+    };
+    let mut mem = fresh();
+    step_8(&mut mem);
+    check::check_root_cnode(&mem, &plan, &bi).unwrap();
+    // Each check reads 4096 slots: under Miri the refusals are left out.
+    if cfg!(miri) {
+        return;
+    }
+
+    // A copy in another TCB slot is a link the check refuses.
+    let mut mem = fresh();
+    let at = l.slot(CAP_INIT_IPC_BUFFER);
+    let cap = crate::cnode::derive(&mem, at).unwrap();
+    crate::cdt::insert_derived(&mut mem, at, t.slot(TCB_SLOT_CSPACE), cap, false).unwrap();
+    assert_eq!(
+        check::check_root_cnode(&mem, &plan, &bi),
+        Err(Violation::RootCNode {
+            slot: CAP_INIT_IPC_BUFFER
+        })
+    );
+    // So is any change but the mapping record, and a record on a
+    // capability that has none.
+    let mut mem = fresh();
+    step_8(&mut mem);
+    let at = l.slot(slots.user_image_frames.start);
+    let mut s = mem.load(at);
+    s.cap = s.cap.with_rights(Rights::READ);
+    mem.store(at, s);
+    assert_eq!(
+        check::check_root_cnode(&mem, &plan, &bi),
+        Err(Violation::RootCNode {
+            slot: slots.user_image_frames.start
+        })
+    );
+    let mut mem = fresh();
+    let at = l.slot(CAP_INIT_TCB);
+    let mut s = mem.load(at);
+    s.cap = s.cap.with_data(1);
+    mem.store(at, s);
+    assert_eq!(
+        check::check_root_cnode(&mem, &plan, &bi),
+        Err(Violation::RootCNode { slot: CAP_INIT_TCB })
+    );
+}
+
 // ---------------------------------------------------------------------
 // Hand-made maps.
 

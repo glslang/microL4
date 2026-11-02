@@ -6,9 +6,12 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::cap::{Cap, CapType};
+use crate::cap::{Cap, CapType, ENDPOINT_BITS};
+use crate::ipc::IpcEnv;
 use crate::kernel::{Kernel, Preempted};
+use crate::sched::{Scheduler, Scheduling};
 use crate::slot::{Slot, SlotAddr, SlotMemory};
+use crate::tcb::{EpRef, REGS_OFFSET, TcbRef, Tcbs, ThreadState, Threads, XSAVE_OFFSET};
 
 /// A range of fake physical memory: `len` bytes from `base`, as words.
 /// Every access outside it, or not 8-byte aligned, panics, so a stray slot
@@ -106,6 +109,27 @@ impl SlotMemory for FakeMemory {
     }
 }
 
+/// TCB fields in fake memory, at the TCB's physical address, as the kernel
+/// keeps them in the direct map. Panics on an offset [`Tcbs`] does not
+/// allow.
+impl Tcbs for FakeMemory {
+    fn tcb_word(&self, t: TcbRef, offset: u64) -> u64 {
+        self.read(tcb_field(t, offset))
+    }
+
+    fn set_tcb_word(&mut self, t: TcbRef, offset: u64, value: u64) {
+        self.write(tcb_field(t, offset), value);
+    }
+}
+
+fn tcb_field(t: TcbRef, offset: u64) -> u64 {
+    assert!(
+        (REGS_OFFSET..XSAVE_OFFSET).contains(&offset) && offset.is_multiple_of(8),
+        "TCB field offset {offset:#x}"
+    );
+    t.get() + offset
+}
+
 /// A hook call [`TestKernel`] recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -126,6 +150,15 @@ pub enum Event {
     InitObject(Cap),
 }
 
+/// A [`Threads`] hook call [`TestKernel`] recorded, kept apart from the
+/// [`Event`]s so that the capability core's records stay as they were.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadEvent {
+    CancelIpc(TcbRef),
+    SetCurrentFsBase(u64),
+    WriteBufferWord { paddr: u64, value: u64 },
+}
+
 /// The word [`TestKernel::init_object`] writes into objects that hold data,
 /// so tests can see that a reset clears them.
 pub const DIRT: u64 = 0xD1D1_D1D1_D1D1_D1D1;
@@ -141,6 +174,14 @@ pub struct TestKernel {
     pub preempt_in: Option<u64>,
     /// Preemption points passed so far.
     pub preempt_points: u64,
+    /// The scheduler: the current thread and the ready queues.
+    pub sched: Scheduler,
+    /// [`Threads`] hook calls.
+    pub thread_events: Vec<ThreadEvent>,
+    /// What [`Threads::invoked_by_call`] answers.
+    pub by_call: bool,
+    /// What [`Threads::synic_pages`] answers.
+    pub synic: [u64; 2],
 }
 
 impl TestKernel {
@@ -151,6 +192,10 @@ impl TestKernel {
             events: Vec::new(),
             preempt_in: None,
             preempt_points: 0,
+            sched: Scheduler::new(),
+            thread_events: Vec::new(),
+            by_call: true,
+            synic: [0; 2],
         }
     }
 
@@ -220,5 +265,224 @@ impl Kernel for TestKernel {
             }
             None => Ok(()),
         }
+    }
+}
+
+impl Tcbs for TestKernel {
+    fn tcb_word(&self, t: TcbRef, offset: u64) -> u64 {
+        self.mem.tcb_word(t, offset)
+    }
+
+    fn set_tcb_word(&mut self, t: TcbRef, offset: u64, value: u64) {
+        self.mem.set_tcb_word(t, offset, value);
+    }
+}
+
+impl Scheduling for TestKernel {
+    fn scheduler(&self) -> &Scheduler {
+        &self.sched
+    }
+
+    fn scheduler_mut(&mut self) -> &mut Scheduler {
+        &mut self.sched
+    }
+}
+
+impl Threads for TestKernel {
+    /// Records the call and does what IPC's `cancel_ipc` does to the thread
+    /// itself: a blocked thread becomes `Inactive`, and the fault is
+    /// cleared. There are no endpoint queues or reply capabilities to undo.
+    fn cancel_ipc(&mut self, t: TcbRef) {
+        self.thread_events.push(ThreadEvent::CancelIpc(t));
+        if self.state(t).is_blocked() {
+            self.set_state(t, ThreadState::Inactive);
+        }
+        self.set_fault(t, None);
+    }
+
+    fn invoked_by_call(&self) -> bool {
+        self.by_call
+    }
+
+    fn synic_pages(&self) -> [u64; 2] {
+        self.synic
+    }
+
+    fn set_current_fs_base(&mut self, value: u64) {
+        self.thread_events
+            .push(ThreadEvent::SetCurrentFsBase(value));
+    }
+
+    fn write_buffer_word(&mut self, paddr: u64, value: u64) {
+        self.thread_events
+            .push(ThreadEvent::WriteBufferWord { paddr, value });
+        self.mem.write(paddr, value);
+    }
+}
+
+/// Endpoint words in fake memory, at the endpoint's physical address.
+fn endpoint_field(ep: EpRef, offset: u64) -> u64 {
+    assert!(
+        offset < 1 << ENDPOINT_BITS && offset.is_multiple_of(8),
+        "endpoint field offset {offset:#x}"
+    );
+    ep.get() + offset
+}
+
+/// A [`TestKernel`] whose hooks do what the kernel's do for threads and
+/// IPC, for tests of [`crate::ipc`] and [`crate::syscall`]:
+///
+/// - [`Threads::cancel_ipc`] is [`crate::ipc::cancel_ipc`];
+/// - [`Kernel::finalise`] suspends a TCB when its last capability goes
+///   ([`crate::tcb::suspend`]) and releases an endpoint's queue
+///   ([`crate::ipc::finalise`]), after recording the call as
+///   [`TestKernel`] does;
+/// - [`Threads::invoked_by_call`] is [`crate::syscall::invoked_by_call`];
+/// - [`IpcEnv`] reads and writes fake memory.
+///
+/// Every other hook is [`TestKernel`]'s, which the fields reach through
+/// `Deref`.
+#[derive(Clone, Debug)]
+pub struct IpcTestKernel(pub TestKernel);
+
+impl IpcTestKernel {
+    /// A kernel over `len` bytes of fake memory from `base`.
+    pub fn new(base: u64, len: u64) -> IpcTestKernel {
+        IpcTestKernel(TestKernel::new(base, len))
+    }
+}
+
+impl core::ops::Deref for IpcTestKernel {
+    type Target = TestKernel;
+
+    fn deref(&self) -> &TestKernel {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for IpcTestKernel {
+    fn deref_mut(&mut self) -> &mut TestKernel {
+        &mut self.0
+    }
+}
+
+impl SlotMemory for IpcTestKernel {
+    fn load(&self, at: SlotAddr) -> Slot {
+        self.0.load(at)
+    }
+
+    fn store(&mut self, at: SlotAddr, slot: Slot) {
+        self.0.store(at, slot)
+    }
+}
+
+impl Kernel for IpcTestKernel {
+    fn finalise(&mut self, cap: Cap, last: bool) -> Option<Cap> {
+        let cleanup = self.0.finalise(cap, last);
+        if let (Some(t), true) = (TcbRef::from_cap(&cap), last) {
+            crate::tcb::suspend(self, t);
+        }
+        crate::ipc::finalise(self, cap, last);
+        cleanup
+    }
+
+    fn after_delete(&mut self, cleanup: Cap) {
+        self.0.after_delete(cleanup)
+    }
+
+    fn moved(&mut self, cap: Cap, from: SlotAddr, to: SlotAddr) {
+        self.0.moved(cap, from, to)
+    }
+
+    fn zero(&mut self, paddr: u64, len: u64) {
+        self.0.zero(paddr, len)
+    }
+
+    fn init_object(&mut self, cap: Cap) {
+        self.0.init_object(cap)
+    }
+
+    fn preempt(&mut self) -> Result<(), Preempted> {
+        self.0.preempt()
+    }
+}
+
+impl Tcbs for IpcTestKernel {
+    fn tcb_word(&self, t: TcbRef, offset: u64) -> u64 {
+        self.0.tcb_word(t, offset)
+    }
+
+    fn set_tcb_word(&mut self, t: TcbRef, offset: u64, value: u64) {
+        self.0.set_tcb_word(t, offset, value)
+    }
+}
+
+impl Scheduling for IpcTestKernel {
+    fn scheduler(&self) -> &Scheduler {
+        &self.0.sched
+    }
+
+    fn scheduler_mut(&mut self) -> &mut Scheduler {
+        &mut self.0.sched
+    }
+}
+
+impl Threads for IpcTestKernel {
+    fn cancel_ipc(&mut self, t: TcbRef) {
+        self.0.thread_events.push(ThreadEvent::CancelIpc(t));
+        crate::ipc::cancel_ipc(self, t);
+    }
+
+    fn invoked_by_call(&self) -> bool {
+        crate::syscall::invoked_by_call(self)
+    }
+
+    fn synic_pages(&self) -> [u64; 2] {
+        self.0.synic_pages()
+    }
+
+    fn set_current_fs_base(&mut self, value: u64) {
+        self.0.set_current_fs_base(value)
+    }
+
+    fn write_buffer_word(&mut self, paddr: u64, value: u64) {
+        self.0.write_buffer_word(paddr, value)
+    }
+}
+
+/// Paging structures in fake memory, as [`TestKernel`] keeps them.
+impl crate::vspace::PagingStore for IpcTestKernel {
+    fn entry(&self, table: u64, i: usize) -> u64 {
+        self.0.entry(table, i)
+    }
+
+    fn set_entry(&mut self, table: u64, i: usize, entry: u64) {
+        self.0.set_entry(table, i, entry)
+    }
+
+    fn backref(&self, table: u64, i: usize) -> u64 {
+        self.0.backref(table, i)
+    }
+
+    fn set_backref(&mut self, table: u64, i: usize, backref: u64) {
+        self.0.set_backref(table, i, backref)
+    }
+
+    fn flush(&mut self, flush: crate::vspace::Flush) {
+        self.0.flush(flush)
+    }
+}
+
+impl IpcEnv for IpcTestKernel {
+    fn endpoint_word(&self, ep: EpRef, offset: u64) -> u64 {
+        self.0.mem.read(endpoint_field(ep, offset))
+    }
+
+    fn set_endpoint_word(&mut self, ep: EpRef, offset: u64, value: u64) {
+        self.0.mem.write(endpoint_field(ep, offset), value)
+    }
+
+    fn read_buffer_word(&self, paddr: u64) -> u64 {
+        self.0.mem.read(paddr)
     }
 }

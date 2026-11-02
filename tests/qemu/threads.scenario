@@ -1,0 +1,34 @@
+# M5's done-when test, first half: two ring-3 threads at the same priority
+# interleave their output under preemption (user/root/src/threads.rs). The
+# kernel has no test of this name, so it starts the root task, which reads
+# test=threads from BootInfo. Through libsys's invocations the root task
+# retypes an endpoint and two TCBs from the smallest RAM untyped that fits,
+# gives threads A and B stacks in its .bss and its own CSpace and VSpace,
+# sets them to priority 100, below its own 255, resumes them and waits on
+# the endpoint. Each thread prints 8 lines through DebugPutChar, under a
+# lock it yields on so lines never mix, and between two lines spins for
+# 40 ms of TSC time with no system call, swapping its id into a shared
+# "last thread to run" word: the other's id there means the timer preempted
+# it and the other thread ran. Each reports its count on the endpoint, and
+# the root suspends it. The root passes when each thread saw the other run
+# in between at least 3 times and the lines changed thread at least 3 times
+# in print order.
+cmdline: test=threads
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=threads"
+expect: root: microL4 root task
+expect: root: cmdline "test=threads"
+expect: threads: threads A and B at priority 100, below the root task's 255
+# Either thread may print first: a tick that falls due while the kernel
+# dispatches A charges A a whole slice before it reaches the print lock
+# (ADR 0013), so the scenario expects no order. The root task's verdict
+# needs no order either: the busy loops make no system call, so only the
+# timer can let the other thread run.
+expect: threads: thread A was preempted
+expect: times with the other thread running in between
+expect: threads: the preemptions in the order the threads saw them:
+expect: threads: lines in print order:
+expect: changes of thread
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
