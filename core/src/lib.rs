@@ -42,6 +42,7 @@ pub mod objmem;
 pub mod regs;
 pub mod sched;
 pub mod slot;
+pub mod syscall;
 pub mod tcb;
 pub mod timer;
 pub mod trap;

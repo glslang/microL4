@@ -1,6 +1,6 @@
 [package]
 name = "libsys"
-description = "microL4's user-space library: _start, the system calls, print! and the panic handler"
+description = "microL4's user-space library: _start, the system calls, kernel invocations, slot and untyped allocation, print! and the panic handler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 
 [lib]
 path = "src/lib.rs"
-test = false
+test = true
 bench = false
 doctest = false
 
