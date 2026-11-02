@@ -21,8 +21,8 @@ guest on the owner's machine.
 
 | Command | Does |
 | --- | --- |
-| `cargo xtask test` | host tests, then every QEMU scenario in `tests/qemu/` (`cargo xtask test hello` runs one) |
-| `cargo xtask clippy` | clippy with `-D warnings` on every crate, each for its own target |
+| `cargo xtask test` | host tests (the host crates, then the user crates' libraries), then every QEMU scenario in `tests/qemu/` (`cargo xtask test hello` runs one) |
+| `cargo xtask clippy` | clippy with `-D warnings` on every crate, each for its own target; the user crates also on the host, with their tests |
 | `cargo fmt --all` | format; CI runs `cargo fmt --all --check` |
 | `cargo xtask build` | build the kernel and the loader |
 | `cargo xtask image` | build `target/xtask/image/disk.img` and `disk.vhdx`, with `test=hello` |
@@ -37,9 +37,10 @@ Plain `cargo test` and `cargo build` cover only the host crates (`core`,
 
 | Path | What |
 | --- | --- |
-| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader and the kernel (handoff ABI, ELF parser, command line; from M2 the capability core; from M3 the CPU feature check, ACPI parser, page-table builder, trap decoding, APIC, HPET, Hyper-V and timer arithmetic; from M4 BootInfo, the boot plan and untyped with checks of their invariants, the Untyped and CNode invocation decoder, and the memory kernel objects may occupy) |
+| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader, the kernel and the user crates (handoff ABI, ELF parser, command line; from M2 the capability core; from M3 the CPU feature check, ACPI parser, page-table builder, trap decoding, APIC, HPET, Hyper-V and timer arithmetic; from M4 BootInfo, the boot plan and untyped with checks of their invariants, the Untyped and CNode invocation decoder, and the memory kernel objects may occupy; from M5 the system-call numbers and dispatch, kernel entry and exit, x87 and SSE state, registers and faults, TCBs and their invocations, the scheduler, the paging objects with their back-references and invocations, endpoint IPC with reply capabilities and fault delivery, and the root image's checks and VSpace) |
 | `kernel/` | the kernel, `x86_64-unknown-none`, linked at `0xFFFF_FFFF_8000_0000` by `kernel/linker.ld` |
 | `loader/` | the UEFI loader, `x86_64-unknown-uefi`, with its own minimal UEFI bindings |
+| `user/` | user programs, built for `x86_64-unknown-none` by xtask and linked at `0x40_0000` by `user/link.ld`: `libsys` (`_start`, system calls, kernel invocations, slot and untyped allocation, `print!`) and `root`, the root task the kernel embeds in `.rootimage` |
 | `xtask/` | build, image, QEMU runner and scenario harness |
 | `tests/qemu/` | boot scenarios, one `*.scenario` file each |
 | `tools/` | `setup.sh`, and `hyperv/` scripts for the owner's host |

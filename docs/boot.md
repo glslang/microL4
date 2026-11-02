@@ -46,7 +46,7 @@ it to a dynamic VHDX for Hyper-V.
 | Path on the ESP | Content |
 | --- | --- |
 | `\EFI\BOOT\BOOTX64.EFI` | the loader |
-| `\kernel.elf` | the kernel, an `ET_EXEC` ELF64 linked at `KERNEL_VIRT_BASE` |
+| `\kernel.elf` | the kernel, an `ET_EXEC` ELF64 linked at `KERNEL_VIRT_BASE`; from M5 the root task's ELF is inside it, in the `.rootimage` segment, so the loader still loads one file |
 | `\cmdline.txt` | the kernel command line, optional; surrounding whitespace is trimmed and it is cut at 256 bytes, even mid-character |
 
 ## State at kernel entry
@@ -72,15 +72,20 @@ become untyped is `docs/design.md`, [Boot](design.md#boot).
 
 ## Command line
 
-Space-separated `key=value` words, read with `l4core::cmdline::value`. M0
-knows one key:
+Space-separated `key=value` words, read with `l4core::cmdline::value`. The
+kernel knows one key, `test=`, and from M5 starts the root task unless the
+word names one of its own self-tests:
 
 | Word | Kernel behaviour |
 | --- | --- |
-| (no `test=`) | print the boot summary and `hello from microL4`, then halt |
-| `test=hello` | the same, then `TEST PASS` and exit with success |
+| (no `test=`) | print the boot summary and start the root task, which prints its own and ends the run with `DebugHalt(0)` |
+| `test=hello` | print the boot summary, `hello from microL4` and `TEST PASS`, and exit with success |
 | `test=panic` | panic deliberately |
-| `test=<other>` | `TEST FAIL: unknown test`, exit with failure |
+| another kernel self-test's name | run it; only a kernel built with `selftest`, as xtask builds every image, has the self-tests, `hello` and `panic` included |
+| `test=<other>` | print `test=<other>: not a kernel self-test; the root task runs it` and start the root task, which runs its test of that name, or prints `TEST FAIL: unknown test "<other>"` and ends the run with `DebugHalt(1)` |
+
+Before M5, with no root task, a line without `test=` printed `hello from
+microL4` and halted, and a name the kernel did not know failed the run.
 
 The loader reads one word itself (M3). With `acpidump` on the line, in any
 build, it prints every ACPI table it can reach from the RSDP to COM1 before
