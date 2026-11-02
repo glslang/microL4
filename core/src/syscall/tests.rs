@@ -413,6 +413,45 @@ fn a_thread_that_deletes_its_own_tcb_gets_no_reply() {
 }
 
 #[test]
+fn a_self_delete_preempted_mid_zombie_is_never_restarted() {
+    // A deletes its own TCB's last capability: finalisation stops it, and a
+    // preemption point after the Zombie clears its first slot cuts the call
+    // short. It stays stopped and unqueued: a call that finalises its own
+    // caller is never restarted (`docs/design.md`, "Kernel execution
+    // model").
+    let mut w = World::new();
+    w.threads.retain(|t| *t != tcb(A));
+    w.k.preempt_in = Some(0);
+    let rsi = info(label::CNODE_DELETE, 2);
+    assert_eq!(
+        w.enter(A, 1, S_ROOT, rsi, Some([S_TCB, 64, 0, 0])),
+        Outcome::Preempted
+    );
+    assert_eq!(w.state(A), ThreadState::Inactive);
+    let zombie = w.cap(rs(S_TCB));
+    assert_eq!(zombie.cap_type(), CapType::Zombie);
+    assert!(zombie.zombie_slots() < TCB_SLOTS);
+    assert!(
+        !w.cap(tcb(A).slot(0)).is_null(),
+        "the deletion was cut short"
+    );
+    assert_eq!(w.regs(A).rsi, rsi, "no reply");
+    let next = w.exit();
+    assert_ne!(next, Some(tcb(A)));
+    assert!(!w.ready().contains(&tcb(A)));
+    // Another thread's Delete of the Zombie finishes the work.
+    let b = next.unwrap();
+    assert_eq!(b, tcb(B));
+    w.call(B, S_ROOT, label::CNODE_DELETE, 2, [S_TCB, 64, 0, 0]);
+    assert_eq!(w.regs(B).rsi, info(0, 0));
+    assert!(w.cap(rs(S_TCB)).is_null());
+    for s in 0..TCB_SLOTS {
+        assert!(w.cap(tcb(A).slot(s)).is_null());
+    }
+    assert_eq!(w.state(A), ThreadState::Inactive);
+}
+
+#[test]
 fn reply_recv_delivers_its_reply_before_a_receive_phase_fault() {
     let mut w = World::new();
     w.recv(B, S_EP0);

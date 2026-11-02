@@ -50,6 +50,7 @@ use crate::regs::{Fault, Regs};
 use crate::sched::{self, Scheduling};
 use crate::slot::SlotAddr;
 use crate::tcb::{self, REGS_OFFSET, TcbRef, ThreadState};
+use crate::vspace::PagingStore;
 
 /// What the kernel does after [`handle_syscall`] or [`handle_exception`],
 /// before it runs the scheduler.
@@ -85,7 +86,7 @@ pub enum DebugCall {
 /// (`fault_ip` on the `syscall`, `next_ip` after it). `debug` says whether
 /// the kernel was built with the `debug` feature. The current thread must
 /// be `Running`.
-pub fn handle_syscall<E: IpcEnv + ?Sized>(e: &mut E, debug: bool) -> Outcome {
+pub fn handle_syscall<E: IpcEnv + PagingStore + ?Sized>(e: &mut E, debug: bool) -> Outcome {
     let t = caller(e);
     let regs = e.regs(t);
     let Some(syscall) = Syscall::from_number(regs.rdx, debug) else {
@@ -193,7 +194,12 @@ fn cap_fault<E: IpcEnv + ?Sized>(
 
 /// `Call` (`call`), `Send` (`blocking`) or `NBSend` by `t` (seL4
 /// `handleInvocation`).
-fn invocation<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef, call: bool, blocking: bool) -> Outcome {
+fn invocation<E: IpcEnv + PagingStore + ?Sized>(
+    e: &mut E,
+    t: TcbRef,
+    call: bool,
+    blocking: bool,
+) -> Outcome {
     let regs = e.regs(t);
     let info = MessageInfo::from_word(regs.rsi);
     let slot = match lookup(e, t, regs.rdi) {

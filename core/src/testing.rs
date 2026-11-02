@@ -450,6 +450,29 @@ impl Threads for IpcTestKernel {
     }
 }
 
+/// Paging structures in fake memory, as [`TestKernel`] keeps them.
+impl crate::vspace::PagingStore for IpcTestKernel {
+    fn entry(&self, table: u64, i: usize) -> u64 {
+        self.0.entry(table, i)
+    }
+
+    fn set_entry(&mut self, table: u64, i: usize, entry: u64) {
+        self.0.set_entry(table, i, entry)
+    }
+
+    fn backref(&self, table: u64, i: usize) -> u64 {
+        self.0.backref(table, i)
+    }
+
+    fn set_backref(&mut self, table: u64, i: usize, backref: u64) {
+        self.0.set_backref(table, i, backref)
+    }
+
+    fn flush(&mut self, flush: crate::vspace::Flush) {
+        self.0.flush(flush)
+    }
+}
+
 impl IpcEnv for IpcTestKernel {
     fn endpoint_word(&self, ep: EpRef, offset: u64) -> u64 {
         self.0.mem.read(endpoint_field(ep, offset))
