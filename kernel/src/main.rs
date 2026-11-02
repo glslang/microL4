@@ -111,6 +111,8 @@ fn run_test(
         // Kernel objects and BootInfo (M4).
         "bootinfo" => selftest::bootinfo(boot, facts, root),
         "retype" => selftest::retype(root),
+        // Threads, address spaces and the root task (M5).
+        "ring3" => arch::test_ring3(root),
         other => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)

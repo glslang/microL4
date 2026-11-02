@@ -1,7 +1,9 @@
 //! The kernel's GDT and TSS, the per-CPU area, and step 3 of the M3 boot
 //! sequence (`docs/design.md`, "Rings and segments", "Descriptor tables and
 //! MSRs", "The per-CPU area and `swapgs`"), which also loads the IDT built
-//! by [`super::idt`].
+//! by [`super::idt`] and, from M5, writes the syscall MSRs
+//! ([`super::entry::init`]) and the x87 and SSE control state
+//! ([`super::fpu::init`]).
 //!
 //! The descriptor values come from `l4core::trap`, which tests them on the
 //! host; this module places the tables, loads them and sets the registers
@@ -13,7 +15,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use l4core::trap::{self, StackLayout, Tss};
 
-use super::{StaticCell, cpu, idt};
+use super::{StaticCell, cpu, entry, fpu, idt};
 
 /// `IA32_GS_BASE`: the GS base in ring 0, which points at [`PerCpu`].
 const IA32_GS_BASE: u32 = 0xC000_0101;
@@ -79,22 +81,28 @@ static TSS: StaticCell<TssCell> = StaticCell::new();
 
 /// The per-CPU area (`docs/design.md`, "The per-CPU area and `swapgs`"):
 /// `IA32_GS_BASE` points here in ring 0. Only the entry stubs reach it
-/// through GS (M5); Rust uses the static. Each field is an atomic because
-/// those stubs write it.
+/// through GS (`syscall_entry` and `compat_entry` in [`super::entry`]);
+/// Rust uses the static. Each field is an atomic because those stubs write
+/// it.
 #[repr(C)]
 pub struct PerCpu {
     /// Its own address, so a stub can turn GS into a pointer (offset 0).
     this: AtomicU64,
     /// The top of the kernel stack (offset 8).
     kernel_stack_top: AtomicU64,
-    /// The user's RSP, saved by `syscall_entry` (M5) (offset 16).
+    /// The user's RSP, saved by `syscall_entry` (offset 16).
     user_rsp: AtomicU64,
 }
 
+/// `gs:[PER_CPU_KERNEL_STACK_TOP]` is the kernel stack top in ring 0.
+pub const PER_CPU_KERNEL_STACK_TOP: usize = offset_of!(PerCpu, kernel_stack_top);
+/// `gs:[PER_CPU_USER_RSP]` holds the user's RSP during `syscall_entry`.
+pub const PER_CPU_USER_RSP: usize = offset_of!(PerCpu, user_rsp);
+
 const _: () = {
     assert!(offset_of!(PerCpu, this) == 0);
-    assert!(offset_of!(PerCpu, kernel_stack_top) == 8);
-    assert!(offset_of!(PerCpu, user_rsp) == 16);
+    assert!(PER_CPU_KERNEL_STACK_TOP == 8);
+    assert!(PER_CPU_USER_RSP == 16);
 };
 
 static PER_CPU: PerCpu = PerCpu {
@@ -114,8 +122,9 @@ pub(super) struct DescriptorPointer {
 /// builds the GDT, the TSS and the IDT, then loads them in that order, so no
 /// table is loaded before it is complete and no gate names an IST before the
 /// TSS is in place, and loads a null LDT; then sets CR4.MCE, points
-/// `IA32_GS_BASE` at the per-CPU area and resets DR7. Runs once, with
-/// interrupts off. The firmware's GDT and IDT are dead afterwards.
+/// `IA32_GS_BASE` at the per-CPU area and resets DR7; from M5 it writes
+/// the syscall MSRs and sets up x87 and SSE (CR0, CR4, XCR0). Runs once,
+/// with interrupts off. The firmware's GDT and IDT are dead afterwards.
 pub fn init() {
     let stacks = stack_layout();
     check_stacks(&stacks);
@@ -143,8 +152,8 @@ pub fn init() {
     }
     idt::load(idt);
 
-    // The kernel reads GS only in the entry stubs from M5; it holds nothing
-    // the firmware set.
+    // The kernel reads GS only in the entry stubs; it holds nothing the
+    // firmware set.
     let per_cpu = &raw const PER_CPU as u64;
     PER_CPU.this.store(per_cpu, Ordering::Relaxed);
     PER_CPU
@@ -154,7 +163,7 @@ pub fn init() {
     // SAFETY: setting CR4.MCE changes no translation. A CPU without the
     // machine-check architecture would raise #GP here, which the IDT just
     // loaded reports. Writing IA32_GS_BASE changes only what GS-relative
-    // accesses reach; no kernel code makes one before M5.
+    // accesses reach; only the entry stubs make one, on entries from ring 3.
     unsafe {
         cpu::write_cr4(cpu::read_cr4() | CR4_MCE);
         cpu::write_msr(IA32_GS_BASE, per_cpu);
@@ -164,6 +173,16 @@ pub fn init() {
     unsafe {
         asm!("mov dr7, {}", in(reg) DR7_RESET, options(nomem, nostack, preserves_flags));
     }
+    // M5: the way into ring 0 by `syscall`, ready before anything runs in
+    // ring 3, and the x87 and SSE control state threads run with.
+    entry::init();
+    fpu::init();
+}
+
+/// The per-CPU area's address, as `IA32_GS_BASE` holds it in ring 0.
+#[cfg(feature = "selftest")]
+pub fn per_cpu() -> u64 {
+    &raw const PER_CPU as u64
 }
 
 /// Panics unless the linker script laid the stacks out as this module and
