@@ -33,6 +33,7 @@ pub mod handoff;
 pub mod hpet;
 pub mod hyperv;
 pub mod invoke;
+pub mod ipc;
 pub mod kernel;
 pub mod objmem;
 pub mod regs;
