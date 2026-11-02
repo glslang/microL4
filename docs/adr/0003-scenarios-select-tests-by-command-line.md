@@ -2,6 +2,10 @@
 
 Status: accepted, M0 (2026-10-29)
 
+M4 (2026-11-02) put all test code behind the kernel's `selftest` feature: a
+kernel built without it carries none, and xtask builds every image with it
+([The `debug` feature](../design.md#the-debug-feature)).
+
 ## Context
 
 The `hello` and deliberate-panic scenarios need the same kernel to behave

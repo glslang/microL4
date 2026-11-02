@@ -24,7 +24,7 @@ source (`manual/parts/*.tex`) and kernel files in
 | [Privilege levels](#privilege-levels) | Privilege levels | M3, M5 |
 | [Address spaces](#address-spaces) | Kernel objects (paging) | M3, M5, M9 |
 | [Boot](#boot) | Boot | M3 to M5 |
-| [Kernel entry and exit](#kernel-entry-and-exit) | Syscall ABI | M3, M5 |
+| [Kernel entry and exit](#kernel-entry-and-exit) | Syscall ABI | M3 to M5 |
 | [Kernel objects](#kernel-objects) | Kernel objects | M2, M4 |
 | [Memory and retype](#memory-and-retype) | Memory | M2, M4 |
 | [Capability addressing](#capability-addressing) | Capability addressing | M2, M4 |
@@ -39,7 +39,7 @@ source (`manual/parts/*.tex`) and kernel files in
 | [I/O ports](#io-ports) | Kernel objects (I/O ports) | M4, M7 |
 | [ACPI and the timer](#acpi-and-the-timer) | Scheduling, Interrupts | M3 |
 | [Hyper-V interface](#hyper-v-interface) | Hyper-V interface | M3, M9 |
-| [Debug](#debug) | Debug | M3, M5, M7 |
+| [Debug](#debug) | Debug | M3 to M5, M7 |
 | [Open questions](#open-questions) | | |
 
 ## Kernel execution model
@@ -701,20 +701,36 @@ loaded from an ELF image embedded in the kernel, in ring 3 (M5).
 
 In M4, which has no root task, steps 6, 7 and 9 run, the kernel prints the
 BootInfo summary and the self-tests run instead of step 10.
+`boot::make_root_space` (`kernel/src/boot.rs`) runs the three steps in this
+order: `l4core::boot::plan` (step 6), the region zeroed through
+`arch::Objects`, `write_bootinfo` (step 9's untyped, slot plan and BootInfo
+fields, written straight into BootInfo's frames), then `write_root_cnode`,
+which puts the capabilities of steps 7 and 9 in the root CNode together. Each
+`BootError` is a panic with its reason; among them, `plan` refuses a memory
+map that is unsorted, overlapping or not 4 KiB granular, and a physical
+address width outside 32 to 52 bits. With nothing to build for a root task,
+the boot region holds only the root CNode, the IPC buffer frame and the two
+BootInfo frames, 140 KiB: `[0xfec0000, 0xfee3000)` on QEMU and
+`[0x1ff00000, 0x1ff23000)` on the recorded Hyper-V map. Slots 1, 3, 12, 13 and
+14 are null, the `user_image_paging` and `user_image_frames` regions are
+empty, `ipc_buffer`, `user_image_start` and `user_image_end` are 0, and the
+frames in slots 9, 10 and 16 are unmapped. Every boot-made capability is an
+original derivation root.
 
 ### What each physical page becomes
 
-The rules are applied in this order; a later row overrides an earlier one.
+The rules are applied in this order, by `l4core::boot::page_class`; a later
+row overrides an earlier one.
 
 | Physical range | Becomes | Why |
 | --- | --- | --- |
 | `USABLE`, `LOADER`, `ACPI_RECLAIMABLE` | RAM untyped | the loader, its tables, the handoff and the map are dead after steps 2 and 4; ACPI is parsed in step 4 |
 | `RESERVED`, `MMIO`, ranges absent from the map, below `2^phys_addr_bits` | device untyped | PCI BARs, ECAM ([Memory map](abi.md#memory-map)) |
-| `ACPI_NVS`, `FIRMWARE`, `BAD` | nothing | firmware-owned or broken |
+| `ACPI_NVS`, `FIRMWARE`, `BAD`, and any kind number the handoff does not define | nothing | firmware-owned, broken or unknown |
 | the kernel image, except `.rootimage` | nothing | |
 | `.rootimage` | RAM untyped (from the `LOADER` row) | reclaimed in step 8 |
-| the GOP framebuffer, page-rounded | its own device untyped, listed first; none at all if any 2 MiB page it touches is write-back in the direct map (a debug kernel warns) | `fb` (M8) gets all of it or none of it |
-| any 2 MiB page the direct map maps write-back | no device untyped | a device frame would alias a WB mapping ([The kernel half](#the-kernel-half), H8) |
+| the GOP framebuffer, page-rounded | its own device untyped, listed first; none at all, and its pages nothing, if any 2 MiB page it touches is write-back in the direct map, if it reaches below 1 MiB or past `2^phys_addr_bits`, or if it overlaps the kernel image, the boot region, a `kernel_reserved` page, or `ACPI_NVS`, `FIRMWARE`, `BAD` or unknown memory (a debug kernel warns with the reason) | `fb` (M8) gets all of it or none of it, and no untyped may cover the ranges named |
+| any 2 MiB page the direct map maps write-back | no device untyped | a device frame would alias a WB mapping ([The kernel half](#the-kernel-half), H8); above the direct map's end nothing is mapped, so the rule stops there |
 | any 2 MiB page holding a kernel device page | no RAM untyped | the direct map maps it UC, so a RAM frame there would alias |
 | `[0, 1 MiB)` | nothing | no kernel object at physical address 0; legacy areas; the AP trampoline of the multi-core stretch goal |
 | the boot region | nothing | the root task's objects, outside every untyped as in seL4 |
@@ -739,7 +755,8 @@ scheduler and interrupt tables ([Scheduling](#scheduling),
 [The IRQ table](#the-irq-table)). The fatal handlers format their panic
 report on their 8 KiB IST stack. The `double_fault` scenario paints IST1
 first and prints how much of it the report used: 1,872 bytes in the dev
-profile and 1,904 in release at the end of M3, so 8 KiB is enough.
+profile and 1,904 in release at the end of M3, and 1,680 in the dev profile
+at the end of M4, so 8 KiB is enough.
 
 Everything sized at run time comes from one boot region, chosen like seL4's
 rootserver region (`init_freemem`, `src/kernel/boot.c`): the top of the
@@ -751,24 +768,34 @@ holds, in order of decreasing alignment as in seL4's
 `create_rootserver_objects`, the root CNode, the 8 KiB PML4, PDPT, PD and
 PTs, the IPC buffer, BootInfo, image frames, on Hyper-V the two SynIC frames
 (the hypercall page is `.hvcall` in the kernel image), then the 2 KiB
-TCB. It is zeroed when allocated, no untyped covers it, and it is never freed,
+TCB. Its end is rounded up to a page, so from M5 the 2 KiB after the TCB is
+lost; seL4 leaves such slack in its free memory, which becomes small untyped.
+It is zeroed when allocated, no untyped covers it, and it is never freed,
 so the root task cannot revoke its own CNode. Boot-only kernel code (a few
 KiB) is not reclaimed.
 
 ### Untyped
 
-`l4core::boot::untyped(&BootPlan)`, a pure function, classifies every page
-below `2^phys_addr_bits` by the table above (using
-`l4core::vspace::direct_map_type` for both 2 MiB rules, and subtracting the
-fixed-size `kernel_reserved` list, which `plan` subtracts too), merges runs
-of one class, cuts each run into the largest naturally aligned power-of-two
-chunks between 4 KiB and the maximum untyped size in
-[Object sizes](abi.md#object-sizes) (seL4's `create_untypeds_for_region`),
-and yields the framebuffer's chunks first,
-then the rest by ascending address. BootInfo holds 448 descriptors; if more
-are needed, boot panics with the count rather than drop memory. An M4 host
-test runs the function on memory maps recorded from QEMU and Hyper-V and
-checks the margin.
+`l4core::boot::untyped(&BootPlan, &mut [UntypedDesc; 448])`, a pure function,
+classifies every page below `2^phys_addr_bits` by the table above
+(`page_class`, using `l4core::vspace::direct_map_type` for the write-back rule
+and the device window's pages for the other 2 MiB rule, and subtracting the
+fixed-size `kernel_reserved` list, which `plan` subtracts too), merges runs of
+one class (`runs`), cuts each run into the largest naturally aligned
+power-of-two chunks between 4 KiB and the maximum untyped size in [Object
+sizes](abi.md#object-sizes) (`chunks`, seL4's `create_untypeds_for_region`),
+and writes the framebuffer's chunks first, then the rest by ascending address,
+straight into BootInfo's descriptor list. BootInfo holds 448 descriptors; if
+more are needed, boot panics with the count rather than drop memory. The host
+tests `q35_untyped_fit_at_every_width` and `hyperv_untyped_fit_at_every_width`
+run it on the memory maps recorded from QEMU and Hyper-V
+(`core/tests/boot/q35.memmap`, `hyperv-gen2.memmap`) at every physical address
+width from 36 to 52 bits: QEMU's map gives 106 to 148 untyped, covering 248
+MiB of RAM, with 6 for the framebuffer, and Hyper-V's 73 to 115, covering 509
+MiB of RAM, with 2 for the framebuffer ([Open questions](#open-questions)).
+Outside Miri, every host test also compares the list with a second
+implementation that paints the table's rows over the address space one after
+another.
 
 ### Root-task image and address space
 
@@ -814,6 +841,14 @@ and 10, and its `reply` slot holds its reply master, made by boot as a
 derivation root, since the root TCB is never retyped (seL4 does the same in
 `create_initial_thread`, `src/kernel/boot.c`).
 
+`l4core::boot::write_root_cnode` writes the root CNode: `root_cap` gives
+each slot's capability, and `cdt::insert_root` puts it in. Each is an
+original with full rights, every untyped has its watermark at its size, and
+every Frame and paging-structure capability is unmapped, so that M5 writes
+the mapping records of those it maps. From M9 the Hypervisor capability
+comes in through `RootNeeds::hypervisor`, and only then are the SynIC frames
+laid out.
+
 BootInfo is one 8 KiB `#[repr(C)]` struct in `l4core::bootinfo`, shared by the
 kernel and `libsys` with compile-time offset asserts: a 1 KiB header and 448
 untyped descriptors ([BootInfo](abi.md#bootinfo)). Beyond seL4's fields it
@@ -823,7 +858,15 @@ carries the framebuffer and the slot range of its untyped, the RSDP address
 frequency measured in M3, the hypervisor vendor, the physical address width,
 the image bounds, and the 256-byte `InterruptInfo` block, whose fields [What
 user space gets, and kernel devices](#what-user-space-gets-and-kernel-devices)
-lists.
+lists. The module also holds `BootInfo::ZERO`, the slot constants,
+`ROOT_CNODE_RADIX`, `MAX_UNTYPED`, the magic and version, the
+`hypervisor_vendor` numbers, which `arch`'s `Hypervisor::vendor` returns, and
+`InterruptInfo::from_platform(&Platform, pins)`. It fills an ISA route's
+`gsi` and `flags` whenever the IRQ has a route, with `routed` 0 when no I/O
+APIC serves that GSI; all three are 0 when the IRQ's GSI is another IRQ's
+override target. When the framebuffer gets no untyped, BootInfo's
+`framebuffer` keeps the handoff's values and only `framebuffer_untyped` is
+empty.
 
 ### Root-task entry state
 
@@ -837,27 +880,29 @@ MCP 255, no fault endpoint, `exit` = `Iret` so the first exit is an `iretq`
 | Part | Where | Built in |
 | --- | --- | --- |
 | Handoff copy into `BootState` (step 2) | `kernel/src/boot.rs`, reading through `arch::read_handoff` and `arch::read_memory_map` | M3 |
-| Steps 3 to 5 | `arch::init` (`arch/x86_64/mod.rs`) over `l4core::{trap, acpi, vspace, window, hyperv, apic, hpet, calibration, timer}` | M3 |
-| BootInfo, `SlotRegion`, `UntypedDesc`, slot constants | `l4core::bootinfo`, compile-time asserts | M4 |
-| Boot plan, untyped computation, slot plan, root layout and ELF checks | `l4core::boot`, host tests and proptest | M4, M5 |
-| Boot region allocation, writing BootInfo and image frames | `arch` gives `core` `&mut` views of the boot region's frames through the direct map, each with a `SAFETY:` comment that boot code owns them exclusively | M4, M5 |
+| Steps 3 to 5 | `arch::init` (`arch/x86_64/mod.rs`) over `l4core::{trap, acpi, vspace, window, hyperv, apic, hpet, calibration, timer}`; from M4 it returns `BootFacts`, what steps 6 to 9 need, and sets up `arch::Objects` | M3, M4 |
+| BootInfo, `SlotRegion`, `UntypedDesc`, `InterruptInfo`, slot constants | `l4core::bootinfo`, compile-time asserts | M4 |
+| Boot plan and `kernel_reserved`, page classes, untyped computation, slot plan, BootInfo fields, root capabilities, root layout and ELF checks | `l4core::boot` (`plan`, `page_class`, `runs`, `chunks`, `untyped`, `slot_plan`, `fill_bootinfo`, `write_bootinfo`, `root_cap`, `write_root_cnode`); host tests on the recorded maps and proptest | M4, M5 |
+| The invariants below as checks, written from the rules apart from the planner: `check_plan`, `check_untyped`, `check_bootinfo`, `check_root_cnode` | `l4core::boot::check`, run by every host test and by `test=bootinfo`. `check_root_cnode` applies only right after boot, before any retype; `check_untyped` checks RAM coverage exactly, and device coverage is left to the comparison with the second implementation | M4 |
+| Steps 6, 7 and 9: the region zeroed, BootInfo and the root CNode written; from M5 the image frames | `boot::make_root_space` through `arch::Objects`, and `arch::bootinfo_frames(paddr)`, the one `unsafe` view of BootInfo's frames, a `&'static mut BootInfo` handed out once. From M5 the kernel must stop reading BootInfo through `RootSpace.bootinfo` before the root task can write those frames | M4, M5 |
+| `test=bootinfo`: the four checks, then every descriptor against kernel memory found without the plan, from GDTR, IDTR, `IA32_GS_BASE`, CR3, the stack symbols and statics translated through the live page tables, and the device window's mapped pages | `kernel/src/selftest.rs`, `arch::kernel_memory` (`selftest` only) | M4 |
 | `.rootimage` section, unmap and flush | `kernel/linker.ld`, `arch` | M5 |
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| No untyped covers the kernel image (except reclaimed `.rootimage`), the boot region, a `kernel_reserved` page, `[0, 1 MiB)`, `ACPI_NVS`, `FIRMWARE` or `BAD` memory; the boot region holds no `kernel_reserved` page and touches no 2 MiB page that holds one | `l4core::boot::plan` and `untyped` both subtract `kernel_reserved`; proptest over generated maps, including a reserved page inside the chosen `USABLE` range | M4 |
-| No kernel object lies at physical address 0 | no untyped and no boot region below 1 MiB (`l4core::boot::untyped`, host test); `core/` handles are `NonZeroU64` | M2, M4 |
-| Untyped are pairwise disjoint, each aligned to its size and at least 4 KiB | `l4core::boot::untyped`; proptest | M4 |
-| RAM untyped lie inside the direct map; no device untyped lies in a write-back direct-map page; no RAM untyped lies in a 2 MiB page holding a kernel device page | `l4core::boot::untyped` with `direct_map_type`; host tests on the QEMU and Hyper-V maps | M4 |
+| No untyped covers the kernel image (except reclaimed `.rootimage`), the boot region, a `kernel_reserved` page, `[0, 1 MiB)`, `ACPI_NVS`, `FIRMWARE` or `BAD` memory; the boot region holds no `kernel_reserved` page and touches no 2 MiB page that holds one | `l4core::boot::plan` and `page_class` both subtract `kernel_reserved`; `check_plan` and `check_untyped` on the recorded maps and in proptest over generated maps (`random_machines` and `a_reserved_page_where_the_boot_region_would_go`); `test=bootinfo` checks every descriptor against kernel memory `arch` finds without the plan | M4 |
+| No kernel object lies at physical address 0 | no untyped and no boot region below 1 MiB (`page_class`, `plan`; `check_untyped`, `check_plan` in host tests and `test=bootinfo`); `core/` handles are `NonZeroU64` | M2, M4 |
+| Untyped are pairwise disjoint, each aligned to its size and at least 4 KiB | `l4core::boot::chunks` over disjoint runs; `check_untyped` in host tests, proptest and `test=bootinfo` | M4 |
+| RAM untyped lie inside the direct map; no device untyped lies in a write-back direct-map page; no RAM untyped lies in a 2 MiB page holding a kernel device page | `l4core::boot::page_class` with `direct_map_type`; `check_untyped`; host tests on the QEMU and Hyper-V maps | M4 |
 | The kernel image, the handoff and its memory map lie below the direct map's end | the loader's 64 GiB `AllocateMaxAddress` bound; M3 check, panic otherwise | M3 |
 | The kernel image, `.rootimage` included, fits `KERNEL_IMAGE_MAX` = 16 MiB | `kernel/linker.ld` assert (M3); xtask strips `root` and checks the image (M5) | M3, M5 |
-| The root task never holds a capability to kernel memory: kernel image, stacks, descriptor tables, kernel page tables, kernel device pages, or the boot-region pages that hold its CNode, TCB and paging structures (as frames or untyped) | the plan excludes them from every untyped and frame; M4 self-test checks every BootInfo descriptor against the kernel ranges | M4, M5 |
-| No `USABLE`, `LOADER` or `ACPI_RECLAIMABLE` page outside the kernel image is written or handed out before step 5 ends: the firmware's GDT, IDT and stack, the loader's tables, ACPI and any firmware-enabled Hyper-V overlay are dead by then | the step order in `kmain`; the boot plan (step 6) is the first allocator; review | M3, M4 |
-| Boot never drops memory silently: it panics if the untyped or slots do not fit | count checks in `l4core::boot`; host test on recorded maps | M4 |
-| BootInfo's layout is identical in the kernel and in `libsys` | one `l4core::bootinfo` type; compile-time offset asserts | M4 |
-| Slot `untyped.start + i` holds the untyped `untyped_list[i]` describes, for every `i` below `untyped.end - untyped.start`; every slot in `empty` is null | `l4core::boot` slot plan; host test; M4 self-test | M4 |
+| The root task never holds a capability to kernel memory: kernel image, stacks, descriptor tables, kernel page tables, kernel device pages, or the boot-region pages that hold its CNode, TCB and paging structures (as frames or untyped) | the plan excludes them from every untyped and frame; `test=bootinfo` checks every BootInfo descriptor against the kernel image, the stacks, descriptor tables, page tables and `BootState` in it, the device window's pages, the boot region, the MSI window and `[0, 1 MiB)` | M4, M5 |
+| No `USABLE`, `LOADER` or `ACPI_RECLAIMABLE` page outside the kernel image is written or handed out before step 5 ends: the firmware's GDT, IDT and stack, the loader's tables, ACPI and any firmware-enabled Hyper-V overlay are dead by then | the step order in `kmain`; the boot plan (step 6) is the first allocator, and `arch::Objects` panics if used before `arch::init` ends; review | M3, M4 |
+| Boot never drops memory silently: it panics if the untyped or slots do not fit | `BootError::TooManyUntyped` and `TooManySlots` from `l4core::boot`; `check_untyped` requires the RAM untyped to cover every byte the rules allow; host tests on the recorded maps and `more_untyped_than_bootinfo_holds` | M4 |
+| BootInfo's layout is identical in the kernel and in `libsys` | one `l4core::bootinfo` type; compile-time offset and size asserts in each build | M4 |
+| Slot `untyped.start + i` holds the untyped `untyped_list[i]` describes, for every `i` below `untyped.end - untyped.start`; every slot in `empty` is null | `slot_plan`, `root_cap` and `write_root_cnode`; `check_bootinfo` and `check_root_cnode` in host tests and `test=bootinfo` | M4 |
 | After step 2 no code reads `LOADER` memory other than the kernel image | `BootState` copy; review | M3 |
 | No page of `.rootimage` is mapped in the kernel window when it becomes untyped | step 8 unmaps and toggles CR4.PGE before step 9 | M5 |
 | The root image cannot map outside `[USER_MIN, USER_TOP)` or make writable text: a writable and executable segment is refused; a page no segment covers is not mapped | `l4core::elf` and `l4core::boot` checks; host tests with a gap between segments | M5 |
@@ -1119,6 +1164,43 @@ and silent drops](abi.md#errors-faults-and-silent-drops). An operation that
 reaches a preemption point leaves the thread `Restart`, so it re-executes
 `syscall` from `fault_ip` with its argument registers unchanged.
 
+The decoder for Untyped and CNode capabilities, from M4, is
+`l4core::invoke::invoke(k, slot, &Message { label, mrs, extra_caps })`. The
+caller has looked up the invoked capability's slot and each extra capability
+(`ExtraCap { cap, slot }`), as `syscall` does. It returns a `Reply`, whose
+`length` counts the result words (none before M5), or an `InvokeError`:
+`Error`, which changed nothing, or `Preempted`, with the work so far kept.
+It checks the label, then the message length, resolves every slot argument
+and performs the call through `l4core::cnode` and `l4core::untyped`. Where
+the error tables of [Untyped invocations](abi.md#untyped-invocations) and
+[CNode invocations](abi.md#cnode-invocations) leave an order open, it
+chooses:
+
+- An empty or Zombie invoked slot is `InvalidCapability` 0, whatever the
+  label.
+- The label comes before `TruncatedMessage`. `CNode_CancelBadgedSends` and
+  `CNode_SaveCaller` are `IllegalOperation` until M6, before any length check
+  or lookup.
+- `Untyped_Retype` checks `type` and `size_bits` (`untyped::check_object`)
+  before the destination lookup. With `node_depth` 0, a `root` that is not a
+  CNode is `FailedLookup` `InvalidRoot`.
+- In Copy, Mint, Move and Mutate the source's `depth` is checked as part of
+  the source lookup, after the destination's `DeleteFirst`.
+- Rotate looks up the destination, then the source, then the pivot.
+
+Each is seL4's order except the `node_depth` 0 case
+([Memory and retype](#memory-and-retype), Compared with seL4); seL4 decodes
+the two M6 methods.
+
+Before M5 nothing runs in ring 3, so only a self-test calls `invoke`, and it
+restarts a preempted call as a thread will. The preemption point polls the
+IRR and never enables interrupts; the `Preempted` call returns to the idle
+loop, which takes the interrupt, and after `irq::handle` the idle path calls
+a resume hook the test installed (`arch::set_resume_hook`). The hook restarts
+the call from its unchanged arguments, looking its slots up and decoding it
+again. A preemption the test injected with nothing pending waits for the
+next timer tick. M5's `schedule()` replaces the hook.
+
 ### `core/` and `arch/`
 
 | Part | Where | Built in |
@@ -1127,6 +1209,8 @@ reaches a preemption point leaves the thread `Restart`, so it re-executes
 | Descriptor encodings, the vector map, error-code and fatal-vector masks for the stubs, the trap frame and the fatal report | `l4core::trap`, host tests | M3 |
 | Syscall MSRs, `syscall_entry`, user trap entry, `exit_sysret`, `exit_iret` | `arch/x86_64/entry.rs` | M5 |
 | `Syscall::from_number`, `exit_frame` | `l4core::abi`, `l4core::entry`; host tests at `2^47 - 1`, `2^47`, `2^64 - 2^47`, and proptest over all `u64` | M5 |
+| The Untyped and CNode decoder: `invoke`, `Message`, `ExtraCap`, `Reply`, `InvokeError`, the labels in `invoke::label` | `l4core::invoke`; host tests of every error row and of errors that occur together, the depth limit, retype, revoke and delete preempted at every point and restarted by decoding again, and proptest over random messages | M4 |
+| The resume hook on the idle path, after `irq::handle`, which restarts a self-test's preempted call until M5's `schedule()` replaces it | `arch/x86_64/trap.rs` (`interrupt_from_idle`, `set_resume_hook`), `selftest` only | M4 |
 
 ### Invariants
 
@@ -1291,6 +1375,27 @@ implements the traits over fake physical memory, a `Vec<u64>` that panics
 outside its bounds, so proptest can check zeroing and stray writes and Miri
 runs the same tests.
 
+In the kernel, from M4, the implementation is `arch::Objects`
+(`arch/x86_64/objects.rs`), over the direct map. Each kernel operation (a
+boot step, a system call, a self-test's call) makes one with
+`Objects::begin`, which panics before `arch::init` has ended, and drops it
+when the operation ends or is preempted. Debug builds check every slot
+address and every range `zero` clears against `l4core::objmem::ObjectMemory`,
+computed once at the end of step 5: the `USABLE`, `LOADER` and
+`ACPI_RECLAIMABLE` memory of the map, merged, clipped to
+`[1 MiB, direct map end)`, without the kernel image and a hypercall page the
+firmware locked, as sorted ranges, so each check is one binary search. The
+IRQ node lies in the kernel image, so M7 must add its static range for slot
+addresses. M4 leaves the hooks inert, each match arm naming the milestone
+that fills it: `finalise` does nothing and returns no cleanup for any type;
+for an Untyped, IRQControl, IOPortControl or Hypervisor capability, which
+`core/` passes with `last` set on every deletion, it never will. `after_delete`,
+`moved` and `init_object` do nothing. Debug builds assert that no Frame or
+paging-structure capability passed to `finalise` or `moved` is mapped, since
+nothing is mapped before M5. `preempt` reads the IRR; with `selftest` it also
+counts polls, times the stretches between them and can report a preemption
+with nothing pending, for the self-tests.
+
 ### Deletion and finalisation
 
 If a deleted capability was the last to its object (`is_final`), the object
@@ -1361,9 +1466,11 @@ slots are cleared, so the kernel inserts nothing into them either.
 
 M2: representation, slot traits, finality and the Zombie algorithm, with a
 test `Kernel` that records hook calls. M4: CNode layout and the `arch`
-implementations. Then the hooks: M5 for TCBs, Endpoints, Reply capabilities
-and paging objects; M6 for Notifications and `CNode_SaveCaller`; M7 for
-IRQHandlers, IOPorts and the IRQ node; M9 for Hypervisor capabilities.
+implementations, `arch::Objects` with `l4core::objmem` behind its debug
+assertions, every hook still inert. Then the hooks: M5 for TCBs, Endpoints,
+Reply capabilities and paging objects; M6 for Notifications and
+`CNode_SaveCaller`; M7 for IRQHandlers, IOPorts and the IRQ node; M9 for
+Hypervisor capabilities.
 
 ### Invariants
 
@@ -1371,12 +1478,12 @@ IRQHandlers, IOPorts and the IRQ node; M9 for Hypervisor capabilities.
 | --- | --- | --- |
 | A capability never outlives its object: an object's memory is reused only when the untyped covering it is reset, which needs it to have no descendants, and every capability to an object in that region, except a reply capability (next row), is a descendant | `l4core` retype, insert and delete; proptest against `model/` with object liveness | M2 |
 | Reply capabilities, the one exception (a master is a derivation root), never outlive their TCB: TCB finalisation deletes the outstanding reply capability (suspend, `cancel_ipc`) and the Zombie deletes the master before the TCB's last capability's slot empties | threads and IPC finalisation; proptest deleting TCBs blocked in `Call` | M2, M5 |
-| No kernel object lies at physical address 0 | M4 untyped builder, host test; `core/` handles are `NonZeroU64` | M2, M4 |
+| No kernel object lies at physical address 0 | `l4core::boot::page_class` makes no untyped below 1 MiB, which `check_untyped` checks in host tests and `test=bootinfo`; `core/` handles are `NonZeroU64` | M2, M4 |
 | No kernel reference (queue, binding, mapping) survives the last capability to its target | `finalise` hooks called by `core/` delete; proptest counts finalisations; each subsystem's tests | M2, M5 to M7, M9 |
 | A back-reference never names an empty slot | `finalise` runs before unlink and zeroing; proptest with mapped capabilities ([Address spaces](#address-spaces)) | M2, M5 |
 | The last capability to an object is finalised exactly once, before its slot empties | `is_final` and the Zombie algorithm; proptest with random preemption | M2 |
-| Every TCB, Endpoint, Notification, CNode and paging structure lies in RAM inside the direct map, below 64 GiB | retype refuses kernel objects from device untyped; RAM untyped only below the direct map's end, `min(phys_map_size, 64 GiB)`; host test of the untyped builder | M2, M4 |
-| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, the current thread, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch` | M2, M4, M5, M7 |
+| Every TCB, Endpoint, Notification, CNode and paging structure lies in RAM inside the direct map, below 64 GiB | retype refuses kernel objects from device untyped; RAM untyped only below the direct map's end, `min(phys_map_size, 64 GiB)` (`page_class`, checked by `check_untyped` in host tests and `test=bootinfo`); in debug builds `arch::Objects` checks every slot and zeroed range against `ObjectMemory` | M2, M4 |
+| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, the current thread, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch::Objects` check every slot address against `l4core::objmem::ObjectMemory` (M4), which M7 widens to the IRQ node | M2, M4, M5, M7 |
 | Capabilities are created only by boot, retype, IRQControl and IOPortControl invocations, `Call` and fault delivery (reply capabilities), and deletion (Zombies); every other capability is derived from one its holder has | the only callers of `insert_root` and `insert_derived`; red-team brief 1 | M2, M10 |
 | Destroying a CNode or TCB is preemptible, recurses at most two levels, and keeps every invariant at each step | Zombie algorithm; proptest with random preemption points over nested and cyclic containers, including deleting a slot inside the container its own deletion destroys | M2 |
 | No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; TCB finalisation suspends first; proptest | M2, M5 |
@@ -1475,8 +1582,11 @@ object.
 ### Built when
 
 M2: `l4core::untyped` (checks, alignment, watermark, reset steps, placement)
-against `model/` on fake memory. M4: boot untyped, `zero` and `init_object`
-in `arch`, `Untyped_Retype` decoded, and the self-test that retypes, revokes
+against `model/` on fake memory. M4: boot untyped (`l4core::boot::untyped`),
+`zero` and `init_object` in `arch::Objects` (`init_object` does nothing
+until M5's TCB and PML4), `Untyped_Retype` decoded by `l4core::invoke`, which
+runs `untyped::check_object` on `type` and `size_bits` before the
+destination lookup, and `test=retype`, the self-test that retypes, revokes
 and retypes again.
 
 ### Invariants
@@ -1487,10 +1597,10 @@ and retypes again.
 | An untyped with children is never reset or copied | `has_children` in retype and `derive`; proptest | M2 |
 | Retype never allocates outside its untyped, and its arithmetic cannot overflow | `size_bits` at most 47, `num_objects` at most 256, the shift test of step 2; proptest with extreme arguments; red-team brief 3 | M2, M10 |
 | Every object is aligned to its size | align-up in step 4; proptest | M2 |
-| RAM at or above a watermark is zero, so every new object starts zeroed | reset clears before lowering the watermark; fake memory checked after each step | M2, M4 |
+| RAM at or above a watermark is zero, so every new object starts zeroed | reset clears before lowering the watermark; fake memory checked after each step; `test=retype` fills the first run's objects outside their slots, revokes U, and finds the 2,098 KiB the second run makes there all zero | M2, M4 |
 | Device untyped yields only Frames and device untyped, and is never cleared | type check in retype; device bit inherited; red-team brief 3 | M2, M10 |
 | A preempted reset leaves a consistent untyped, and the restarted retype completes it | top-down chunks; proptest with random preemption | M2 |
-| Revoking an untyped and retyping it again gives the same objects at the same addresses | M4 self-test | M4 |
+| Revoking an untyped and retyping it again gives the same objects at the same addresses | `test=retype`: 25 calls through `l4core::invoke` per run with CPtrs into the root CNode, U (the largest RAM untyped, 64 MiB on QEMU) into every object type, the CNode methods between the root CNode and a new CNode, the child untyped retyped, and three calls that must fail; the second run's 136 to 138 slots (all four words and the parent) equal the first's, and each revoke empties the 24 slots U's descendants held and leaves U and the boot capabilities as they were. Calls are preempted by the timer during the first reset of U and by injected preemptions, and restarted each time; `l4core::invoke` host tests restart retype, revoke and delete at every preemption point and end with the unpreempted call's memory and hook calls | M4 |
 
 ### Compared with seL4
 
@@ -1500,7 +1610,7 @@ and retypes again.
 | `CONFIG_RESET_CHUNK_BITS` = 8; a preemption check every 100 work units | 4 KiB chunks; how often `preempt` polls is the kernel's choice | Fewer checks per page; `core/` stays agnostic of the polling cost |
 | `size_bits` too small is `InvalidArgument` 1, too large `RangeError` 0 to 47 in object-size bits; a device type error is `InvalidArgument` 1; `node_depth` over 64 is `RangeError` 1 to 64, reported after `InvalidRoot` (`lookupSlotForCNodeOp`, `src/kernel/cspace.c`) | `RangeError` with the exact range of the argument at fault; the device error is `InvalidArgument` 0 (`type`); `node_depth` 0 to 64, checked before the root | Detail words name the argument at fault and its real range |
 | `size_bits` of 64 or more is `RangeError` 0 to 47 for every type, fixed-size ones included (`decodeUntypedInvocation`), although `objects.tex`, "Summary of Object Sizes", says it is ignored | Ignored for fixed-size types | As the manual; the argument means nothing for them |
-| A destination that is not a CNode is `MissingCapability` with `node_depth` bits left | 0 bits left; `InvalidRoot` when `root` is not a CNode | One meaning for "bits left" in CNode lookups ([Lookup failures](#lookup-failures)); paging `FailedLookup` counts virtual-address bits |
+| A destination that is not a CNode is `MissingCapability` with `node_depth` bits left; with `node_depth` 0 the root check is skipped, so a `root` that is not a CNode is this case, with 0 bits left (`decodeUntypedInvocation`) | 0 bits left; `InvalidRoot` when `root` is not a CNode, at every `node_depth`, 0 included | One meaning for "bits left" in CNode lookups ([Lookup failures](#lookup-failures)), and one error for a `root` that is not a CNode; paging `FailedLookup` counts virtual-address bits |
 | No derivation depth limit | Retype fails at depth 4095 | Field width ([Derivation tracking](#derivation-tracking)) |
 
 ## Capability addressing
@@ -1566,7 +1676,11 @@ Rotate may set any guard whose size plus the radix fits in 64 bits.
 
 M2: `resolve` in `l4core::cspace`, with host tests over hand-built CSpaces
 and proptest over random guards, radixes and `CPtr`s. M4: slot arguments of
-CNode and Untyped invocations. M5: capability lookups from the TCB's root.
+CNode and Untyped invocations, which `l4core::invoke` looks up from the
+invoked CNode or from the extra capability `root`, `src_root` or
+`pivot_root`, each with its own root and `depth` checks
+([System-call dispatch](#system-call-dispatch)). M5: capability lookups from
+the TCB's root.
 
 ### Invariants
 
@@ -1752,8 +1866,9 @@ M2: `l4core::cdt` (insert, move, swap, unlink, runs, `is_final`), the
 slot operations and every type's derive rule (paging included), against
 `model/`, which keeps an explicit parent map;
 proptest compares capabilities and parents after every step, including at
-random preemption points. M4: CNode invocations decoded. M5: reply masters
-and reply capabilities, the TCB installs. M6: IPC
+random preemption points. M4: CNode invocations decoded by `l4core::invoke`,
+with `CNode_CancelBadgedSends` and `CNode_SaveCaller` `IllegalOperation`
+until M6. M5: reply masters and reply capabilities, the TCB installs. M6: IPC
 transfer, `CNode_SaveCaller` and `CNode_CancelBadgedSends`. M7: the
 IRQ-node install. M9: Hypervisor narrowing.
 
@@ -1767,10 +1882,10 @@ IRQ-node install. M9: Hypervisor narrowing.
 | A PDPT, PageDirectory or PageTable capability is never derived, and a derived Frame capability is never mapped | `derive`; proptest; red-team brief 4 | M2, M5, M10 |
 | A plain copy never has children, so holding one gives no power over other copies | the `original` rule; proptest | M2 |
 | All capabilities to one object are adjacent, so `is_final` is exact | insertion next to the source; proptest compares `is_final` with `model/` | M2 |
-| The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step; debug asserts | M2, M4 |
+| The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step, through the decoder too (`random_messages_keep_every_slot_consistent`); debug asserts | M2, M4 |
 | No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless it is a partial revoke ([Slot operations](#slot-operations)) | single-step revoke with restart; red-team brief 2 | M2, M5, M6, M10 |
 | `depth` never exceeds 4095 and never wraps, so no capability leaves its ancestors' runs | one child-insert function in `l4core::cdt` checks the limit; proptest drives a chain to 4095 by copy and delete; red-team brief 1 | M2, M10 |
-| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5) and `IRQHandler_SetNotification` (M7); IPC transfer skips the capability (M6); tests at depth 4095 per path | M4 to M7 |
+| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5) and `IRQHandler_SetNotification` (M7); IPC transfer skips the capability (M6); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
 
 ### Compared with seL4
 
@@ -3500,16 +3615,25 @@ only when a holder of an IOPort capability for it (`uart`) invokes it
 
 ### The `debug` feature
 
-`kernel/Cargo.toml` gets `debug` and `selftest`, which implies `debug`. xtask
-enables `debug` for every scenario, `run`, `gdb` and `image` (the Hyper-V
-check reads COM1); M7 adds a build without it. Only with `debug` does the
-kernel contain `arch/x86_64/serial.rs` (the only file naming ports `0x3F8` to
-`0x3FF`), `kprintln!`'s writer, the panic message, the boot summary, the
-report of a fault with no handler ([Missing handlers and double
-faults](#missing-handlers-and-double-faults)), system calls 16 to 18 and the
-TCB list they walk. Without it `kprintln!` expands to `if false { let _ =
-format_args!(...); }`, which type-checks its arguments and emits nothing, and
-a panic only exits with failure.
+`kernel/Cargo.toml` has had `debug` and `selftest`, which implies `debug`,
+since M4. `debug` gates nothing yet: until M7 builds a kernel without it,
+every kernel prints. `selftest` gates every `test=` arm and all test-only
+kernel code: `kernel/src/selftest.rs`, the trap, paging, timer and NMI-stack
+tests and the tick and resume hooks in `arch`, the preemption-point
+statistics and injected preemptions, `arch::kernel_memory` and the stack-use
+report after a panic. A kernel without it answers any `test=` with a line
+saying it has no self-tests and fails the run, so a scenario fails at once.
+xtask builds the kernel with `--features selftest` for `test`, `run`, `gdb`,
+`image`, `build` and `acpidump` (the Hyper-V check reads COM1), and
+`cargo xtask clippy` lints it twice, with `selftest` and with no features,
+so that every `cfg` compiles both ways; M7 adds a build without `debug`.
+From M7, only with `debug` does the kernel contain `arch/x86_64/serial.rs`
+(the only file naming ports `0x3F8` to `0x3FF`), `kprintln!`'s writer, the
+panic message, the boot summary, the report of a fault with no handler
+([Missing handlers and double faults](#missing-handlers-and-double-faults)),
+system calls 16 to 18 and the TCB list they walk. Without it `kprintln!`
+expands to `if false { let _ = format_args!(...); }`, which type-checks its
+arguments and emits nothing, and a panic only exits with failure.
 
 The boot summary, which scenarios match line by line, grows by milestone: M0's
 lines (image, memory map, framebuffer, hypervisor, command line); from
@@ -3520,10 +3644,16 @@ route, the HPET and the ECAM ranges), which replaces M0's own RSDP line;
 interface and the overlay MSRs found; `IA32_APIC_BASE` at handover and the
 local APIC, PIC, I/O APIC and HPET as set up; the calibration windows and
 rates and, when Hyper-V allows it, the APIC and TSC frequency MSRs beside
-them; then CR0, CR4 and EFER, `IA32_APIC_BASE`, and `cpu: meltdown:
-vulnerable`, `not vulnerable` or `unknown`; from M4 the BootInfo summary (untyped
-count, RAM and device bytes, the slot regions); from M5 XCR0 and the XSAVE
-size.
+them; from M4 `cpu: physical address width 40 bits` (on QEMU) after the
+timer's periodic line; then CR0, CR4 and EFER, `IA32_APIC_BASE`, and
+`cpu: meltdown: vulnerable`, `not vulnerable` or `unknown`; from M4 the
+BootInfo summary, in `bootinfo:` lines: the boot region, its size and the addresses of
+the root CNode, the IPC buffer and BootInfo; the untyped count with the KiB of
+RAM, the MiB of device memory and the `2^phys_addr_bits` bound (106 to 110
+untyped on QEMU, with the loader's allocations); the framebuffer's range and
+its device untyped, listed first, or `no framebuffer`, or a warning that it
+gets no untyped and why; and one line per non-empty slot region with its
+first and last slot and its size; from M5 XCR0 and the XSAVE size.
 
 ### Debug system calls
 
@@ -3593,10 +3723,10 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Should the timer read `HV_X64_MSR_APIC_FREQUENCY` instead of calibrating, when Hyper-V allows it? | It gives the exact rate with no measurement | M3 Hyper-V check (answered) | Keep calibrating against the reference counter, as PLAN.md says, and print the MSR as a cross-check. At the M3 Hyper-V check the calibrated LAPIC rate, 200,001,000 Hz, was 5 ppm from the MSR's 200,000,000 Hz, and the TSC 57 ppm from its MSR, so the two agree well inside the 1% the timer needs |
 | How long are the calibration windows, and how close must the rate be? | Too short a window gives a wrong rate; too long slows every boot | M3 (answered) | Answered in M3: three 20 ms windows, median, for the local APIC timer and the TSC, with each reference read bracketed by a LAPIC and a TSC read; QEMU's 1 GHz APIC clock calibrates to within about 30 ppm. The `ticks` scenario requires 1% over ten ticks, each dated by the timer's reload ([The timer](#the-timer)) |
 | Is 8 KiB enough for a fatal handler's panic report on its IST stack? | An overflow of the #DF stack ends in a second #DF over the first, with the report cut short | M3 (answered) | Answered in M3: yes. The `double_fault` scenario's #DF report used 1,872 bytes of IST1's 8,192 in the dev profile and 1,904 in release, so no fixed-format writer is needed ([Static kernel memory and the boot region](#static-kernel-memory-and-the-boot-region)) |
-| Is 4 KiB the right chunk for clearing an untyped between preemption points? | seL4 clears 256 bytes per preemption point; 4 KiB under TCG may take tens of microseconds | M4 | 4 KiB with an IRR read after each chunk; measure the longest non-preemptible stretch on QEMU and Hyper-V, and add a work-unit counter like seL4's only if the reads dominate |
-| Are boot-created objects (root CNode, TCB, VSpace, BootInfo) covered by an untyped? | If they are, revoking that untyped destroys the root task; if not, their memory is never reclaimed | M4 | As seL4: they come from the boot region, outside every untyped, and their capabilities are derivation roots |
-| Are 448 untyped descriptors enough? | Boot panics if not | M4, from the recorded QEMU and Hyper-V memory maps | Yes, by several times on both targets; if not, BootInfo grows to four pages as version 2 |
-| What if the framebuffer shares a 2 MiB page with RAM-like memory? | It could not be device untyped without aliasing the write-back direct map, so `fb` could not run | M4 | `framebuffer_untyped` is empty and a debug kernel prints a warning; not seen on QEMU or Hyper-V |
+| Is 4 KiB the right chunk for clearing an untyped between preemption points? | seL4 clears 256 bytes per preemption point; 4 KiB under TCG may take tens of microseconds | M4 on QEMU (answered); Hyper-V (open) | Answered on QEMU in M4: keep 4 KiB with an IRR read after each chunk, and no work-unit counter. Under TCG, `test=retype`'s second run, which clears again the 4 MiB of U the first run used, is the steady state: a 4 KiB chunk and its poll take about 4.5 µs on average, and the longest stretch between two polls is 48 to 278 µs in the dev profile and 49 µs in release. In the first run, which touches U's 64 MiB for the first time, a slow stretch comes every 512 polls, once per 2 MiB, and the longest is 13.6 to 63.7 ms in dev and 8.8 ms in release: the host faulting in guest RAM, which a smaller chunk would not shorten. Nothing points at the chunk size. Still open for Hyper-V, which has not been measured; every image has the self-tests, so `test=retype` runs there unchanged |
+| Are boot-created objects (root CNode, TCB, VSpace, BootInfo) covered by an untyped? | If they are, revoking that untyped destroys the root task; if not, their memory is never reclaimed | M4 (answered) | Answered in M4: as seL4, they come from the boot region, outside every untyped, and their capabilities are derivation roots. `check_untyped` and `test=bootinfo` check that no untyped covers the region, and `check_root_cnode` that every boot capability is an original at depth 0 with no links |
+| Are 448 untyped descriptors enough? | Boot panics if not | M4, from the recorded QEMU and Hyper-V memory maps (answered) | Answered in M4: yes, by several times on both targets. At every physical address width from 36 to 52 bits, QEMU's recorded map gives 106 to 148 untyped, 342 to 300 below 448, and Hyper-V's 73 to 115, 375 to 333 below ([Untyped](#untyped)). If a machine needs more, BootInfo grows to four pages as version 2 |
+| What if the framebuffer shares a 2 MiB page with RAM-like memory? | It could not be device untyped without aliasing the write-back direct map, so `fb` could not run | M4 (answered) | Answered in M4: no untyped covers it, `framebuffer_untyped` is empty, BootInfo's `framebuffer` still describes it, and the boot summary prints a `bootinfo: warning:` line with the reason (host test `framebuffer_sharing_a_2mib_page_with_ram`). Not seen: QEMU's framebuffer at 2 GiB gets 6 device untyped, and Hyper-V's at `0xF8000000` 2 on the recorded map |
 | Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5: a scenario sets TF and calls `Yield`, on QEMU and Hyper-V | No trap is taken; the RIP special case stays as insurance |
 | Is `swapgs` worth keeping on one core? | seL4's uniprocessor build avoids it and a class of mistakes with it | M5 | Keep it for the multi-core stretch goal; the IST handlers never read GS |
 | Which register is a cancelled thread's restart point? | Cancelled threads become `Restart` and re-execute `syscall`; IPC relies on their argument registers being untouched | M5 | Restart `rip` is the saved user `rcx` minus 2, the length of `syscall`; IPC writes a blocked thread's registers only on completion |
