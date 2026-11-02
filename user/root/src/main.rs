@@ -10,7 +10,8 @@
 //! - `test=threads`: two threads at one priority interleave their output
 //!   under preemption ([`threads`]);
 //! - `test=fault`: a page fault reaches the faulting thread's fault
-//!   handler, which kills it ([`fault`]).
+//!   handler, which kills it ([`fault`]);
+//! - `test=redteam-*`: the M5 red-team tests ([`redteam`]).
 //!
 //! Every test ends the run with `DebugHalt`: 0 after `TEST PASS`, 1 after a
 //! `TEST FAIL` line. With no `test=` the root task halts with 0 after the
@@ -20,6 +21,7 @@
 #![no_main]
 
 mod fault;
+mod redteam;
 mod spawn;
 mod threads;
 
@@ -53,6 +55,7 @@ fn main(bi: &'static BootInfo) -> ! {
         }
         Some("threads") => threads::run(bi),
         Some("fault") => fault::run(bi),
+        Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
     }
 }
