@@ -26,6 +26,7 @@
 //! input.
 
 pub mod check;
+pub mod image;
 
 #[cfg(test)]
 mod tests;
