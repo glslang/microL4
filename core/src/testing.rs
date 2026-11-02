@@ -8,7 +8,9 @@ use alloc::vec::Vec;
 
 use crate::cap::{Cap, CapType};
 use crate::kernel::{Kernel, Preempted};
+use crate::sched::{Scheduler, Scheduling};
 use crate::slot::{Slot, SlotAddr, SlotMemory};
+use crate::tcb::{REGS_OFFSET, TcbRef, Tcbs, ThreadState, Threads, XSAVE_OFFSET};
 
 /// A range of fake physical memory: `len` bytes from `base`, as words.
 /// Every access outside it, or not 8-byte aligned, panics, so a stray slot
@@ -106,6 +108,27 @@ impl SlotMemory for FakeMemory {
     }
 }
 
+/// TCB fields in fake memory, at the TCB's physical address, as the kernel
+/// keeps them in the direct map. Panics on an offset [`Tcbs`] does not
+/// allow.
+impl Tcbs for FakeMemory {
+    fn tcb_word(&self, t: TcbRef, offset: u64) -> u64 {
+        self.read(tcb_field(t, offset))
+    }
+
+    fn set_tcb_word(&mut self, t: TcbRef, offset: u64, value: u64) {
+        self.write(tcb_field(t, offset), value);
+    }
+}
+
+fn tcb_field(t: TcbRef, offset: u64) -> u64 {
+    assert!(
+        (REGS_OFFSET..XSAVE_OFFSET).contains(&offset) && offset.is_multiple_of(8),
+        "TCB field offset {offset:#x}"
+    );
+    t.get() + offset
+}
+
 /// A hook call [`TestKernel`] recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -126,6 +149,15 @@ pub enum Event {
     InitObject(Cap),
 }
 
+/// A [`Threads`] hook call [`TestKernel`] recorded, kept apart from the
+/// [`Event`]s so that the capability core's records stay as they were.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadEvent {
+    CancelIpc(TcbRef),
+    SetCurrentFsBase(u64),
+    WriteBufferWord { paddr: u64, value: u64 },
+}
+
 /// The word [`TestKernel::init_object`] writes into objects that hold data,
 /// so tests can see that a reset clears them.
 pub const DIRT: u64 = 0xD1D1_D1D1_D1D1_D1D1;
@@ -141,6 +173,14 @@ pub struct TestKernel {
     pub preempt_in: Option<u64>,
     /// Preemption points passed so far.
     pub preempt_points: u64,
+    /// The scheduler: the current thread and the ready queues.
+    pub sched: Scheduler,
+    /// [`Threads`] hook calls.
+    pub thread_events: Vec<ThreadEvent>,
+    /// What [`Threads::invoked_by_call`] answers.
+    pub by_call: bool,
+    /// What [`Threads::synic_pages`] answers.
+    pub synic: [u64; 2],
 }
 
 impl TestKernel {
@@ -151,6 +191,10 @@ impl TestKernel {
             events: Vec::new(),
             preempt_in: None,
             preempt_points: 0,
+            sched: Scheduler::new(),
+            thread_events: Vec::new(),
+            by_call: true,
+            synic: [0; 2],
         }
     }
 
@@ -220,5 +264,57 @@ impl Kernel for TestKernel {
             }
             None => Ok(()),
         }
+    }
+}
+
+impl Tcbs for TestKernel {
+    fn tcb_word(&self, t: TcbRef, offset: u64) -> u64 {
+        self.mem.tcb_word(t, offset)
+    }
+
+    fn set_tcb_word(&mut self, t: TcbRef, offset: u64, value: u64) {
+        self.mem.set_tcb_word(t, offset, value);
+    }
+}
+
+impl Scheduling for TestKernel {
+    fn scheduler(&self) -> &Scheduler {
+        &self.sched
+    }
+
+    fn scheduler_mut(&mut self) -> &mut Scheduler {
+        &mut self.sched
+    }
+}
+
+impl Threads for TestKernel {
+    /// Records the call and does what IPC's `cancel_ipc` does to the thread
+    /// itself: a blocked thread becomes `Inactive`, and the fault is
+    /// cleared. There are no endpoint queues or reply capabilities to undo.
+    fn cancel_ipc(&mut self, t: TcbRef) {
+        self.thread_events.push(ThreadEvent::CancelIpc(t));
+        if self.state(t).is_blocked() {
+            self.set_state(t, ThreadState::Inactive);
+        }
+        self.set_fault(t, None);
+    }
+
+    fn invoked_by_call(&self) -> bool {
+        self.by_call
+    }
+
+    fn synic_pages(&self) -> [u64; 2] {
+        self.synic
+    }
+
+    fn set_current_fs_base(&mut self, value: u64) {
+        self.thread_events
+            .push(ThreadEvent::SetCurrentFsBase(value));
+    }
+
+    fn write_buffer_word(&mut self, paddr: u64, value: u64) {
+        self.thread_events
+            .push(ThreadEvent::WriteBufferWord { paddr, value });
+        self.mem.write(paddr, value);
     }
 }
