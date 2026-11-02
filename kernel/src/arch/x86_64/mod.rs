@@ -18,6 +18,14 @@ mod irq;
 mod objects;
 mod paging;
 mod pic;
+#[cfg_attr(
+    not(feature = "selftest"),
+    expect(
+        dead_code,
+        reason = "boot step 8 takes the root image from M5's integration"
+    )
+)]
+mod rootimage;
 pub mod serial;
 mod timer;
 mod trap;
@@ -34,6 +42,14 @@ use crate::boot::BootState;
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
 pub use objects::{Objects, bootinfo_frames};
+#[cfg_attr(
+    not(feature = "selftest"),
+    expect(
+        unused_imports,
+        reason = "boot step 8 takes the root image from M5's integration"
+    )
+)]
+pub use rootimage::take_rootimage;
 #[cfg_attr(
     not(feature = "selftest"),
     expect(unused_imports, reason = "M5's scheduler idles through it")

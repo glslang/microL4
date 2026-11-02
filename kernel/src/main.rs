@@ -28,6 +28,8 @@ mod debug;
 mod arch;
 mod boot;
 #[cfg(feature = "selftest")]
+mod rootimage;
+#[cfg(feature = "selftest")]
 mod selftest;
 
 use core::panic::PanicInfo;
@@ -111,6 +113,8 @@ fn run_test(
         // Kernel objects and BootInfo (M4).
         "bootinfo" => selftest::bootinfo(boot, facts, root),
         "retype" => selftest::retype(root),
+        // The root image (M5).
+        "rootimage" => rootimage::test(boot, root),
         other => {
             kprintln!("TEST FAIL: unknown test {other:?}");
             arch::exit(arch::ExitCode::Failure)
