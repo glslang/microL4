@@ -332,4 +332,6 @@ fn slots_for_copy<M: SlotMemory + ?Sized>(
 }
 
 #[cfg(test)]
+mod redteam;
+#[cfg(test)]
 mod tests;
