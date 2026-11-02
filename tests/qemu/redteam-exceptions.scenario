@@ -1,0 +1,32 @@
+# M5 red team (docs/redteam/m5-movss-db.md lists what held): one ring-3
+# thread runs 80 probes (user/root/src/redteam/probes.rs), each a
+# privileged or faulting instruction sequence, with the root task as its
+# fault handler, which resumes it past each probe with TCB_WriteRegisters.
+# Every probe must end in the fault docs/abi.md names, with IOPL 0, and the
+# kernel must not panic: int n for the NMI, #DF, #MC, timer and device
+# vectors, int1, sysenter, sysexit, sysretq, privileged instructions, far
+# returns and iretq to every GDT selector, IOPL 3 by popfq and iretq, NT,
+# kernel and non-canonical addresses, TF and AC across syscall, a pending
+# x87 #MF across a thread switch, bad XSAVE headers, a syscall with a
+# non-canonical or kernel RSP (which returns RSP 0), and unknown numbers.
+# QEMU 8.2 TCG differs from hardware in four ways the probes accept: #PF
+# for non-canonical addresses, a SMAP #PF for retfq and iretq in ring 3, #UD
+# for int1, and no MXCSR reserved-bit check or #XM.
+cmdline: test=redteam-exceptions
+exit: success
+expect: microL4 kernel
+expect: root: cmdline "test=redteam-exceptions"
+expect: redteam: exceptions: 80 probes in thread
+expect: probe 1 (int 2, the NMI vector): label 3, 0xd/0x12
+expect: probe 3 (int 18, the #MC vector): label 3, 0xd/0x92
+expect: probe 51 (popfq asking for IOPL 3, then cli): label 3, 0xd/0x0
+expect: probe 61 (TF set across syscall (Yield)): label 3, 0x1/0x0
+expect: probe 65 (AC and DF set, a misaligned read, Yield, then int3): label 3, 0x3/0x0
+expect: probe 67 (x87 #MF delivered by fwait): label 3, 0x10/0x0
+expect: entry: warning: RSP 0x800000000000 at or above 2^47 exits as 0
+expect: probe 74 (syscall (Yield) with a non-canonical RSP, then int3): label 3, 0x3/0x0
+expect: rsp 0x0
+expect: probe 79 (syscall number 2^64 - 1): label 2, 0xffffffffffffffff/0x0
+expect: redteam: exceptions: all 80 probes ended in their own fault
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

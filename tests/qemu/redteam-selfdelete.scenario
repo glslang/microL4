@@ -1,0 +1,22 @@
+# M5 red team: a thread deletes its own objects in the middle of its own
+# system call (user/root/src/redteam/vm.rs). Its TCB, IPC buffer frame and
+# VSpace (a PML4 of its own, with copies of the root task's image frames)
+# all come from one 1 MiB untyped U, its TCB holds the last capability to
+# that PML4, which is in CR3, its FS base is set and XMM0 holds a marker.
+# Round 0: one Call of CNode_Delete on the last capability to its own TCB.
+# The root task then revokes U and retypes a TCB at the same address,
+# which must start with FS base 0 and XMM0 0, not the dead thread's.
+# Round 1: one Call of CNode_Revoke on U itself. Neither thread may run on
+# past its call, and the kernel must survive both.
+cmdline: test=redteam-selfdelete
+exit: success
+expect: microL4 kernel
+expect: root: cmdline "test=redteam-selfdelete"
+expect: redteam: selfdelete: round 0: thread
+expect: deletes the last capability to its own TCB
+expect: redteam: selfdelete: a new TCB at the dead one's address: FS:[0x10] faults at 0x10 (label 5), XMM0 0x0
+expect: redteam: selfdelete: round 1: thread
+expect: revokes U, which holds its TCB, VSpace and IPC buffer
+expect: redteam: selfdelete: the kernel survived both, and nothing ran on
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
