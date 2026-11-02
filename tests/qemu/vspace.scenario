@@ -1,0 +1,40 @@
+# Address spaces on the machine (docs/design.md, "Address spaces"). A RAM
+# untyped is retyped through l4core::invoke into a PML4, a PDPT, a page
+# directory, a page table, a 2 MiB frame and two 4 KiB frames; the new
+# PML4 holds the kernel PML4's entries 256 to 511. The structures and
+# frames are mapped at the top of the user range, with the errors the ABI
+# gives at its edges, and set_vm_root loads the PML4: the kernel runs on
+# it. The kernel never touches a user address (SMAP), so each mapping is
+# checked by walking the tables CR3 holds, and the frame is written at the
+# physical address the walk gives. Then Frame_Remap (an invlpg), a move of
+# a mapped capability, Frame_Unmap, the page table's deletion (a CR3
+# reload), and the deletion of the loaded PML4's last capability, which
+# loads the kernel PML4 first. U is revoked at the end.
+cmdline: test=vspace
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=vspace"
+expect: vspace: U is root slot
+expect: vspace: ok   U into two 4 KiB frames
+expect: vspace: ok   the new PML4's entries 256 to 511 are the kernel PML4's, the rest zero
+expect: vspace: ok   Frame_Map of the highest 4 KiB page, read-write
+expect: vspace: ok   Frame_Map of the page below the hole: InvalidArgument(0)
+expect: vspace: ok   Frame_Map over a mapped page: DeleteFirst
+expect: vspace: ok   Frame_Map with no PDPT: FailedLookup
+expect: vspace: ok   PageTable_Map of a mapped page table: InvalidCapability(0)
+expect: vspace: ok   Frame_Map of the highest 2 MiB page
+expect: vspace: ok   set_vm_root loaded the new PML4, and the kernel runs on its kernel half
+expect: vspace: ok   the highest 4 KiB page maps its frame read-write, NX, user, not global, write-back
+expect: vspace: ok   the page table's first page maps its frame read-only and executable
+expect: vspace: ok   the highest 2 MiB page maps its frame with a 2 MiB leaf
+expect: vspace: ok   nothing else in the lower half translates
+expect: vspace: ok   a write at the physical address the walk gives lands in the frame
+expect: vspace: ok   the remapped page is read-only
+expect: vspace: ok   the moved capability's page still translates
+expect: vspace: ok   the unmapped page no longer translates; the page table's first page does
+expect: vspace: ok   its frame is unmapped and no longer translates; the 2 MiB page still does
+expect: vspace: ok   CR3 still holds the PML4, which still maps the 2 MiB page
+expect: vspace: ok   CR3 holds the kernel PML4; the PDPT is unmapped, the page directory keeps its entry
+expect: vspace: ok   set_vm_root of no VSpace keeps the kernel PML4
+expect: vspace: ok   every slot the test filled is empty
+expect: TEST PASS

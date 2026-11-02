@@ -13,11 +13,34 @@
 //! encoders: kernel and user, 4 KiB and 2 MiB. Kernel leaves are global and
 //! supervisor-only and never writable and executable at once; user leaves
 //! are user-accessible and never global.
+//!
+//! From M5, [`paging`] holds the user half: the paging objects with their
+//! back-references, map, remap, unmap and deletion, each returning a
+//! [`Flush`], and [`decode`] the invocations (`docs/design.md`, "Address
+//! spaces"). Everything in both is re-exported here.
 
 use core::fmt;
 
 use crate::handoff::{DIRECT_MAP_MAX, KERNEL_VIRT_BASE, MemoryRegion, PHYS_MAP_BASE, RegionKind};
 use crate::window::{DeviceWindow, KERNEL_DEVICE_BASE};
+
+pub mod decode;
+pub mod paging;
+
+pub use decode::{invoke, label};
+pub use paging::{
+    Attributes, BACKREFS, Flush, FrameMapping, KERNEL_HALF, Link, PagingStore, STRUCTURE_LIMIT,
+    TableCounts, TableMapping, USER_MIN, USER_TOP, finalise, holder_level, init_pml4, link_of,
+    map_boot_frame, map_boot_tables, map_frame, map_table, moved, remap_frame, structure_level,
+    translate, unmap_frame, unmap_table,
+};
+
+#[cfg(test)]
+mod model_tests;
+#[cfg(test)]
+mod paging_tests;
+#[cfg(test)]
+mod testkit;
 
 /// Bytes in a 4 KiB page.
 pub const PAGE_4K: u64 = 1 << 12;
