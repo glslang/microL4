@@ -18,6 +18,8 @@ extern crate alloc;
 
 pub mod acpi;
 pub mod apic;
+pub mod boot;
+pub mod bootinfo;
 pub mod calibration;
 pub mod cap;
 pub mod cdt;

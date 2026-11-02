@@ -1,0 +1,17 @@
+# The kernel's memory-map lines from the M3 Hyper-V check on the owner's
+# host (a Generation 2 VM with 512 MiB), copied from its COM1 log.
+# core/src/boot/tests.rs reads them; the framebuffer's size is
+# stride * height * 4.
+kernel: 600 KiB at phys 0x1e8dd000, virt 0xffffffff80000000
+memory: 10 regions, 508 MiB usable, direct map covers 4 GiB
+  0x000000000000-0x0000000a0000 usable
+  0x0000000c0000-0x000000100000 reserved
+  0x000000100000-0x00001e8ca000 usable
+  0x00001e8ca000-0x00001eb41000 loader
+  0x00001eb41000-0x00001ff41000 usable
+  0x00001ff41000-0x00001ffc5000 firmware
+  0x00001ffc5000-0x00001ffd4000 usable
+  0x00001ffd4000-0x00001fffb000 acpi-reclaimable
+  0x00001fffb000-0x00001ffff000 acpi-nvs
+  0x00001ffff000-0x000020000000 usable
+framebuffer: 1024x768, stride 1024, BGR at 0xf8000000
