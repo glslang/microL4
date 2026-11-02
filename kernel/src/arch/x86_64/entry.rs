@@ -15,8 +15,10 @@
 //!   stubs in [`super::trap`] build the same frame for exceptions and
 //!   interrupts and call `trap_from_user`. Both end in [`from_user`],
 //!   which hands the frame to one function per kind of entry:
-//!   [`user_syscall`], [`user_exception`] and [`user_interrupt`]. Those
-//!   are the seams the scheduler and dispatch fill in.
+//!   [`user_syscall`], [`user_exception`] and [`user_interrupt`]. Each
+//!   saves the frame into the current thread's registers, hands the work
+//!   to `crate::dispatch` or `irq::handle`, and ends through the
+//!   scheduler (`thread::exit_to_scheduled`).
 //! - [`exit_to_user`] leaves for a thread from its saved [`Regs`]: the
 //!   frame comes from `l4core::entry::exit_frame`, and `exit_sysret` or
 //!   `exit_iret` pops it, runs `swapgs`, and returns.
@@ -37,9 +39,11 @@ use core::mem::offset_of;
 
 use l4core::entry::{FMASK, STAR, SYSCALL_VECTOR, UserEntry, exit_frame, lower_half};
 use l4core::regs::{Exit, Regs};
-use l4core::trap::{TrapFrame, USER_CS, USER_DS, Vector};
+use l4core::sched::Scheduling;
+use l4core::tcb::{TcbRef, Tcbs};
+use l4core::trap::{TrapFrame, USER_CS, USER_DS};
 
-use super::{cpu, gdt, serial, trap};
+use super::{Objects, cpu, gdt, irq, serial, thread, trap};
 
 #[cfg(feature = "selftest")]
 pub use self::selftest::{last_exit, ring0_single_steps, set_user_entry_hook};
@@ -304,45 +308,63 @@ pub(super) fn from_user(frame: &TrapFrame, entry: UserEntry) -> ! {
     }
 }
 
-// The seams. Each receives a ring-3 entry and must end in `exit_to_user`
-// or the idle loop; nothing stays on the kernel stack between entries.
-// Until the scheduler exists there is no thread to run, so each panics.
+// The seams: one function per kind of entry. Each saves the frame into
+// the current thread's registers, does its work, and ends the entry
+// through the scheduler (`thread::exit_to_scheduled`), which exits to a
+// thread or idles; nothing stays on the kernel stack between entries. The
+// system-call and fault work is `crate::dispatch`'s.
 
-/// A `syscall` from the current thread. To fill in: save `frame` into the
-/// current TCB's registers (`l4core::entry::save`, which sets `fault_ip`
-/// on the `syscall`, `next_ip` after it and `exit` = `Sysret`), decode
-/// `rdx` with `l4core::abi::Syscall::from_number(frame.rdx,
-/// cfg!(feature = "debug"))`, `None` being an `UnknownSyscall` fault,
-/// dispatch, schedule, and exit to the chosen thread.
+/// Copies `frame` into the current thread's registers
+/// (`l4core::entry::save`) and returns the thread. A ring-3 entry always
+/// has one: only a thread runs in ring 3.
+fn save_current(k: &mut Objects, frame: &TrapFrame) -> TcbRef {
+    let Some(t) = k.scheduler().current() else {
+        panic!(
+            "an entry from ring 3 at {:#x}, but no thread is current",
+            frame.rip
+        )
+    };
+    let mut regs = k.regs(t);
+    l4core::entry::save(frame, &mut regs);
+    k.set_regs(t, &regs);
+    t
+}
+
+/// A `syscall` from the current thread: saved with `fault_ip` on the
+/// `syscall`, `next_ip` after it and `exit` = `Sysret`, then dispatched
+/// (`crate::dispatch::syscall`).
 fn user_syscall(frame: &TrapFrame) -> ! {
-    panic!(
-        "system call {:#x} from ring 3 at {:#x} with no thread to take it",
-        frame.rdx, frame.rip
-    )
+    {
+        let mut k = Objects::begin();
+        let t = save_current(&mut k, frame);
+        crate::dispatch::syscall(&mut k, t);
+    }
+    thread::exit_to_scheduled()
 }
 
 /// An exception the current thread caused: `vector` below 32, its error
-/// code (0 if the CPU pushes none) and, for `#PF`, CR2. To fill in: save
-/// `frame` into the current TCB (`next_ip` = `fault_ip` = the RIP the CPU
-/// pushed, `exit` = `Iret`), turn the vector into a fault ("Fault types
-/// and sources") and deliver it, schedule, and exit.
+/// code (0 if the CPU pushes none) and, for `#PF`, CR2. Saved with
+/// `next_ip` = `fault_ip` = the RIP the CPU pushed and `exit` = `Iret`,
+/// then made a fault (`crate::dispatch::exception`).
 fn user_exception(frame: &TrapFrame, vector: u8, error: u64, cr2: u64) -> ! {
-    panic!(
-        "{} from ring 3 at {:#x}, error {error:#x}, CR2 {cr2:#x}, with no thread to take it",
-        Vector(vector),
-        frame.rip
-    )
+    {
+        let mut k = Objects::begin();
+        let t = save_current(&mut k, frame);
+        crate::dispatch::exception(&mut k, t, vector, error, cr2);
+    }
+    thread::exit_to_scheduled()
 }
 
-/// An interrupt taken while the current thread ran. To fill in: save
-/// `frame` into the current TCB (`exit` = `Iret`), run `irq::handle`
-/// (which ticks the scheduler on the timer), schedule, and exit.
+/// An interrupt taken while the current thread ran: saved with `exit` =
+/// `Iret`, then handled by `irq::handle`, whose timer tick charges the
+/// thread's slice.
 fn user_interrupt(frame: &TrapFrame, vector: u8) -> ! {
-    panic!(
-        "{} from ring 3 at {:#x} with no thread to take it",
-        Vector(vector),
-        frame.rip
-    )
+    {
+        let mut k = Objects::begin();
+        save_current(&mut k, frame);
+    }
+    irq::handle(vector);
+    thread::exit_to_scheduled()
 }
 
 // ---------------------------------------------------------------------------
@@ -359,10 +381,6 @@ fn user_interrupt(frame: &TrapFrame, vector: u8) -> ! {
 ///
 /// The first exit to any thread, the root task's included, uses this too:
 /// a new TCB's `exit` reads as `Iret`.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(dead_code, reason = "the scheduler exits to threads through it")
-)]
 pub fn exit_to_user(regs: &Regs) -> ! {
     let (frame, path) = exit_frame(regs);
     // Without a kernel bug these fire only for an RSP the thread set
@@ -411,10 +429,6 @@ pub fn exit_to_user(regs: &Regs) -> ! {
 /// `IA32_KERNEL_GS_BASE`, at a switch to it (ADR 0015). The exit's
 /// `swapgs` then makes the second the GS base. A base at or above 2^47
 /// becomes 0, the sanitiser's rule, so the WRMSRs cannot fault.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(dead_code, reason = "the scheduler switches threads through it")
-)]
 pub fn load_user_bases(regs: &Regs) {
     // SAFETY: both MSRs exist on every x86_64 CPU and take any canonical
     // address; a lower-half one is. The kernel never uses FS, and
@@ -426,14 +440,19 @@ pub fn load_user_bases(regs: &Regs) {
     }
 }
 
+/// Writes `IA32_FS_BASE` now, for `TCB_SetTLSBase` on the current thread,
+/// before the switch-away path saves the MSR over the new value. `value`
+/// is sanitised already; a value at or above 2^47 becomes 0 regardless.
+pub fn set_fs_base(value: u64) {
+    // SAFETY: as in `load_user_bases`: a lower-half address is canonical,
+    // and the kernel never uses FS.
+    unsafe { cpu::write_msr(IA32_FS_BASE, lower_half(value)) };
+}
+
 /// Reads the current thread's FS and GS bases back from `IA32_FS_BASE` and
 /// `IA32_KERNEL_GS_BASE` into `regs`, at a switch away from it: a segment
 /// load in ring 3 may have changed them since they were written (ADR
 /// 0015).
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(dead_code, reason = "the scheduler switches threads through it")
-)]
 pub fn save_user_bases(regs: &mut Regs) {
     regs.fs_base = cpu::read_msr(IA32_FS_BASE);
     regs.gs_base = cpu::read_msr(IA32_KERNEL_GS_BASE);

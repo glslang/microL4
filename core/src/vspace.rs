@@ -377,6 +377,12 @@ pub struct KernelLayout {
     /// not be page-aligned.
     pub rodata_start: u64,
     pub rodata_end: u64,
+    /// `__rootimage_start` to `__rootimage_end`: `.rootimage`, page-aligned
+    /// inside rodata, mapped read-only at `KERNEL_VIRT_BASE` but read-write
+    /// in the direct map, since boot step 8 reclaims it as RAM untyped (M5).
+    /// Empty (start = end) for an image without one.
+    pub rootimage_start: u64,
+    pub rootimage_end: u64,
     /// `__data_start` to `__data_end`: `.data`, `.bss` and the stacks,
     /// mapped RW and NX.
     pub data_start: u64,
@@ -393,6 +399,9 @@ pub enum Section {
     Text,
     /// `.rodata`: R everywhere.
     Rodata,
+    /// `.rootimage`: R and NX at `KERNEL_VIRT_BASE` until boot step 8
+    /// unmaps it, RW and NX in the direct map, never executable.
+    RootImage,
     /// `.data`, `.bss` and the stacks: RW and NX everywhere.
     Data,
     /// A stack guard page: mapped nowhere.
@@ -429,6 +438,8 @@ impl KernelLayout {
             None
         } else if page < self.rodata_start {
             Some(Section::Text)
+        } else if (self.rootimage_start..self.rootimage_end).contains(&page) {
+            Some(Section::RootImage)
         } else if page < self.data_start {
             Some(Section::Rodata)
         } else if self.guards.contains(&page) {
@@ -467,6 +478,15 @@ impl KernelLayout {
             || page_up(self.rodata_end) != self.data_start
         {
             return bad("a gap or overlap between text, rodata and data");
+        }
+        if self.rootimage_start > self.rootimage_end
+            || !self.rootimage_start.is_multiple_of(PAGE_4K)
+            || !self.rootimage_end.is_multiple_of(PAGE_4K)
+            || (self.rootimage_start < self.rootimage_end
+                && (self.rootimage_start < self.rodata_start
+                    || self.rootimage_end > self.data_start))
+        {
+            return bad(".rootimage is not whole pages of rodata");
         }
         if self.data_end != self.virt().end {
             return bad("data does not end where kernel_size says the image does");
@@ -813,7 +833,7 @@ pub fn build(
             let access = if image.contains(page) {
                 match layout.section_of(page - image.start + KERNEL_VIRT_BASE) {
                     Some(Section::Text | Section::Rodata) => Some(KernelAccess::Read),
-                    Some(Section::Data) => Some(KernelAccess::ReadWrite),
+                    Some(Section::Data | Section::RootImage) => Some(KernelAccess::ReadWrite),
                     Some(Section::Guard) | None => None,
                 }
             } else {
@@ -836,7 +856,7 @@ pub fn build(
         let virt = KERNEL_VIRT_BASE + k * PAGE_4K;
         let access = match layout.section_of(virt) {
             Some(Section::Text) => KernelAccess::ReadExecute,
-            Some(Section::Rodata) => KernelAccess::Read,
+            Some(Section::Rodata | Section::RootImage) => KernelAccess::Read,
             Some(Section::Data) => KernelAccess::ReadWrite,
             Some(Section::Guard) | None => continue,
         };
@@ -971,6 +991,8 @@ mod tests {
             text_end,
             rodata_start: text_end,
             rodata_end,
+            rootimage_start: data_start,
+            rootimage_end: data_start,
             data_start,
             data_end: at,
             guards,
@@ -991,6 +1013,8 @@ mod tests {
             text_end: v(0x9000),
             rodata_start: v(0x9000),
             rodata_end: v(0xc06c),
+            rootimage_start: v(0xd000),
+            rootimage_end: v(0xd000),
             data_start: v(0xd000),
             data_end: v(0x85000),
             guards: [v(0x68000), v(0x79000), v(0x7c000), v(0x7f000), v(0x82000)],
@@ -1235,6 +1259,13 @@ mod tests {
                         Section::Data => {
                             assert!(!tr.execute, "executable alias of {p:#x} at {v:#x}")
                         }
+                        // Writable only in the direct map, executable
+                        // nowhere.
+                        Section::RootImage => {
+                            assert!(!tr.execute, "executable alias of {p:#x} at {v:#x}");
+                            let direct = (PHYS_MAP_BASE..PHYS_MAP_BASE + (512 << 30)).contains(&v);
+                            assert_eq!(tr.write, direct, ".rootimage alias of {p:#x} at {v:#x}");
+                        }
                         Section::Guard => panic!("guard page {p:#x} mapped at {v:#x}"),
                     }
                     assert_eq!(tr.cache, CacheType::WriteBack);
@@ -1277,7 +1308,7 @@ mod tests {
                 assert_eq!(tr.phys, layout.virt_to_phys(v));
                 let (w, x) = match layout.section_of(v).unwrap() {
                     Section::Text => (false, true),
-                    Section::Rodata => (false, false),
+                    Section::Rodata | Section::RootImage => (false, false),
                     Section::Data => (true, false),
                     Section::Guard => unreachable!("walked to a guard page"),
                 };
@@ -1349,6 +1380,37 @@ mod tests {
         let s = check_invariants(&hyperv_case());
         assert_eq!((s.alias_pts, s.image_pts, s.window_pages), (1, 1, 2));
         assert_eq!((s.direct_wb, s.direct_uc), (256, 2048 - 256));
+    }
+
+    /// An M5 image: the last two pages of rodata are `.rootimage`, which
+    /// the direct map maps writable and the image read-only.
+    #[test]
+    #[cfg_attr(miri, ignore = "builds 348 KiB of tables: minutes under Miri")]
+    fn a_rootimage_alias_is_writable_and_never_executable() {
+        let mut c = hyperv_case();
+        let l = &mut c.layout;
+        l.rodata_end = l.data_start;
+        l.rootimage_start = l.data_start - 2 * PAGE_4K;
+        l.rootimage_end = l.data_start;
+        assert_eq!(l.check(), Ok(()));
+        check_invariants(&c);
+        let (t, _) = c.build();
+        let phys = c.tables_phys();
+        let l = &c.layout;
+        for v in (l.rootimage_start..l.rootimage_end).step_by(PAGE_4K as usize) {
+            let p = l.virt_to_phys(v);
+            let image = t.walk(phys, v).unwrap().unwrap();
+            assert!(!image.write && !image.execute, "image page {v:#x}");
+            let alias = t.walk(phys, PHYS_MAP_BASE + p).unwrap().unwrap();
+            assert!(alias.write && !alias.execute, "alias of {p:#x}");
+        }
+        // The page before it is still rodata.
+        let before = l.rootimage_start - PAGE_4K;
+        let alias = t
+            .walk(phys, PHYS_MAP_BASE + l.virt_to_phys(before))
+            .unwrap()
+            .unwrap();
+        assert!(!alias.write);
     }
 
     #[test]
@@ -1710,6 +1772,29 @@ mod tests {
         assert!(bad(|l| l.guards[0] = l.rodata_start));
         assert!(bad(|l| l.guards[4] = l.data_end));
         assert!(bad(|l| l.guards[3] += 8));
+        assert!(bad(|l| {
+            l.rootimage_start = l.rodata_start - PAGE_4K;
+            l.rootimage_end = l.rodata_start + PAGE_4K;
+        }));
+        assert!(bad(|l| {
+            l.rootimage_start = l.rodata_start;
+            l.rootimage_end = l.data_start + PAGE_4K;
+        }));
+        assert!(bad(|l| {
+            l.rootimage_start = l.rodata_start + 8;
+            l.rootimage_end = l.data_start;
+        }));
+        assert!(bad(|l| {
+            l.rootimage_start = l.data_start;
+            l.rootimage_end = l.rodata_start;
+        }));
+        assert_eq!(
+            check(|l| {
+                l.rootimage_start = l.rodata_start + PAGE_4K;
+                l.rootimage_end = l.data_start;
+            }),
+            Ok(())
+        );
         assert_eq!(good.section_of(KERNEL_VIRT_BASE), Some(Section::Text));
         assert_eq!(good.section_of(good.text_end - 1), Some(Section::Text));
         assert_eq!(good.section_of(good.rodata_end), Some(Section::Rodata));

@@ -18,7 +18,10 @@
 //! - [`finalise`] and [`moved`], for Frame and paging-structure
 //!   capabilities: they call `l4core::vspace` and apply its flush;
 //! - [`set_vm_root`], on every exit to a thread, with the capability in its
-//!   VSpace slot.
+//!   VSpace slot;
+//! - [`unmap_rootimage`], at the end of boot step 8, which takes
+//!   `.rootimage` out of the kernel window and lets paging structures lie
+//!   in its reclaimed pages.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -79,8 +82,9 @@ macro_rules! linker_addr {
 struct Tables(UnsafeCell<KernelTables>);
 
 // SAFETY: the tables are written only through the one `&mut` that
-// `take_tables` hands out, during boot on the one core, and only read
-// afterwards.
+// `take_tables` hands out, during boot on the one core, and then only by
+// `unmap_rootimage`, once, in boot step 8, while no reference `built` gave
+// out is live; otherwise they are only read.
 unsafe impl Sync for Tables {}
 
 static TABLES: Tables = Tables(UnsafeCell::new(KernelTables::new()));
@@ -92,34 +96,26 @@ static PML4_PHYS: AtomicU64 = AtomicU64::new(0);
 static DIRECT_MAP_END: AtomicU64 = AtomicU64::new(0);
 static IMAGE_START: AtomicU64 = AtomicU64::new(0);
 static IMAGE_END: AtomicU64 = AtomicU64::new(0);
+/// `.rootimage`'s physical pages once [`unmap_rootimage`] reclaimed them:
+/// paging structures may lie there although it is inside the image.
+static RECLAIMED_START: AtomicU64 = AtomicU64::new(0);
+static RECLAIMED_END: AtomicU64 = AtomicU64::new(0);
 
 /// The tables and the PML4's physical address, once `init` has loaded
 /// them.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        dead_code,
-        reason = "M5's integration uses the kernel PML4 through `kernel_pml4`"
-    )
-)]
 fn built() -> Option<(&'static KernelTables, u64)> {
     let pml4 = PML4_PHYS.load(Ordering::Acquire);
     // SAFETY: PML4_PHYS is set only after `init` finished writing the
-    // tables through the reference `take_tables` gave it, and nothing writes
-    // them again: not the kernel, and not the CPU, since every kernel entry
-    // has Accessed, and every writable leaf Dirty, already set.
+    // tables through the reference `take_tables` gave it. The CPU never
+    // writes them, since every kernel entry has Accessed, and every
+    // writable leaf Dirty, already set; the kernel writes them once more,
+    // in `unmap_rootimage`, which no caller of this function can overlap:
+    // each uses the reference within one call and keeps none.
     (pml4 != 0).then(|| (unsafe { &*TABLES.0.get() }, pml4))
 }
 
 /// The kernel PML4: its physical address and its entries, which every
 /// PML4's entries 256 to 511 copy. Panics before `init` has loaded it.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        dead_code,
-        reason = "M5's integration calls `set_vm_root` and `init_object`"
-    )
-)]
 fn kernel_pml4() -> (u64, &'static Table) {
     let (tables, pml4) = built().expect("the kernel's page tables are not loaded");
     (pml4, &tables.tables[PML4])
@@ -152,6 +148,8 @@ fn kernel_layout(h: &Handoff) -> KernelLayout {
         text_end: linker_addr!("__text_end"),
         rodata_start: linker_addr!("__rodata_start"),
         rodata_end: linker_addr!("__rodata_end"),
+        rootimage_start: linker_addr!("__rootimage_start"),
+        rootimage_end: linker_addr!("__rootimage_end"),
         data_start: linker_addr!("__data_start"),
         data_end,
         guards: [
@@ -287,7 +285,9 @@ fn structure_word(table: u64, i: usize) -> *mut u64 {
         (1 << 20..STRUCTURE_LIMIT).contains(&table)
             && table + (1 << 13) <= DIRECT_MAP_END.load(Ordering::Relaxed)
             && (table + (1 << 13) <= IMAGE_START.load(Ordering::Relaxed)
-                || table >= IMAGE_END.load(Ordering::Relaxed)),
+                || table >= IMAGE_END.load(Ordering::Relaxed)
+                || (table >= RECLAIMED_START.load(Ordering::Relaxed)
+                    && table + (1 << 13) <= RECLAIMED_END.load(Ordering::Relaxed))),
         "{table:#x} is not where a paging structure can be"
     );
     phys_to_virt(table + 8 * i as u64) as *mut u64
@@ -373,13 +373,6 @@ pub fn apply(flush: Flush) {
 /// the loaded PML4 dies. `vspace` must be a capability read from a slot,
 /// so that a PML4 capability names a live PML4; one without the kernel's
 /// half panics.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        dead_code,
-        reason = "M5's integration calls it on every exit to a thread"
-    )
-)]
 pub fn set_vm_root(vspace: Cap) {
     let (kernel, kernel_entries) = kernel_pml4();
     let pml4 = match vspace.cap_type() {
@@ -407,16 +400,57 @@ pub fn set_vm_root(vspace: Cap) {
     unsafe { write_cr3(pml4) };
 }
 
+/// Boot step 8's end (`docs/design.md`, "Boot sequence", "The kernel
+/// half"): clears the PTEs that map `.rootimage`, the image pages `virt`
+/// at `KERNEL_VIRT_BASE`, then toggles CR4.PGE, which drops their global
+/// translations [H4]. Its direct-map alias, `phys`, stays mapped
+/// read-write, as M3 built it, and paging structures may lie there from
+/// now on. Called once, by `RootImageSection::unmap`, which consumes the
+/// section so no borrow of its bytes outlives this.
+pub fn unmap_rootimage(virt: core::ops::Range<u64>, phys: core::ops::Range<u64>) {
+    use l4core::handoff::KERNEL_VIRT_BASE;
+    use l4core::vspace::{IMAGE_PTS, PAGE_4K};
+
+    assert!(
+        RECLAIMED_END.load(Ordering::Relaxed) == 0,
+        ".rootimage reclaimed twice"
+    );
+    assert!(
+        virt.start.is_multiple_of(PAGE_4K)
+            && virt.end.is_multiple_of(PAGE_4K)
+            && virt.start >= KERNEL_VIRT_BASE
+            && phys.end - phys.start == virt.end - virt.start,
+        "bad .rootimage range"
+    );
+    let tables = TABLES.0.get();
+    for v in (virt.start..virt.end).step_by(PAGE_4K as usize) {
+        let k = ((v - KERNEL_VIRT_BASE) / PAGE_4K) as usize;
+        let (pt, i) = (IMAGE_PTS + k / ENTRIES, k % ENTRIES);
+        // SAFETY: `init` built the tables and loaded them; this is boot
+        // step 8, between kernel operations, so no reference `built` gave
+        // out is live, and `take_tables`' was dropped at the end of `init`.
+        // Clearing the leaf for an image page of `.rootimage` unmaps only
+        // that page, which nothing but `RootImageSection` reads, and the
+        // caller consumed it; the code, stacks and data stay mapped. The
+        // place is reached through the raw pointer, not a reference, and
+        // written with one aligned store, which the page walker sees whole.
+        unsafe { ptr::write_volatile(&raw mut (*tables).tables[pt][i], 0) };
+    }
+    let cr4 = cpu::read_cr4();
+    // SAFETY: clearing and setting PGE only flushes the TLB, global
+    // entries included [H4]; every translation the kernel still uses is in
+    // the tables.
+    unsafe {
+        cpu::write_cr4(cr4 & !CR4_PGE);
+        cpu::write_cr4(cr4);
+    }
+    RECLAIMED_START.store(phys.start, Ordering::Relaxed);
+    RECLAIMED_END.store(phys.end, Ordering::Relaxed);
+}
+
 /// The `init_object` hook's part for paging: a new PML4 gets the kernel's
 /// half. Retype zeroed it, and every other new paging structure or frame
 /// is all zeros already.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        dead_code,
-        reason = "M5's integration calls it from `Objects::init_object`"
-    )
-)]
 pub fn init_object<K: PagingStore + ?Sized>(k: &mut K, cap: Cap) {
     if cap.cap_type() == CapType::Pml4 {
         vspace::init_pml4(k, cap.object(), kernel_pml4().1);
@@ -428,13 +462,6 @@ pub fn init_object<K: PagingStore + ?Sized>(k: &mut K, cap: Cap) {
 /// PML4 goes, the kernel PML4 is loaded first; then `l4core::vspace`
 /// unmaps what the capability maps, and its flush is applied. Nothing
 /// for other capabilities.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(
-        dead_code,
-        reason = "M5's integration calls it from `Objects::finalise`"
-    )
-)]
 pub fn finalise<K: SlotMemory + PagingStore + ?Sized>(k: &mut K, cap: Cap, last: bool) {
     if cap.cap_type() == CapType::Pml4 && last && read_cr3() & ADDR_4K == cap.object() {
         set_vm_root(Cap::NULL);
@@ -444,10 +471,6 @@ pub fn finalise<K: SlotMemory + PagingStore + ?Sized>(k: &mut K, cap: Cap, last:
 
 /// The `moved` hook's part: a mapped Frame or paging structure's
 /// back-reference follows its capability from `from` to `to`.
-#[cfg_attr(
-    not(feature = "selftest"),
-    expect(dead_code, reason = "M5's integration calls it from `Objects::moved`")
-)]
 pub fn moved<K: SlotMemory + PagingStore + ?Sized>(
     k: &mut K,
     cap: Cap,
@@ -649,16 +672,16 @@ mod selftest {
 /// the same way; the last capability to the loaded PML4 is deleted, which
 /// loads the kernel PML4; and `U` is revoked.
 ///
-/// The kernel's `Objects` hooks are still inert, so the test wraps them in
-/// `Wired`, whose hooks call this file's [`finalise`], [`moved`] and
-/// [`init_object`], as the integration will; it never preempts.
+/// The kernel's `Objects` hooks call this file's [`finalise`], [`moved`] and
+/// [`init_object`]; the test wraps `Objects` in `Wired`, which never
+/// preempts.
 #[cfg(feature = "selftest")]
 mod vspace_test {
     use core::fmt;
     use core::ptr;
 
     use l4core::bootinfo::CAP_INIT_CNODE;
-    use l4core::cap::{Cap, CapType, ObjectType, Rights};
+    use l4core::cap::{Cap, ObjectType, Rights};
     use l4core::cspace;
     use l4core::error::{LookupFailure, SyscallError};
     use l4core::invoke::{self, ExtraCap, InvokeError, Message, Reply};
@@ -670,12 +693,14 @@ mod vspace_test {
     };
 
     use super::super::{ExitCode, Objects, exit, phys_to_virt};
-    use super::{
-        ADDR_4K, ENTRIES, finalise, init_object, kernel_pml4, moved, read_cr3, set_vm_root,
-    };
+    use l4core::sched::{Scheduler, Scheduling};
+    use l4core::tcb::{TcbRef, Tcbs, Threads};
+
+    use super::{ADDR_4K, ENTRIES, kernel_pml4, read_cr3, set_vm_root};
     use crate::boot::RootSpace;
 
-    /// `Objects` with the paging hooks wired in, and no preemption.
+    /// `Objects`, whose hooks call this file's paging hooks, without
+    /// preemption: the test's calls run to the end.
     struct Wired(Objects);
 
     impl SlotMemory for Wired {
@@ -712,17 +737,7 @@ mod vspace_test {
 
     impl Kernel for Wired {
         fn finalise(&mut self, cap: Cap, last: bool) -> Option<Cap> {
-            match cap.cap_type() {
-                CapType::Frame
-                | CapType::PageTable
-                | CapType::PageDirectory
-                | CapType::Pdpt
-                | CapType::Pml4 => {
-                    finalise(self, cap, last);
-                    None
-                }
-                _ => self.0.finalise(cap, last),
-            }
+            self.0.finalise(cap, last)
         }
 
         fn after_delete(&mut self, cleanup: Cap) {
@@ -730,7 +745,7 @@ mod vspace_test {
         }
 
         fn moved(&mut self, cap: Cap, from: SlotAddr, to: SlotAddr) {
-            moved(self, cap, from, to)
+            self.0.moved(cap, from, to)
         }
 
         fn zero(&mut self, paddr: u64, len: u64) {
@@ -738,12 +753,53 @@ mod vspace_test {
         }
 
         fn init_object(&mut self, cap: Cap) {
-            init_object(self, cap);
             self.0.init_object(cap)
         }
 
         fn preempt(&mut self) -> Result<(), Preempted> {
             Ok(())
+        }
+    }
+
+    impl Tcbs for Wired {
+        fn tcb_word(&self, t: TcbRef, offset: u64) -> u64 {
+            self.0.tcb_word(t, offset)
+        }
+
+        fn set_tcb_word(&mut self, t: TcbRef, offset: u64, value: u64) {
+            self.0.set_tcb_word(t, offset, value)
+        }
+    }
+
+    impl Scheduling for Wired {
+        fn scheduler(&self) -> &Scheduler {
+            self.0.scheduler()
+        }
+
+        fn scheduler_mut(&mut self) -> &mut Scheduler {
+            self.0.scheduler_mut()
+        }
+    }
+
+    impl Threads for Wired {
+        fn cancel_ipc(&mut self, t: TcbRef) {
+            self.0.cancel_ipc(t)
+        }
+
+        fn invoked_by_call(&self) -> bool {
+            self.0.invoked_by_call()
+        }
+
+        fn synic_pages(&self) -> [u64; 2] {
+            self.0.synic_pages()
+        }
+
+        fn set_current_fs_base(&mut self, value: u64) {
+            self.0.set_current_fs_base(value)
+        }
+
+        fn write_buffer_word(&mut self, paddr: u64, value: u64) {
+            self.0.write_buffer_word(paddr, value)
         }
     }
 
@@ -881,8 +937,7 @@ mod vspace_test {
         unsafe { ptr::write_volatile(phys_to_virt(paddr) as *mut u64, word) };
     }
 
-    pub fn test_vspace(root: &RootSpace) -> ! {
-        let bi = root.bootinfo;
+    pub fn test_vspace(root: &RootSpace, bi: &l4core::bootinfo::BootInfo) -> ! {
         // The smallest RAM untyped that holds a 2 MiB frame and the rest.
         let Some((i, d)) = bi
             .untyped()
