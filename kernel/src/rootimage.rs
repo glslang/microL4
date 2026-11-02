@@ -1,36 +1,47 @@
-//! `test=rootimage`: the root image pipeline, before the kernel boots the
-//! root task (`docs/design.md`, "Root-task image and address space").
+//! `test=rootimage`: what boot step 8 made of the root image
+//! (`docs/design.md`, "Root-task image and address space", "Root-task
+//! entry state").
 //!
 //! `cargo xtask build` built `user/root`, stripped and checked it, and the
-//! kernel embeds it in `.rootimage`. The test finds the section through the
-//! linker's symbols and checks that it holds exactly the file, page-aligned,
-//! at the end of what the kernel maps read-only, where the live tables put
-//! it at the physical pages the boot plan will reclaim. Then it runs
-//! `l4core::boot::image`'s checks on the file, makes the boot plan the root
-//! task's needs give on this machine, and prints the VSpace boot step 8
-//! would build from it, slot by slot, each slot checked against the
-//! capability `root_cap` would put there.
+//! kernel embedded it in `.rootimage`; boot step 8 copied it into the root
+//! task's frames, mapped its VSpace and made its TCB, then unmapped
+//! `.rootimage`. The test checks that `.rootimage` is gone from the kernel
+//! window and covered by RAM untyped; that BootInfo names the image; that
+//! the root VSpace maps every image page to a frame holding what the ELF
+//! says, with the segment's permissions (a hash step 8 computed from the
+//! ELF before unmapping it, against the frames read through a walk of the
+//! root PML4), and the IPC buffer and BootInfo after it, RW and NX, and
+//! nothing just outside; and that the root TCB is ready to run as
+//! `docs/abi.md` says.
 
 use core::fmt;
 
-use l4core::boot::check::check_plan;
-use l4core::boot::image::{RootImage, RootMapping, root_mappings};
-use l4core::boot::{self as l4boot, root_cap};
-use l4core::cap::{CapType, FRAME_4K_BITS, PAGING_STRUCTURE_BITS};
-use l4core::vspace::UserAccess;
+use l4core::bootinfo::{BootInfo, CAP_INIT_CNODE, CAP_INIT_IPC_BUFFER, CAP_INIT_VSPACE};
+use l4core::cap::{CapType, TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_VSPACE};
+use l4core::handoff::KERNEL_VIRT_BASE;
+use l4core::regs::Exit;
+use l4core::slot::SlotMemory;
+use l4core::tcb::{Tcbs, ThreadState};
+use l4core::vspace::{self, CacheType, PAGE_4K, USER_MIN};
 
-use crate::arch;
-use crate::boot::{BootState, RootSpace};
-
-const PAGE: u64 = 4096;
+use crate::arch::{self, Objects};
+use crate::boot::{BootState, FNV_BASIS, RootSpace, page_hash};
 
 fn fail(why: fmt::Arguments<'_>) -> ! {
-    kprintln!("TEST FAIL: {why}");
+    kprintln!("TEST FAIL: rootimage: {why}");
     arch::exit(arch::ExitCode::Failure)
 }
 
-fn perms(a: UserAccess) -> &'static str {
-    match (a.write, a.execute) {
+macro_rules! ensure {
+    ($cond:expr, $($arg:tt)*) => {
+        if !$cond {
+            fail(format_args!($($arg)*))
+        }
+    };
+}
+
+fn perms(write: bool, execute: bool) -> &'static str {
+    match (write, execute) {
         (false, true) => "RX",
         (false, false) => "R",
         (true, false) => "RW, NX",
@@ -38,209 +49,211 @@ fn perms(a: UserAccess) -> &'static str {
     }
 }
 
-/// Consecutive frames with consecutive slots, addresses and pages and the
-/// same permissions, printed as one line.
+/// Consecutive mapped pages with consecutive frames and the same
+/// permissions, printed as one line.
 struct Run {
-    slots: (u64, u64),
-    paddr: u64,
     virt: (u64, u64),
-    access: UserAccess,
-    file_bytes: usize,
+    phys: u64,
+    write: bool,
+    execute: bool,
 }
 
 impl Run {
     fn print(&self) {
-        let n = (self.virt.1 - self.virt.0) / PAGE;
+        let n = (self.virt.1 - self.virt.0) / PAGE_4K;
         kprintln!(
-            "rootimage: slots {}-{}: {n} frame{} at {:#x} map {:#x}-{:#x} {}, {} file bytes",
-            self.slots.0,
-            self.slots.1,
-            if n == 1 { "" } else { "s" },
-            self.paddr,
+            "rootimage: {:#x}-{:#x} maps {n} frame{} from {:#x}, {}",
             self.virt.0,
             self.virt.1,
-            perms(self.access),
-            self.file_bytes
+            if n == 1 { "" } else { "s" },
+            self.phys,
+            perms(self.write, self.execute)
         );
     }
 }
 
 /// `test=rootimage`.
-pub fn test(boot: &BootState, root: &RootSpace) -> ! {
-    let section = arch::take_rootimage();
-    let v = section.virt();
-    let (file, bytes) = (section.file(), section.bytes());
+pub fn test(boot: &BootState, root: &RootSpace, bi: &BootInfo) -> ! {
+    // `.rootimage`: gone from the kernel window, covered by RAM untyped.
+    let ri = root.rootimage;
+    let virt = ri.start - boot.handoff.kernel_phys_base + KERNEL_VIRT_BASE;
     kprintln!(
-        "rootimage: .rootimage {:#x}-{:#x}, {} KiB, holds the {}-byte root ELF",
-        v.start,
-        v.end,
-        (v.end - v.start) >> 10,
-        file.len()
+        "rootimage: .rootimage was {virt:#x}-{:#x}, {} KiB, at physical {:#x}-{:#x}",
+        virt + (ri.end - ri.start),
+        (ri.end - ri.start) >> 10,
+        ri.start,
+        ri.end
     );
-    if !v.start.is_multiple_of(PAGE) || !v.end.is_multiple_of(PAGE) {
-        fail(format_args!(".rootimage is not page-aligned"));
+    for v in (virt..virt + (ri.end - ri.start)).step_by(PAGE_4K as usize) {
+        ensure!(
+            arch::kernel_translation(boot, v..v + PAGE_4K).is_none(),
+            "{v:#x} is still mapped"
+        );
     }
-    // The static's address, hidden from the optimiser, which could take
-    // it and the linker's symbol for distinct objects.
-    let file_at = core::hint::black_box(file.as_ptr()) as u64;
-    if file_at != v.start || v.end != (v.start + file.len() as u64).next_multiple_of(PAGE) {
-        fail(format_args!("the linker's symbols do not bound the file"));
-    }
-    if bytes[..file.len()] != *file || bytes[file.len()..].iter().any(|&b| b != 0) {
-        fail(format_args!(".rootimage holds more than the file"));
-    }
-    let rodata = section.rodata();
-    if rodata.start > v.start || rodata.end != v.end {
-        fail(format_args!(
-            ".rootimage does not end rodata {:#x}-{:#x}",
-            rodata.start, rodata.end
-        ));
-    }
-    let phys = section.phys(boot.handoff.kernel_phys_base);
-    match section.translated(boot) {
-        Some(t) if t == (phys.start..phys.end) => {}
-        other => fail(format_args!(
-            "the kernel's tables map .rootimage at {other:x?}, not {:#x}-{:#x}",
-            phys.start, phys.end
-        )),
-    }
+    let (count, bytes) = bi
+        .untyped()
+        .iter()
+        .filter(|d| !d.device() && d.paddr >= ri.start && d.end() <= ri.end)
+        .fold((0, 0), |(n, b), d| (n + 1, b + d.size()));
+    ensure!(
+        bytes == ri.end - ri.start,
+        "RAM untyped cover {bytes:#x} of its {:#x} bytes",
+        ri.end - ri.start
+    );
     kprintln!(
-        "rootimage: at physical {:#x}-{:#x}, at the end of the kernel's read-only data",
-        phys.start,
-        phys.end
+        "rootimage: unmapped from the kernel window; {count} RAM untyped cover its {} KiB",
+        bytes >> 10
+    );
+    // A reset of those untyped writes them through the direct map, which
+    // must map them writable: a write would fault in ring 0 otherwise.
+    Objects::begin().fill(ri.start, ri.end - ri.start, 0);
+    kprintln!("rootimage: its direct-map alias is writable: zeroed through it");
+
+    // BootInfo names the image, the IPC buffer and itself after it.
+    let image = root.user_image;
+    let after = |i: u64| image.end + i * PAGE_4K;
+    ensure!(
+        (bi.user_image_start, bi.user_image_end, bi.ipc_buffer)
+            == (image.start, image.end, after(0)),
+        "BootInfo's image {:#x}-{:#x} and IPC buffer {:#x}",
+        bi.user_image_start,
+        bi.user_image_end,
+        bi.ipc_buffer
+    );
+    kprintln!(
+        "rootimage: the root ELF's image {:#x}-{:#x}, entry {:#x}; IPC buffer at {:#x}, BootInfo at {:#x}",
+        image.start,
+        image.end,
+        root.entry,
+        after(0),
+        after(1)
     );
 
-    let image = match RootImage::check(bytes) {
-        Ok(image) => image,
-        Err(e) => fail(format_args!("the boot checks refuse the root image: {e}")),
-    };
-    let span = image.image();
-    kprintln!(
-        "rootimage: the root ELF passes the boot checks: entry {:#x}, image {:#x}-{:#x}",
-        image.entry(),
-        span.start,
-        span.end
-    );
-    let regs = image.entry_regs();
-    kprintln!(
-        "rootimage: IPC buffer at {:#x}, BootInfo at {:#x}; root enters at {:#x} with rdi {:#x}, RFLAGS {:#x}",
-        image.ipc_buffer(),
-        image.bootinfo(),
-        regs.next_ip,
-        regs.rdi,
-        regs.rflags
-    );
-    let needs = image.needs();
-    kprintln!(
-        "rootimage: needs a TCB, a PML4, {} PDPT, {} PD, {} PT and {} image frames",
-        needs.pdpts,
-        needs.pds,
-        needs.pts,
-        needs.image_frames
-    );
-
-    // The plan boot makes once it loads the root task: M4's input with
-    // these needs and `.rootimage` reclaimed.
-    let mut input = root.plan.input;
-    input.root = needs;
-    input.rootimage = Some(phys);
-    let plan = match l4boot::plan(input) {
-        Ok(plan) => plan,
-        Err(e) => fail(format_args!("boot plan: {e}")),
-    };
-    if let Err(e) = check_plan(&plan) {
-        fail(format_args!("check_plan: {e}"));
-    }
-    let slots = match l4boot::slot_plan(&needs, &root.untyped) {
-        Ok(slots) => slots,
-        Err(e) => fail(format_args!("slot plan: {e}")),
-    };
-    let l = &plan.layout;
-    let r = l.region;
-    kprintln!(
-        "rootimage: boot region {:#x}-{:#x}, {} KiB: PML4 at {:#x}, TCB at {:#x}",
-        r.start,
-        r.end,
-        (r.end - r.start) >> 10,
-        l.pml4.unwrap_or(0),
-        l.tcb.unwrap_or(0)
-    );
-
+    // The root VSpace, walked from its PML4.
+    let k = Objects::begin();
+    let l = &root.plan.layout;
+    let pml4 = l.pml4.unwrap_or_else(|| fail(format_args!("no root PML4")));
+    let frames = l.image_frame(0)..l.image_frame(root.image_pages);
+    let (mut hash, mut pages) = (FNV_BASIS, 0);
     let mut run: Option<Run> = None;
-    let mut frames = 0;
-    for m in root_mappings(&image, l, &slots) {
-        match m {
-            RootMapping::Table {
-                slot,
-                ty,
-                paddr,
-                vaddr,
-            } => {
-                let cap = root_cap(&plan, &slots, &[], slot);
-                if (cap.cap_type(), cap.object(), cap.size_bits())
-                    != (ty, paddr, PAGING_STRUCTURE_BITS)
-                {
-                    fail(format_args!(
-                        "slot {slot} holds {cap:?}, not {ty:?} at {paddr:#x}"
-                    ));
-                }
-                kprintln!("rootimage: slot {slot}: {ty:?} at {paddr:#x} maps from {vaddr:#x}");
+    for v in (image.start..image.end).step_by(PAGE_4K as usize) {
+        let Some(t) = vspace::translate(&k, pml4, v) else {
+            continue;
+        };
+        ensure!(
+            t.user
+                && !t.global
+                && t.page_size == PAGE_4K
+                && t.cache == CacheType::WriteBack
+                && frames.contains(&t.phys),
+            "{v:#x} maps {t:x?}"
+        );
+        hash = page_hash(hash, v, t.write, t.execute, |w| {
+            k.buffer_word(t.phys + 8 * w as u64)
+        });
+        pages += 1;
+        match &mut run {
+            Some(r)
+                if r.virt.1 == v
+                    && r.phys + (r.virt.1 - r.virt.0) == t.phys
+                    && (r.write, r.execute) == (t.write, t.execute) =>
+            {
+                r.virt.1 += PAGE_4K;
             }
-            RootMapping::Frame {
-                slot,
-                paddr,
-                vaddr,
-                access,
-                offset,
-                bytes,
-            } => {
-                let cap = root_cap(&plan, &slots, &[], slot);
-                if (cap.cap_type(), cap.object(), cap.size_bits())
-                    != (CapType::Frame, paddr, FRAME_4K_BITS)
-                    || offset + bytes.len() > PAGE as usize
-                {
-                    fail(format_args!(
-                        "slot {slot} holds {cap:?}, not a frame at {paddr:#x}"
-                    ));
+            _ => {
+                if let Some(done) = run.take() {
+                    done.print();
                 }
-                frames += 1;
-                match &mut run {
-                    Some(r)
-                        if r.slots.1 + 1 == slot
-                            && r.virt.1 == vaddr
-                            && r.paddr + (r.virt.1 - r.virt.0) == paddr
-                            && r.access == access =>
-                    {
-                        r.slots.1 = slot;
-                        r.virt.1 += PAGE;
-                        r.file_bytes += bytes.len();
-                    }
-                    _ => {
-                        if let Some(done) = run.take() {
-                            done.print();
-                        }
-                        run = Some(Run {
-                            slots: (slot, slot),
-                            paddr,
-                            virt: (vaddr, vaddr + PAGE),
-                            access,
-                            file_bytes: bytes.len(),
-                        });
-                    }
-                }
+                run = Some(Run {
+                    virt: (v, v + PAGE_4K),
+                    phys: t.phys,
+                    write: t.write,
+                    execute: t.execute,
+                });
             }
         }
     }
     if let Some(done) = run {
         done.print();
     }
-    if frames != needs.image_frames + 3 {
-        fail(format_args!(
-            "{frames} frames mapped, not {} image frames, the IPC buffer and BootInfo",
-            needs.image_frames
-        ));
+    ensure!(
+        (hash, pages) == (root.image_hash, root.image_pages),
+        "{pages} image pages hash to {hash:#x}; step 8 mapped {} to {:#x}",
+        root.image_pages,
+        root.image_hash
+    );
+    kprintln!(
+        "rootimage: its {pages} image pages hold what the ELF says, with its segments' permissions"
+    );
+    for (v, phys, what) in [
+        (after(0), l.ipc_buffer, "the IPC buffer"),
+        (after(1), l.bootinfo, "BootInfo"),
+        (after(2), l.bootinfo + PAGE_4K, "BootInfo's second page"),
+    ] {
+        match vspace::translate(&k, pml4, v) {
+            Some(t) if t.phys == phys && t.write && !t.execute && t.user => {}
+            other => fail(format_args!("{what} at {v:#x} maps {other:x?}")),
+        }
     }
-    kprintln!("rootimage: every slot holds the capability boot step 8 maps");
+    kprintln!(
+        "rootimage: {:#x}-{:#x} maps the IPC buffer and BootInfo's two frames, RW, NX",
+        after(0),
+        after(3)
+    );
+    let outside = [image.start - PAGE_4K, after(3)];
+    for v in outside.into_iter().filter(|&v| v >= USER_MIN) {
+        ensure!(
+            vspace::translate(&k, pml4, v).is_none(),
+            "{v:#x}, outside the image, maps"
+        );
+    }
+
+    // The root TCB.
+    let t = root.tcb;
+    let regs = k.regs(t);
+    ensure!(
+        k.state(t) == ThreadState::Running && k.priority(t) == 255 && k.mcp(t) == 255,
+        "the root TCB is {:?} at priority {} and MCP {}",
+        k.state(t),
+        k.priority(t),
+        k.mcp(t)
+    );
+    ensure!(
+        regs.next_ip == root.entry
+            && regs.rdi == after(1)
+            && regs.rflags == 0x202
+            && regs.rsp == 0
+            && regs.exit() == Exit::Iret
+            && (regs.rax, regs.rbx, regs.rsi, regs.r15) == (0, 0, 0, 0),
+        "the root TCB's registers {regs:x?}"
+    );
+    for (n, root_slot, ty) in [
+        (TCB_SLOT_CSPACE, CAP_INIT_CNODE, CapType::CNode),
+        (TCB_SLOT_VSPACE, CAP_INIT_VSPACE, CapType::Pml4),
+        (TCB_SLOT_IPC_BUFFER, CAP_INIT_IPC_BUFFER, CapType::Frame),
+    ] {
+        let slot = k.load(t.slot(n));
+        let src = l.slot(root_slot);
+        ensure!(
+            slot.cap.cap_type() == ty
+                && slot.cap.same_object(&k.load(src).cap)
+                && slot.node.prev() == Some(src),
+            "TCB slot {n} holds {:x?}",
+            slot.cap
+        );
+    }
+    ensure!(
+        k.ipc_buffer(t) == after(0),
+        "the root TCB's IPC buffer is {:#x}",
+        k.ipc_buffer(t)
+    );
+    kprintln!(
+        "rootimage: the root TCB at {:#x} is Running at {:#x} with rdi {:#x}, RFLAGS 0x202, priority and MCP 255, its IPC buffer at {:#x}; its slots hold copies of root slots 2, 3 and 10",
+        t.get(),
+        regs.next_ip,
+        regs.rdi,
+        after(0)
+    );
     kprintln!("TEST PASS");
     arch::exit(arch::ExitCode::Success)
 }

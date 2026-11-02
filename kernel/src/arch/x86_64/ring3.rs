@@ -28,7 +28,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use l4core::abi::Syscall;
-use l4core::bootinfo::CAP_INIT_CNODE;
+use l4core::bootinfo::{BootInfo, CAP_INIT_CNODE};
 use l4core::cap::ObjectType;
 use l4core::cspace;
 use l4core::entry::{self as le, LOWER_HALF_END, UserEntry, rflags};
@@ -764,8 +764,7 @@ macro_rules! ensure {
 
 /// `test=ring3`: builds the throwaway address space and the thread, and
 /// drops to ring 3 by `iretq`. Every later entry comes to [`on_entry`].
-pub fn test_ring3(root: &'static RootSpace) -> ! {
-    let bi = root.bootinfo;
+pub fn test_ring3(root: &'static RootSpace, bi: &BootInfo) -> ! {
     let Some((i, d)) = bi
         .untyped()
         .iter()

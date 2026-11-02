@@ -1,32 +1,47 @@
-//! The kernel side of the capability core (`docs/design.md`, "How `core/`
-//! reaches kernel memory", "Deletion and finalisation", "Reset and
-//! preemption"): [`Objects`] implements `l4core::slot::SlotMemory` and
-//! `l4core::kernel::Kernel` over the direct map.
+//! The kernel side of the capability core and of threads (`docs/design.md`,
+//! "How `core/` reaches kernel memory", "Deletion and finalisation", "Reset
+//! and preemption", "Threads and TCBs", "Scheduling"): [`Objects`]
+//! implements `l4core`'s `SlotMemory`, `Kernel`, `PagingStore` (in
+//! [`super::paging`]), `Tcbs`, `Scheduling` and `Threads` over the direct
+//! map.
 //!
-//! - Slots are loaded and stored by value through raw pointers at
-//!   `PHYS_MAP_BASE + addr`, and `zero` writes through one the same way; no
-//!   Rust reference into slot or untyped memory is ever made.
-//! - Debug builds check every slot address and every range `zero` clears
+//! - Slots, TCB fields and IPC buffer words are loaded and stored by value
+//!   through raw pointers at `PHYS_MAP_BASE + addr`, and `zero` writes
+//!   through one the same way; no Rust reference into object memory is
+//!   ever made.
+//! - Debug builds check every slot address, TCB and range `zero` clears
 //!   against [`ObjectMemory`], computed once at the end of step 5: RAM the
-//!   kernel hands out, inside the direct map, outside the kernel image.
-//! - The hooks into other subsystems do nothing yet: before M5 no
-//!   capability names an object that holds kernel state to undo or set up.
+//!   kernel hands out, inside the direct map, outside the kernel image; and
+//!   from boot step 8 `.rootimage`'s reclaimed pages ([`reclaim`]).
+//! - The scheduler's queues live in a static that only `Objects` reaches.
+//! - The hooks: a new TCB gets its initial fields, the initial FP state and
+//!   a place in the debug list, a new PML4 the kernel's half; a TCB's last
+//!   capability suspends it and drops its FP and FS/GS-base ownership; a
+//!   Frame or paging structure unmaps; a mapped one that moves takes its
+//!   back-reference along. Endpoints and reply capabilities wait for IPC.
 //! - The preemption point polls the local APIC's IRR and never enables
 //!   interrupts. With `selftest` it also counts polls, times the longest
 //!   stretch between two, and can be told to report a preemption with no
 //!   interrupt pending.
 
+use core::cell::UnsafeCell;
+use core::ops::Range;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use l4core::bootinfo::{BOOTINFO_SIZE, BootInfo};
-use l4core::cap::{Cap, CapType, SLOT_SIZE};
+use l4core::cap::{Cap, CapType, SLOT_SIZE, TCB_BITS};
 use l4core::kernel::{Kernel, Preempted};
 use l4core::objmem::ObjectMemory;
+use l4core::sched::{Scheduler, Scheduling};
 use l4core::slot::{Slot, SlotAddr, SlotMemory};
+use l4core::tcb::{self, REGS_OFFSET, TcbRef, Tcbs, ThreadState, Threads, XSAVE_OFFSET};
 
-use super::{BootFacts, StaticCell, apic, phys_to_virt};
+use super::{BootFacts, StaticCell, apic, entry, fpu, paging, phys_to_virt, thread};
 use crate::boot::BootState;
+
+#[cfg(feature = "debug")]
+pub use self::debug_tcbs::for_each_tcb;
 
 #[cfg(feature = "selftest")]
 pub use self::polls::{inject_preemption, poll_stats, reset_stretches};
@@ -49,6 +64,45 @@ pub fn init(boot: &BootState, facts: &BootFacts) {
     };
     MEMORY.init(memory);
 }
+
+/// `.rootimage`'s physical pages, once boot step 8 has unmapped them from
+/// the kernel window: RAM untyped cover them, so kernel objects may lie
+/// there although they are inside the kernel image.
+static RECLAIMED: StaticCell<Range<u64>> = StaticCell::new();
+
+/// Records `.rootimage`'s pages as object memory, after step 8 unmapped
+/// them. Once.
+pub fn reclaim(span: Range<u64>) {
+    RECLAIMED.init(span);
+}
+
+/// Whether `len` bytes at `paddr` are memory kernel objects may occupy.
+fn object_memory(memory: &ObjectMemory, paddr: u64, len: u64) -> bool {
+    memory.contains(paddr, len)
+        || RECLAIMED.get().is_some_and(|r| {
+            paddr >= r.start && paddr.checked_add(len).is_some_and(|end| end <= r.end)
+        })
+}
+
+/// Whether the invocation the kernel is performing came by `Call`
+/// ([`Threads::invoked_by_call`]); set by the system-call path.
+static INVOKED_BY_CALL: AtomicBool = AtomicBool::new(false);
+
+/// Says whether the invocation about to be performed came by `Call`.
+pub fn set_invoked_by_call(call: bool) {
+    INVOKED_BY_CALL.store(call, Ordering::Relaxed);
+}
+
+/// The ready queues, the scheduler action and the current thread.
+struct SchedulerCell(UnsafeCell<Scheduler>);
+
+// SAFETY: one core, and kernel code runs with interrupts off, so nothing
+// runs concurrently; `Objects`' `Scheduling` methods are the only way to
+// the scheduler, and each reference they give lives no longer than the
+// borrow of the `Objects` it came through.
+unsafe impl Sync for SchedulerCell {}
+
+static SCHEDULER: SchedulerCell = SchedulerCell(UnsafeCell::new(Scheduler::new()));
 
 /// Boot step 9: BootInfo's two frames at physical `paddr`, in the boot
 /// region step 6 zeroed, as one `BootInfo` for boot to fill. The first call
@@ -119,10 +173,56 @@ impl Objects {
     /// occupy.
     fn check(&self, paddr: u64, len: u64, what: &str) {
         debug_assert!(
-            self.memory.contains(paddr, len),
+            object_memory(self.memory, paddr, len),
             "{what} {paddr:#x}+{len:#x} is not RAM for kernel objects: outside the direct map, \
              outside USABLE, LOADER and ACPI_RECLAIMABLE memory above 1 MiB, or in the kernel image"
         );
+    }
+
+    /// The physical address of field `offset` of TCB `t`, as [`Tcbs`]
+    /// allows it: a multiple of 8 between the slots and the XSAVE area.
+    fn tcb_field(&self, t: TcbRef, offset: u64) -> u64 {
+        assert!(
+            (REGS_OFFSET..XSAVE_OFFSET).contains(&offset) && offset.is_multiple_of(8),
+            "TCB field offset {offset:#x}"
+        );
+        self.check(t.get(), 1 << TCB_BITS, "TCB");
+        t.get() + offset
+    }
+
+    /// Boot step 8: copies root-image `bytes` to `paddr`, inside one image
+    /// frame of the boot region, which step 6 zeroed.
+    pub fn copy_into_frame(&mut self, paddr: u64, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let len = bytes.len() as u64;
+        assert!(
+            paddr % 4096 + len <= 4096 && object_memory(self.memory, paddr, len),
+            "a copy of {len} bytes to {paddr:#x} is not inside one frame of object memory"
+        );
+        // SAFETY: the destination is inside one 4 KiB frame of RAM kernel
+        // objects may occupy (checked above), below the direct map's end and
+        // mapped RW there; boot step 8 passes an image frame of the boot
+        // region, which holds no slot or kernel data and which nothing else
+        // refers to. The source is `.rootimage`, inside the kernel image,
+        // which the boot region never overlaps, so the two do not overlap.
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), phys_to_virt(paddr) as *mut u8, bytes.len())
+        };
+    }
+
+    /// The word at `paddr`, which `tcb::buffer_word` found in an IPC
+    /// buffer: inside a non-device frame a TCB's buffer slot holds.
+    pub fn buffer_word(&self, paddr: u64) -> u64 {
+        assert!(paddr.is_multiple_of(8), "unaligned IPC buffer word");
+        self.check(paddr, 8, "IPC buffer word");
+        // SAFETY: a word of a RAM frame a capability names, which lies in a
+        // RAM untyped or the boot region below the direct map's end, so it
+        // is mapped RW at `PHYS_MAP_BASE + paddr`; read by value, and any
+        // bits are a `u64`. The frame's user may write it at any time from
+        // ring 3, but not while the kernel runs: one core.
+        unsafe { ptr::read(phys_to_virt(paddr) as *const u64) }
     }
 }
 
@@ -152,14 +252,74 @@ impl SlotMemory for Objects {
     }
 }
 
-/// Whether a Frame or paging-structure capability is mapped: its mapping
-/// record, the data word, is non-zero only from M5's Map on.
-fn mapped(cap: &Cap) -> bool {
-    match cap.cap_type() {
-        CapType::Frame | CapType::PageTable | CapType::PageDirectory | CapType::Pdpt => {
-            cap.data != 0
+/// TCB fields through the direct map.
+impl Tcbs for Objects {
+    fn tcb_word(&self, t: TcbRef, offset: u64) -> u64 {
+        let at = self.tcb_field(t, offset);
+        // SAFETY: a `TcbRef` names a live TCB (it comes only from a TCB
+        // capability or a link the kernel keeps), 2 KiB aligned in RAM
+        // below the direct map's end, so mapped RW and write-back; the word
+        // lies between its slots and its XSAVE area, which only this type
+        // reaches, by value. Any bits are a `u64`.
+        unsafe { ptr::read(phys_to_virt(at) as *const u64) }
+    }
+
+    fn set_tcb_word(&mut self, t: TcbRef, offset: u64, value: u64) {
+        let at = self.tcb_field(t, offset);
+        // SAFETY: as in `tcb_word`; the write changes one field of the TCB
+        // and no slot, kernel code or static data.
+        unsafe { ptr::write(phys_to_virt(at) as *mut u64, value) };
+    }
+}
+
+impl Scheduling for Objects {
+    fn scheduler(&self) -> &Scheduler {
+        // SAFETY: see `SchedulerCell`: the reference is tied to this
+        // borrow of `self`, and no `&mut` from `scheduler_mut` can be live
+        // while it is, since that needs `&mut self`. The kernel uses one
+        // `Objects` at a time for scheduler calls, so no other `Objects`
+        // holds one either.
+        unsafe { &*SCHEDULER.0.get() }
+    }
+
+    fn scheduler_mut(&mut self) -> &mut Scheduler {
+        // SAFETY: as in `scheduler`; `&mut self` makes this the only
+        // reference through this `Objects`.
+        unsafe { &mut *SCHEDULER.0.get() }
+    }
+}
+
+impl Threads for Objects {
+    /// No thread blocks before IPC (M5 part 3), so this does what IPC's
+    /// `cancel_ipc` does to the thread itself: a blocked thread becomes
+    /// `Inactive`, and its pending fault is cleared.
+    fn cancel_ipc(&mut self, t: TcbRef) {
+        if self.state(t).is_blocked() {
+            self.set_state(t, ThreadState::Inactive);
         }
-        _ => false,
+        self.set_fault(t, None);
+    }
+
+    fn invoked_by_call(&self) -> bool {
+        INVOKED_BY_CALL.load(Ordering::Relaxed)
+    }
+
+    /// No SynIC page is recorded before M9.
+    fn synic_pages(&self) -> [u64; 2] {
+        [0; 2]
+    }
+
+    fn set_current_fs_base(&mut self, value: u64) {
+        entry::set_fs_base(value);
+    }
+
+    fn write_buffer_word(&mut self, paddr: u64, value: u64) {
+        assert!(paddr.is_multiple_of(8), "unaligned IPC buffer word");
+        self.check(paddr, 8, "IPC buffer word");
+        // SAFETY: as in `buffer_word`; the word is in a RAM frame the
+        // thread's buffer slot holds with Read and Write, which holds no
+        // slot or kernel data.
+        unsafe { ptr::write(phys_to_virt(paddr) as *mut u64, value) };
     }
 }
 
@@ -175,10 +335,20 @@ impl Kernel for Objects {
             | CapType::IrqControl
             | CapType::IoPortControl
             | CapType::Hypervisor => {}
-            // M5: suspend and unbind the thread (off every queue, IPC
-            // cancelled; M6 unbinds its notification). A TCB's finalisation
-            // has no cleanup.
-            CapType::Tcb => {}
+            // The last capability suspends the thread (off its ready queue,
+            // IPC cancelled; M6 unbinds its notification), drops its FP and
+            // FS and GS base ownership without saving, and takes it off the
+            // debug list. No cleanup.
+            CapType::Tcb => {
+                if last {
+                    let t = TcbRef::from_cap(&cap).expect("a TCB capability names a TCB");
+                    tcb::suspend(self, t);
+                    fpu::forget(t);
+                    thread::forget(t);
+                    #[cfg(feature = "debug")]
+                    debug_tcbs::remove(self, t);
+                }
+            }
             // M5: on the last capability, every queued thread is released
             // and restarts its system call.
             CapType::Endpoint => {}
@@ -188,13 +358,14 @@ impl Kernel for Objects {
             // M5: a reply capability's caller is released; a master goes
             // only with its TCB.
             CapType::Reply => {}
-            // M5: a Frame unmaps on every deletion, a paging structure on
-            // its only one. Nothing is mapped before M5.
-            CapType::Frame | CapType::PageTable | CapType::PageDirectory | CapType::Pdpt => {
-                debug_assert!(!mapped(&cap), "a mapped {cap:?} before M5");
-            }
-            // M5: on the last capability, the VSpace is torn down.
-            CapType::Pml4 => {}
+            // A Frame unmaps on every deletion, a paging structure on its
+            // only one, and a PML4's last capability empties its user half
+            // (loading the kernel PML4 first if it is in CR3).
+            CapType::Frame
+            | CapType::PageTable
+            | CapType::PageDirectory
+            | CapType::Pdpt
+            | CapType::Pml4 => paging::finalise(self, cap, last),
             // M7: an IRQHandler is masked and unbound, and returns itself as
             // the cleanup, so that `after_delete` frees the IRQ once its slot
             // is empty; an IOPort's range is freed the same way. Neither
@@ -215,10 +386,18 @@ impl Kernel for Objects {
     }
 
     fn moved(&mut self, cap: Cap, from: SlotAddr, to: SlotAddr) {
-        // M5: rewrites the back-reference of a mapped Frame or paging
-        // structure from `from` to `to`. Nothing is mapped before M5.
-        debug_assert!(!mapped(&cap), "a mapped {cap:?} moved before M5");
-        let _ = (from, to);
+        // A mapped Frame or paging structure's back-reference follows its
+        // capability from `from` to `to`.
+        if matches!(
+            cap.cap_type(),
+            CapType::Frame
+                | CapType::PageTable
+                | CapType::PageDirectory
+                | CapType::Pdpt
+                | CapType::Pml4
+        ) {
+            paging::moved(self, cap, from, to);
+        }
     }
 
     fn zero(&mut self, paddr: u64, len: u64) {
@@ -235,9 +414,17 @@ impl Kernel for Objects {
 
     fn init_object(&mut self, cap: Cap) {
         match cap.cap_type() {
-            // M5: a TCB's non-zero fields (state, priorities, the FP
-            // template) and a PML4's kernel half, PML4 entries 256 to 511.
-            CapType::Tcb | CapType::Pml4 => {}
+            // A TCB's non-zero fields (a full slice, RFLAGS 0x202), the
+            // initial FP state, and its place in the debug list.
+            CapType::Tcb => {
+                let t = TcbRef::from_cap(&cap).expect("a TCB capability names a TCB");
+                tcb::init(self, t);
+                fpu::init_area(t);
+                #[cfg(feature = "debug")]
+                debug_tcbs::append(self, t);
+            }
+            // A PML4's kernel half, its entries 256 to 511.
+            CapType::Pml4 => paging::init_object(self, cap),
             // A new Untyped, Endpoint, Notification, CNode, Frame or lower
             // paging structure is all zeros, which is its initial state.
             _ => {}
@@ -415,15 +602,75 @@ mod polls {
     }
 }
 
+/// The list of every TCB `DebugDumpScheduler` walks (`docs/design.md`,
+/// "Debug"; seL4 `ksDebugTCBs`): a TCB joins at retype and leaves when its
+/// last capability goes. Its two links are the TCB's debug-only words at
+/// `DEBUG_OFFSET`: the previous and next TCB's address, 0 for none.
+#[cfg(feature = "debug")]
+mod debug_tcbs {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use l4core::tcb::{DEBUG_OFFSET, TcbRef, Tcbs};
+
+    use super::Objects;
+
+    const PREV: u64 = DEBUG_OFFSET;
+    const NEXT: u64 = DEBUG_OFFSET + 8;
+
+    /// The first TCB's address, or 0.
+    static HEAD: AtomicU64 = AtomicU64::new(0);
+
+    /// Puts the new TCB `t`, whose links retype zeroed, first.
+    pub fn append(k: &mut Objects, t: TcbRef) {
+        let head = HEAD.load(Ordering::Relaxed);
+        debug_assert!(head != t.get(), "TCB {:#x} listed twice", t.get());
+        k.set_tcb_word(t, PREV, 0);
+        k.set_tcb_word(t, NEXT, head);
+        if let Some(h) = TcbRef::new(head) {
+            k.set_tcb_word(h, PREV, t.get());
+        }
+        HEAD.store(t.get(), Ordering::Relaxed);
+    }
+
+    /// Takes `t` off the list.
+    pub fn remove(k: &mut Objects, t: TcbRef) {
+        let (prev, next) = (k.tcb_word(t, PREV), k.tcb_word(t, NEXT));
+        match TcbRef::new(prev) {
+            Some(p) => k.set_tcb_word(p, NEXT, next),
+            None => {
+                debug_assert_eq!(HEAD.load(Ordering::Relaxed), t.get(), "an unlisted TCB");
+                HEAD.store(next, Ordering::Relaxed);
+            }
+        }
+        if let Some(n) = TcbRef::new(next) {
+            k.set_tcb_word(n, PREV, prev);
+        }
+        k.set_tcb_word(t, PREV, 0);
+        k.set_tcb_word(t, NEXT, 0);
+    }
+
+    /// Calls `f` with every TCB, newest first.
+    pub fn for_each_tcb(k: &Objects, mut f: impl FnMut(TcbRef)) {
+        let mut at = TcbRef::new(HEAD.load(Ordering::Relaxed));
+        while let Some(t) = at {
+            f(t);
+            at = TcbRef::new(k.tcb_word(t, NEXT));
+        }
+    }
+}
+
 /// Self-test helpers over memory kernel objects may occupy.
 #[cfg(feature = "selftest")]
 impl Objects {
     /// Fills `len` bytes at `paddr` with `byte`. The self-tests call it only
-    /// on objects that hold no slots and whose memory the kernel does not
-    /// read before M5 (endpoints, notifications, frames, paging structures,
-    /// a TCB past its slots).
+    /// on object memory that holds no slots and that nothing reads before
+    /// the object is reset: frames, a TCB's registers and XSAVE area, a
+    /// PML4's kernel-half back-references.
     pub fn fill(&mut self, paddr: u64, len: u64, byte: u8) {
-        assert!(self.memory.contains(paddr, len), "fill outside object RAM");
+        assert!(
+            object_memory(self.memory, paddr, len),
+            "fill outside object RAM"
+        );
         // SAFETY: the range is RAM below the direct map's end, outside the
         // kernel image (checked above), mapped RW. No Rust reference to it
         // exists: only this type reaches object memory, by value. That it
@@ -434,21 +681,25 @@ impl Objects {
 
     /// Whether `len` bytes at `paddr` are RAM kernel objects may occupy.
     pub fn is_object_memory(&self, paddr: u64, len: u64) -> bool {
-        self.memory.contains(paddr, len)
+        object_memory(self.memory, paddr, len)
     }
 
-    /// The first non-zero byte in `len` bytes at `paddr`, if any.
-    pub fn first_non_zero(&self, paddr: u64, len: u64) -> Option<u64> {
+    /// The address of the first word in `len` bytes at `paddr` that is not
+    /// `expected(address)`, if any.
+    pub fn first_unlike(&self, paddr: u64, len: u64, expected: impl Fn(u64) -> u64) -> Option<u64> {
         assert!(
             paddr.is_multiple_of(8) && len.is_multiple_of(8),
             "unaligned"
         );
-        assert!(self.memory.contains(paddr, len), "read outside object RAM");
-        (paddr..paddr + len).step_by(8).find_map(|a| {
+        assert!(
+            object_memory(self.memory, paddr, len),
+            "read outside object RAM"
+        );
+        (paddr..paddr + len).step_by(8).find(|&a| {
             // SAFETY: as in `load`: the range is RAM below the direct map's
             // end, read by value; any bits are a valid `u64`.
             let w = unsafe { ptr::read(phys_to_virt(a) as *const u64) };
-            (w != 0).then(|| a + u64::from(w.trailing_zeros() / 8))
+            w != expected(a)
         })
     }
 }

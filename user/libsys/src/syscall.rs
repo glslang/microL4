@@ -18,19 +18,22 @@ use l4core::ipc::{MrLocation, MsgReg, mr_location};
 pub type CPtr = u64;
 
 /// System-call numbers, `rdx` (`docs/abi.md`, "System calls").
+/// The kernel decodes them with `l4core::abi::Syscall::from_number`.
 pub mod number {
-    pub const CALL: u64 = 1;
-    pub const REPLY_RECV: u64 = 2;
-    pub const SEND: u64 = 3;
-    pub const NB_SEND: u64 = 4;
-    pub const RECV: u64 = 5;
-    pub const REPLY: u64 = 6;
-    pub const YIELD: u64 = 7;
-    pub const NB_RECV: u64 = 8;
+    use l4core::abi::Syscall;
+
+    pub const CALL: u64 = Syscall::Call.number();
+    pub const REPLY_RECV: u64 = Syscall::ReplyRecv.number();
+    pub const SEND: u64 = Syscall::Send.number();
+    pub const NB_SEND: u64 = Syscall::NBSend.number();
+    pub const RECV: u64 = Syscall::Recv.number();
+    pub const REPLY: u64 = Syscall::Reply.number();
+    pub const YIELD: u64 = Syscall::Yield.number();
+    pub const NB_RECV: u64 = Syscall::NBRecv.number();
     /// Debug kernels only (`docs/abi.md`, "Debug system calls").
-    pub const DEBUG_PUT_CHAR: u64 = 16;
-    pub const DEBUG_HALT: u64 = 17;
-    pub const DEBUG_DUMP_SCHEDULER: u64 = 18;
+    pub const DEBUG_PUT_CHAR: u64 = Syscall::DebugPutChar.number();
+    pub const DEBUG_HALT: u64 = Syscall::DebugHalt.number();
+    pub const DEBUG_DUMP_SCHEDULER: u64 = Syscall::DebugDumpScheduler.number();
 }
 
 // The `asm!` below names the registers of `l4core::ipc`'s mapping.

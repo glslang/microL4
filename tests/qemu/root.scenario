@@ -1,0 +1,42 @@
+# The root task boots (M5): boot steps 6 to 9 build its CNode, VSpace,
+# image frames and TCB from the root ELF in .rootimage, which is then
+# unmapped and reclaimed; step 10 hands the TCB to the scheduler, which
+# enters it by iretq. `test=root` is no kernel self-test, so the root task
+# runs it. The stub prints its lines through DebugPutChar, one sysretq per
+# byte, and ends the run with DebugHalt(0).
+cmdline: test=root
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=root"
+expect: boot: root task: image 0x400000-
+expect: , entry 0x400000; TCB at
+expect: boot: .rootimage
+expect: unmapped from the kernel window and reclaimed as RAM untyped
+expect: test=root: not a kernel self-test; the root task runs it
+expect: boot: entering the root task at 0x400000 in ring 3
+expect: root: microL4 root task, BootInfo at
+expect: root: image 0x400000-
+expect: root: cmdline "test=root"
+expect: root: paging structures: slots 17-19, 3
+expect: root: image frames: slots 20-
+expect: root: extra BootInfo frames: slots 16-16, 1
+expect: root: untyped: slots
+expect: root: empty: slots
+expect: untyped,
+expect: KiB of RAM; TSC
+# DebugDumpScheduler: the root TCB, current, at priority 255.
+expect: : Running, priority 255, at 0x4
+expect:  *
+expect: root: back from Yield, the only thread at its priority
+# Untyped_Retype with MR4, MR5 and the destination CNode's CPtr in the IPC
+# buffer. Its first retype clears the whole untyped, which the timer
+# preempts again and again: each time the thread restarts its syscall.
+expect: root: Untyped_Retype of the
+expect: MiB untyped in slot
+expect: into a 4 KiB frame in slot
+expect: : done
+expect: root: a Call on empty slot
+expect: : InvalidCapability, MR0 0
+expect: TEST PASS
+expect: dispatch: invocations preempted and restarted:
+expect: DEBUG HALT 0 from TCB

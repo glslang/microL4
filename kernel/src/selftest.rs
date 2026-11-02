@@ -21,14 +21,19 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use l4core::boot::check::{check_bootinfo, check_plan, check_root_cnode, check_untyped};
 use l4core::boot::{LOW_MEMORY_END, MSI_WINDOW};
-use l4core::bootinfo::{CAP_BOOTINFO_FRAME, CAP_INIT_CNODE, ROOT_CNODE_SLOTS, UntypedDesc};
-use l4core::cap::{Cap, CapType, ObjectType, Rights, TCB_SLOTS};
+use l4core::bootinfo::{
+    BootInfo, CAP_BOOTINFO_FRAME, CAP_INIT_CNODE, CAP_INIT_IPC_BUFFER, CAP_INIT_VSPACE,
+    ROOT_CNODE_SLOTS, UntypedDesc,
+};
+use l4core::cap::{self, Cap, CapType, ObjectType, Rights, SLOT_SIZE, TCB_SLOTS};
 use l4core::cdt;
 use l4core::cspace;
 use l4core::error::SyscallError;
 use l4core::invoke::{self, ExtraCap, InvokeError, Message, label};
+use l4core::regs::{RFLAGS_INITIAL, Regs};
 use l4core::slot::{Node, Slot, SlotAddr, SlotMemory};
-use l4core::vspace::CacheType;
+use l4core::tcb;
+use l4core::vspace::{BACKREFS, CacheType};
 
 use crate::arch::{self, BootFacts, Objects, StaticCell};
 use crate::boot::{BootState, RootSpace};
@@ -74,9 +79,10 @@ fn overlaps(a: &Range<u64>, b: &Range<u64>) -> bool {
 /// `[0, 1 MiB)`. Every RAM untyped must also be memory `arch` lets kernel
 /// objects occupy. Last, it walks the live direct map over every untyped:
 /// RAM untyped must be mapped write-back, and no device untyped may lie in
-/// a write-back page.
-pub fn bootinfo(boot: &BootState, facts: &BootFacts, root: &RootSpace) -> ! {
-    let (plan, bi) = (&root.plan, root.bootinfo);
+/// a write-back page. `.rootimage`, which boot step 8 reclaimed, is the one
+/// part of the kernel image untyped cover.
+pub fn bootinfo(boot: &BootState, facts: &BootFacts, root: &RootSpace, bi: &BootInfo) -> ! {
+    let plan = &root.plan;
     let k = Objects::begin();
     let checks = [
         ("check_plan", check_plan(plan)),
@@ -102,7 +108,11 @@ pub fn bootinfo(boot: &BootState, facts: &BootFacts, root: &RootSpace) -> ! {
         avoid[n] = Some((name, r));
         n += 1;
     };
-    add("the kernel image", image.clone());
+    // The kernel image but `.rootimage`.
+    let ri = root.rootimage.start..root.rootimage.end;
+    kprintln!("bootinfo: .rootimage {} was reclaimed from it", Hex(&ri));
+    add("the kernel image", image.start..ri.start);
+    add("the kernel image", ri.end..image.end);
     let (mut parts, mut window_pages) = (0, 0);
     for (name, r) in arch::kernel_memory(boot).into_iter().flatten() {
         if name == "a device-window page" {
@@ -518,27 +528,47 @@ fn entry(k: &Objects, at: SlotAddr) -> Option<Entry> {
     Some([at.get(), w0, w1, w2, w3, parent])
 }
 
-/// The memory of each object without slots that a recorded capability
-/// names inside `u`, U's memory: endpoints, notifications, frames, paging
-/// structures, and a TCB past its slots. Boot's frames, BootInfo's and
-/// the IPC buffer's, lie outside it.
-fn object_memory(e: &Entry, u: &Range<u64>) -> Option<Range<u64>> {
+/// The memory a recorded capability's object holds inside `u`, U's
+/// memory, that holds no slot and that nothing reads until a reset clears
+/// it: a frame; a TCB's registers and XSAVE area; a PML4's
+/// back-references for its kernel half, which no walk reads. (Endpoints,
+/// notifications, lower paging structures and the rest of a TCB or PML4
+/// are read when their capabilities are deleted.) Boot's frames,
+/// BootInfo's and the IPC buffer's, lie outside `u`.
+fn object_memory(e: &Entry, u: &Range<u64>) -> [Option<Range<u64>>; 2] {
     let cap = Slot::from_words([e[1], e[2], e[3], e[4]]).cap;
     let (base, size) = (cap.object(), 1u64 << cap.size_bits());
     if base < u.start || base + size > u.end {
-        return None;
+        return [None, None];
     }
     match cap.cap_type() {
-        CapType::Endpoint
-        | CapType::Notification
-        | CapType::Frame
-        | CapType::PageTable
-        | CapType::PageDirectory
-        | CapType::Pdpt
-        | CapType::Pml4 => Some(base..base + size),
-        CapType::Tcb => Some(base + 256..base + size),
-        _ => None,
+        CapType::Frame => [Some(base..base + size), None],
+        CapType::Tcb => [
+            Some(base + tcb::REGS_OFFSET..base + tcb::SCALARS_OFFSET),
+            Some(base + tcb::XSAVE_OFFSET..base + size),
+        ],
+        CapType::Pml4 => [Some(base + BACKREFS + 256 * 8..base + size), None],
+        _ => [None, None],
     }
+}
+
+/// What word `at` of a recorded object reads once it is made again: what
+/// `init_object` writes (a TCB's RFLAGS and initial FP state), else 0.
+fn fresh_word(e: &Entry, at: u64) -> u64 {
+    let cap = Slot::from_words([e[1], e[2], e[3], e[4]]).cap;
+    if cap.cap_type() != CapType::Tcb {
+        return 0;
+    }
+    let off = at - cap.object();
+    if off == tcb::REGS_OFFSET + core::mem::offset_of!(Regs, rflags) as u64 {
+        return RFLAGS_INITIAL;
+    }
+    let template = l4core::fpu::initial_state();
+    let x = off.wrapping_sub(tcb::XSAVE_OFFSET) as usize;
+    if x < template.len() {
+        return u64::from_le_bytes(template[x..x + 8].try_into().expect("8 bytes"));
+    }
+    0
 }
 
 /// Where the test is: each run's calls, then a revoke of `U`.
@@ -617,8 +647,7 @@ static SEEN_INJECTED: AtomicU64 = AtomicU64::new(0);
 /// idle path whenever it is preempted: by the timer during the first
 /// run's reset of `U`, and by injected preemptions in both runs and both
 /// revokes.
-pub fn retype(root: &'static RootSpace) -> ! {
-    let bi = root.bootinfo;
+pub fn retype(root: &'static RootSpace, bi: &BootInfo) -> ! {
     let Some((i, d)) = bi
         .untyped()
         .iter()
@@ -839,7 +868,7 @@ fn end_run(ctx: &Ctx, phase: Phase) {
         RECORD_LEN.store(n, Ordering::Relaxed);
         for e in &RECORD[..n] {
             let e = e.each_ref().map(|w| w.load(Ordering::Relaxed));
-            if let Some(r) = object_memory(&e, &ctx.u_mem) {
+            for r in object_memory(&e, &ctx.u_mem).into_iter().flatten() {
                 k.fill(r.start, r.end - r.start, PATTERN);
                 filled += r.end - r.start;
             }
@@ -866,10 +895,10 @@ fn end_run(ctx: &Ctx, phase: Phase) {
                     at.get()
                 ))
             }
-            if let Some(r) = object_memory(&e, &ctx.u_mem) {
-                if let Some(a) = k.first_non_zero(r.start, r.end - r.start) {
+            for r in object_memory(&e, &ctx.u_mem).into_iter().flatten() {
+                if let Some(a) = k.first_unlike(r.start, r.end - r.start, |at| fresh_word(&e, at)) {
                     fail(format_args!(
-                        "retype: byte {a:#x} of an object at {} is not zero",
+                        "retype: word {a:#x} of an object at {} is not as retype makes it",
                         Hex(&r)
                     ))
                 }
@@ -881,7 +910,7 @@ fn end_run(ctx: &Ctx, phase: Phase) {
             fail(format_args!("retype: run 2 has {n} slots, run 1 had {len}"))
         }
         kprintln!(
-            "retype: run 2 done: the same {n} slots as run 1, U's watermark {:#x}; its objects' {} KiB read zero",
+            "retype: run 2 done: the same {n} slots as run 1, U's watermark {:#x}; its objects' {} KiB read zero, or as retype makes them",
             watermark(ctx, &k),
             zeroed >> 10
         );
@@ -916,7 +945,16 @@ fn after_revoke(ctx: &Ctx, k: &Objects, phase: Phase) {
         let now = k.load(at);
         if boot_slots.contains(&at) {
             let recorded = Slot::from_words([e[1], e[2], e[3], e[4]]).cap;
-            if now.cap != recorded || now.node != Node::new(true, 0, 0) {
+            // A root without links, but for the root TCB's copies of the
+            // root CNode, its PML4 and the IPC buffer.
+            let tcb_copy = match (at.get() - layout.slot(0).get()) / SLOT_SIZE {
+                CAP_INIT_CNODE => Some(cap::TCB_SLOT_CSPACE),
+                CAP_INIT_VSPACE => Some(cap::TCB_SLOT_VSPACE),
+                CAP_INIT_IPC_BUFFER => Some(cap::TCB_SLOT_IPC_BUFFER),
+                _ => None,
+            };
+            let node = Node::new(true, 0, 0).with_next(tcb_copy.map(|n| ctx.root.tcb.slot(n)));
+            if now.cap != recorded || now.node != node {
                 fail(format_args!(
                     "retype: {}: boot slot {:#x} holds {:x?}, not run 1's capability as a root without links",
                     phase.name(),
@@ -945,7 +983,16 @@ fn after_revoke(ctx: &Ctx, k: &Objects, phase: Phase) {
         }
     }
     for slot in COPIED_BOOT_SLOTS {
-        if cdt::has_children(k, layout.slot(slot)) {
+        // No children, but for the root TCB's copy of the root CNode.
+        let at = layout.slot(slot);
+        let left = match slot {
+            CAP_INIT_CNODE => {
+                let copy = ctx.root.tcb.slot(cap::TCB_SLOT_CSPACE);
+                cdt::first_child(k, at) != Some(copy) || k.load(copy).node.next().is_some()
+            }
+            _ => cdt::has_children(k, at),
+        };
+        if left {
             fail(format_args!(
                 "retype: {}: root slot {slot}, copied into C, still has children",
                 phase.name()
@@ -953,7 +1000,7 @@ fn after_revoke(ctx: &Ctx, k: &Objects, phase: Phase) {
         }
     }
     kprintln!(
-        "retype: {} done: the {emptied} slots the test filled are empty, C's copies of root slots {} and {} included; U and the boot capabilities are as run 1 left them, roots without links",
+        "retype: {} done: the {emptied} slots the test filled are empty, C's copies of root slots {} and {} included; U and the boot capabilities are as run 1 left them, roots without links but the root TCB's copies",
         phase.name(),
         COPIED_BOOT_SLOTS[0],
         COPIED_BOOT_SLOTS[1]

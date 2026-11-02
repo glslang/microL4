@@ -101,20 +101,14 @@ impl RootImageSection {
         unsafe { core::slice::from_raw_parts(v.start as *const u8, (v.end - v.start) as usize) }
     }
 
-    /// The file alone, through the static that holds it.
-    pub fn file(&self) -> &[u8] {
-        &ROOT_IMAGE
-    }
-
-    /// `[__rodata_start, __rodata_end)`, which must hold the section.
-    pub fn rodata(&self) -> Range<u64> {
-        linker_addr!("__rodata_start")..linker_addr!("__rodata_end")
-    }
-
-    /// The section's physical range as the live kernel tables translate
-    /// it, for `test=rootimage`; `None` if a page is unmapped.
-    #[cfg(feature = "selftest")]
-    pub fn translated(&self, boot: &crate::boot::BootState) -> Option<Range<u64>> {
-        super::paging::translate(boot, self.virt())
+    /// Boot step 8's end: unmaps the section from the kernel window and
+    /// toggles CR4.PGE, so its pages can become RAM untyped; consuming the
+    /// section ends every borrow of its bytes first. Returns its physical
+    /// range, which the kernel's object-memory checks now accept.
+    pub fn unmap(self, kernel_phys_base: u64) -> Span {
+        let phys = self.phys(kernel_phys_base);
+        super::paging::unmap_rootimage(self.virt(), phys.start..phys.end);
+        super::objects::reclaim(phys.start..phys.end);
+        phys
     }
 }

@@ -17,11 +17,13 @@ use super::{
     round_down, widen_2m, write_back,
 };
 use crate::bootinfo::{
-    BOOTINFO_FRAMES, BOOTINFO_MAGIC, BOOTINFO_SIZE, BOOTINFO_VERSION, BootInfo, MAX_ECAM,
-    MAX_IOAPICS, MAX_UNTYPED, NUM_INITIAL_SLOTS, ROOT_CNODE_RADIX, ROOT_CNODE_SLOTS, SlotRegion,
-    UntypedDesc,
+    BOOTINFO_FRAMES, BOOTINFO_MAGIC, BOOTINFO_SIZE, BOOTINFO_VERSION, BootInfo, CAP_INIT_CNODE,
+    CAP_INIT_IPC_BUFFER, CAP_INIT_VSPACE, MAX_ECAM, MAX_IOAPICS, MAX_UNTYPED, NUM_INITIAL_SLOTS,
+    ROOT_CNODE_RADIX, ROOT_CNODE_SLOTS, SlotRegion, UntypedDesc,
 };
-use crate::cap::{MAX_UNTYPED_BITS, TCB_BITS};
+use crate::cap::{
+    CapType, MAX_UNTYPED_BITS, TCB_BITS, TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_VSPACE,
+};
 use crate::handoff::{CMDLINE_MAX, RegionKind};
 use crate::slot::SlotMemory;
 use crate::vspace::Span;
@@ -514,6 +516,10 @@ pub fn check_bootinfo(plan: &BootPlan, bi: &BootInfo) -> Result<(), Violation> {
 /// Every root CNode slot holds what [`root_cap`] says for `plan` and `bi`,
 /// as a derivation root: an original at depth 0. Holds right after boot,
 /// before anything has been derived; every slot in `empty` is then null.
+/// Boot step 8 (M5) leaves two marks this allows: the mapping records of
+/// the frames and paging structures it mapped, and the root TCB's copies
+/// of the CNode, VSpace and IPC buffer capabilities, each its original's
+/// only child, so the original's next link names that TCB slot.
 pub fn check_root_cnode<M: SlotMemory + ?Sized>(
     mem: &M,
     plan: &BootPlan,
@@ -521,15 +527,32 @@ pub fn check_root_cnode<M: SlotMemory + ?Sized>(
 ) -> Result<(), Violation> {
     let slots = slot_plan_of(bi);
     let untyped = bi.untyped();
+    let tcb_slot = |n: u64| {
+        let t = crate::tcb::TcbRef::new(plan.layout.tcb?)?;
+        Some(t.slot(n))
+    };
     for slot in 0..ROOT_CNODE_SLOTS {
         let found = mem.load(plan.layout.slot(slot));
         let expected = root_cap(plan, &slots, untyped, slot);
+        let cap = match found.cap.cap_type() {
+            CapType::Frame | CapType::PageTable | CapType::PageDirectory | CapType::Pdpt => {
+                found.cap.with_data(0)
+            }
+            _ => found.cap,
+        };
+        let child = match slot {
+            CAP_INIT_CNODE => tcb_slot(TCB_SLOT_CSPACE),
+            CAP_INIT_VSPACE => tcb_slot(TCB_SLOT_VSPACE),
+            CAP_INIT_IPC_BUFFER => tcb_slot(TCB_SLOT_IPC_BUFFER),
+            _ => None,
+        };
+        let next_ok = found.node.next().is_none() || found.node.next() == child;
         let node_ok = expected.is_null()
             || (found.node.original()
                 && found.node.depth() == 0
                 && found.node.prev().is_none()
-                && found.node.next().is_none());
-        if found.cap != expected || !node_ok {
+                && next_ok);
+        if cap != expected || !node_ok {
             return Err(Violation::RootCNode { slot });
         }
     }
