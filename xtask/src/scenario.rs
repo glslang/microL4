@@ -25,7 +25,8 @@
 //! A `next:` follows an `expect:` or another `next:`: the serial line right
 //! after the one the step above it matched must begin with its text, so
 //! nothing was printed between them; any other line there fails the
-//! scenario. The release scenarios use it to show the kernel printed
+//! scenario, and ends the boot at once rather than at the timeout. The
+//! release scenarios use it to show the kernel printed
 //! nothing between the loader's last line and the root task's first.
 //! `exit: timeout` means the guest must still be running when the
 //! scenario's `timeout:`, which it then needs, ends the boot: the only end a
@@ -498,6 +499,12 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
                         ));
                     }
                     record(format!("xtask: sent \"{}\"", text.escape_ascii()));
+                }
+                // A failed `next:` is the scenario's failure, and no later
+                // line can mend it: end the boot now.
+                if matcher.broken().is_some() {
+                    let _ = child.kill();
+                    break;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
