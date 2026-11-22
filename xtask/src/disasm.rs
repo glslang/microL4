@@ -9,9 +9,16 @@
 //!   the design allows ([`IO_CALLERS`]: the IOPort executor, `pic::init`
 //!   and `arch::exit`, each `#[inline(never)]` so that it keeps its
 //!   symbol);
-//! - an address inside io.rs's functions anywhere but as a direct call's
-//!   or jump's target: loaded, compared or stored by an instruction, or
-//!   stored in the kernel's data, as a function pointer would be;
+//! - a call or jump to the IOPort executor ([`EXECUTOR`]: `Objects`'
+//!   `IoPorts::port_in` and `port_out`, which take any port their
+//!   `PortAccess` names) from a function other than [`EXECUTOR_CALLERS`],
+//!   `l4core::ioport::invoke_port::<Objects>`, the IOPort invocation,
+//!   which checks the port against the invoked capability and is the one
+//!   builder of a `PortAccess`;
+//! - an address inside io.rs's functions or the executor anywhere but as a
+//!   direct call's or jump's target: loaded, compared or stored by an
+//!   instruction, or stored in the kernel's data, as a function pointer
+//!   would be;
 //! - an `in` or `out`, string forms included, outside io.rs's functions;
 //! - an immediate in `0x3F8` to `0x3FF`, COM1's ports, moved into `dx`,
 //!   `edx` or `rdx`;
@@ -21,10 +28,15 @@
 //!   move it into `dx` themselves, so this is how a caller would name COM1;
 //! - any symbol whose name contains `serial`.
 //!
-//! The first two rules hold whatever the port: UART code needs `in` and
+//! The first three rules hold whatever the port: UART code needs `in` and
 //! `out`, which only io.rs has, so it must reach io.rs through one of the
-//! three callers, whose code a reader checks once; the port rules are a
-//! second line. The disassembler is `llvm-objdump` from rustup's
+//! three callers, whose code a reader checks once, and the executor only
+//! from the IOPort invocation, which a capability for the port must have
+//! passed; the port rules are a second line. (The `PortAccess` the
+//! executor takes already stops kernel code outside `l4core` from
+//! compiling a call to it; the executor rule also stops a kernel type of
+//! its own, whose slots could hold a capability for COM1 that nobody
+//! issued, from running `invoke_port` and passing the access on.) The disassembler is `llvm-objdump` from rustup's
 //! `llvm-tools` component, which `tools/setup.sh` adds: the LLVM that
 //! compiled the kernel, so it decodes whatever rustc emits, with no crate
 //! to add. Failing that, an `llvm-objdump` on `PATH` will do. Its
@@ -33,7 +45,8 @@
 //! the data sections come from the ELF's section headers. So that a
 //! listing this scanner misreads cannot pass by finding nothing, the check
 //! also insists on io.rs's functions with an `in` and an `out` in them,
-//! on calls to them from the allowed callers, and on data to scan.
+//! on calls to them and to the executor from the allowed callers, and on
+//! data to scan.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -74,11 +87,24 @@ const MIN_INSTRUCTIONS: usize = 1000;
 /// symbol bounds its code; a function that inlines one of them, or a
 /// clone LLVM makes of one under another name, fails the check.
 pub const IO_CALLERS: &[&str] = &[
-    "<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_in",
-    "<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_out",
+    EXECUTOR[0],
+    EXECUTOR[1],
     "kernel::arch::x86_64::pic::init",
     "kernel::arch::x86_64::exit",
 ];
+/// The IOPort executor, demangled: `Objects`' `IoPorts::port_in` and
+/// `port_out`, which take a `PortAccess` and perform it.
+pub const EXECUTOR: [&str; 2] = [
+    "<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_in",
+    "<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_out",
+];
+/// The functions a release kernel may call the [`EXECUTOR`] from,
+/// demangled: the IOPort invocation, instantiated with the kernel's own
+/// objects, so that the capability it checks is one a slot holds. It is
+/// `#[inline(never)]`; inlined, or instantiated with any other type, it
+/// fails the check.
+pub const EXECUTOR_CALLERS: &[&str] =
+    &["l4core::ioport::invoke_port::<kernel::arch::x86_64::objects::Objects>"];
 /// The section holding the root task's ELF, which the kernel copies and
 /// never follows: its bytes are not kernel data.
 const ROOT_IMAGE: &str = ".rootimage";
@@ -93,6 +119,9 @@ pub struct Scan {
     pub io_outs: usize,
     /// Direct calls and jumps to io.rs's functions from [`IO_CALLERS`].
     pub io_calls: usize,
+    /// Direct calls and jumps to the [`EXECUTOR`] from
+    /// [`EXECUTOR_CALLERS`].
+    pub executor_calls: usize,
     /// Each broken rule, one line each.
     pub findings: Vec<String>,
 }
@@ -137,17 +166,19 @@ pub fn check(kernel: &Path) -> Result<String> {
         || scan.io_ins == 0
         || scan.io_outs == 0
         || scan.io_calls == 0
+        || scan.executor_calls == 0
         || data.bytes == 0
     {
         return Err(format!(
             "the listing of {what} is not one this check can read: {} instructions, \
              {} functions in {IO_MODULE} with {} in and {} out, {} calls to them, \
-             {} bytes of data",
+             {} calls to the IOPort executor from invoke_port, {} bytes of data",
             scan.instructions,
             scan.io_functions,
             scan.io_ins,
             scan.io_outs,
             scan.io_calls,
+            scan.executor_calls,
             data.bytes
         )
         .into());
@@ -155,9 +186,16 @@ pub fn check(kernel: &Path) -> Result<String> {
     Ok(format!(
         "disassembly: {} instructions of the release kernel; in and out only in io.rs's {} \
          functions ({} in, {} out), called {} times, only from the IOPort executor, \
-         pic::init and arch::exit; their addresses in no other instruction and in none of \
-         {} bytes of data; no COM1 port in dx or passed to them, no serial symbol",
-        scan.instructions, scan.io_functions, scan.io_ins, scan.io_outs, scan.io_calls, data.bytes
+         pic::init and arch::exit; the executor called {} times, only from \
+         invoke_port::<Objects>; their addresses in no other instruction and in none of \
+         {} bytes of data; no COM1 port in dx or passed to io.rs, no serial symbol",
+        scan.instructions,
+        scan.io_functions,
+        scan.io_ins,
+        scan.io_outs,
+        scan.io_calls,
+        scan.executor_calls,
+        data.bytes
     ))
 }
 
@@ -186,21 +224,22 @@ fn objdump() -> Result<PathBuf> {
 /// --demangle`) of the same file.
 pub fn scan(symbols: &str, listing: &str) -> Scan {
     let mut s = Scan::default();
-    let mut callers = Vec::new();
     for sym in symbols.lines().filter_map(Symbol::parse) {
         if sym.name.to_ascii_lowercase().contains("serial") {
             s.findings.push(format!("symbol {}", sym.name));
         }
-        if sym.function && sym.size > 0 && IO_CALLERS.contains(&base_name(sym.name)) {
-            callers.push(sym.addr..sym.addr + sym.size);
-        }
     }
     let io = io_functions(symbols);
     s.io_functions = io.len();
-    // The io.rs function `addr` lies in, if any.
+    let callers = named(symbols, IO_CALLERS);
+    let executor = named(symbols, &EXECUTOR);
+    let executor_callers = named(symbols, EXECUTOR_CALLERS);
+    // The io.rs function, or the executor's, that `addr` lies in, if any.
     let io_at = |addr: u64| io.iter().position(|r: &Range<u64>| r.contains(&addr));
     let in_io = |addr: u64| io_at(addr).is_some();
-    let may_call = |addr: u64| callers.iter().any(|r: &Range<u64>| r.contains(&addr));
+    let executor_at = |addr: u64| executor.iter().position(|r: &Range<u64>| r.contains(&addr));
+    let in_executor = |addr: u64| executor_at(addr).is_some();
+    let within = |ranges: &[Range<u64>], addr: u64| ranges.iter().any(|r| r.contains(&addr));
 
     let mut function = "";
     // The immediate the port argument last got on the straight-line code
@@ -247,7 +286,7 @@ pub fn scan(symbols: &str, listing: &str) -> Scan {
             None
         };
         if let Some(t) = target.filter(|&t| in_io(t)) {
-            if may_call(addr) {
+            if within(&callers, addr) {
                 s.io_calls += 1;
             } else if io_at(addr) != io_at(t) {
                 // A jump inside one of io.rs's functions is its own.
@@ -257,10 +296,28 @@ pub fn scan(symbols: &str, listing: &str) -> Scan {
                 ));
             }
         }
-        for v in numbers(text) {
-            if in_io(v) && Some(v) != target {
+        if let Some(t) = target.filter(|&t| in_executor(t)) {
+            if within(&executor_callers, addr) {
+                s.executor_calls += 1;
+            } else if executor_at(addr) != executor_at(t) {
+                // As is a jump inside one of the executor's functions.
+                s.findings.push(format!(
+                    "the IOPort executor called from a function other than invoke_port: {}",
+                    at()
+                ));
+            }
+        }
+        for v in numbers(text).into_iter().filter(|&v| Some(v) != target) {
+            if in_io(v) {
                 s.findings.push(format!(
                     "io.rs's address {v:#x} other than as a call's or jump's target: {}",
+                    at()
+                ));
+            }
+            if in_executor(v) {
+                s.findings.push(format!(
+                    "the IOPort executor's address {v:#x} other than as a call's or jump's \
+                     target: {}",
                     at()
                 ));
             }
@@ -296,10 +353,22 @@ pub fn scan(symbols: &str, listing: &str) -> Scan {
 /// io.rs's functions in `symbols` (`llvm-objdump --syms --demangle`):
 /// their address ranges.
 fn io_functions(symbols: &str) -> Vec<Range<u64>> {
+    functions(symbols, |name| name.starts_with(IO_MODULE))
+}
+
+/// The functions in `symbols` named one of `names`, but for LLVM's suffix
+/// ([`base_name`]): their address ranges.
+fn named(symbols: &str, names: &[&str]) -> Vec<Range<u64>> {
+    functions(symbols, |name| names.contains(&base_name(name)))
+}
+
+/// The functions in `symbols` whose name `pick` accepts: their address
+/// ranges.
+fn functions(symbols: &str, pick: impl Fn(&str) -> bool) -> Vec<Range<u64>> {
     symbols
         .lines()
         .filter_map(Symbol::parse)
-        .filter(|sym| sym.function && sym.size > 0 && sym.name.starts_with(IO_MODULE))
+        .filter(|sym| sym.function && sym.size > 0 && pick(sym.name))
         .map(|sym| sym.addr..sym.addr + sym.size)
         .collect()
 }
@@ -320,16 +389,18 @@ pub struct Data {
     pub findings: Vec<String>,
 }
 
-/// Scans the kernel's data for the addresses of io.rs's functions: every
-/// allocated section the file holds bytes for, but code, which the
-/// listing covers, and [`ROOT_IMAGE`]. A function pointer to one of them,
-/// in a table or a static, would be such an address, at any alignment.
+/// Scans the kernel's data for the addresses of io.rs's functions and the
+/// [`EXECUTOR`]'s: every allocated section the file holds bytes for, but
+/// code, which the listing covers, and [`ROOT_IMAGE`]. A function pointer
+/// to one of them, in a table, a static or a trait object's vtable, would
+/// be such an address, at any alignment.
 /// `None` if `elf` is not a 64-bit little-endian ELF whose section headers
 /// can be read.
 pub fn data(symbols: &str, elf: &[u8]) -> Option<Data> {
     const SHF_ALLOC: u64 = 2;
     const SHF_EXECINSTR: u64 = 4;
     let io = io_functions(symbols);
+    let executor = named(symbols, &EXECUTOR);
     let mut d = Data::default();
     for sec in sections(elf)? {
         if sec.flags & SHF_ALLOC == 0 || sec.flags & SHF_EXECINSTR != 0 || sec.name == ROOT_IMAGE {
@@ -338,13 +409,18 @@ pub fn data(symbols: &str, elf: &[u8]) -> Option<Data> {
         d.bytes += sec.bytes.len();
         for (i, w) in sec.bytes.windows(8).enumerate() {
             let v = u64::from_le_bytes(w.try_into().unwrap());
-            if io.iter().any(|r| r.contains(&v)) {
-                d.findings.push(format!(
-                    "io.rs's address {v:#x} stored in {} at {:#x}",
-                    sec.name,
-                    sec.addr + i as u64
-                ));
-            }
+            let what = if io.iter().any(|r| r.contains(&v)) {
+                "io.rs's"
+            } else if executor.iter().any(|r| r.contains(&v)) {
+                "the IOPort executor's"
+            } else {
+                continue;
+            };
+            d.findings.push(format!(
+                "{what} address {v:#x} stored in {} at {:#x}",
+                sec.name,
+                sec.addr + i as u64
+            ));
         }
     }
     Some(d)
@@ -586,6 +662,7 @@ ffffffff80009095:      \tret
                 io_ins: 1,
                 io_outs: 2,
                 io_calls: 3,
+                executor_calls: 0,
                 findings: vec![],
             }
         );
@@ -1043,6 +1120,9 @@ ffffffff8000cf82:      \tret
     /// clean release kernel `l4core::ioport::invoke_port::<Objects>` is
     /// the only caller of `port_in` and `port_out`. llvm-objdump's listing
     /// (the loop and the panic path trimmed), with that build's addresses.
+    /// The executor now takes a `PortAccess`, which this writer cannot
+    /// build, so its source no longer compiles; the listing stays, for the
+    /// executor rule, which catches it whatever its source.
     const EXECUTOR_SYMBOLS: &str = "\
 ffffffff8000acb0 l     F .text\t0000000000000004 .hidden kernel::arch::x86_64::io::inb
 ffffffff8000ace0 l     F .text\t0000000000000006 .hidden kernel::arch::x86_64::io::outb
@@ -1091,17 +1171,38 @@ ffffffff8001d9ea:      \tmov\tesi, ecx
 ffffffff8001d9ec:      \tjmp\t0xffffffff8000ace0 <kernel::arch::x86_64::io::outb>
 ";
 
-    /// The gap: the call-site rule stops at the IOPort executor, whose
-    /// callers nothing checks, and the port rules look only at io.rs's
-    /// port argument, so the writer above passes.
+    /// The gap, closed: io.rs's rules pass the writer above, since it
+    /// reaches io.rs only through the executor and names COM1 only in
+    /// `esi`, and the executor rule is what fails it, at both of its calls
+    /// and nowhere else.
     #[test]
-    fn a_writer_through_the_ioport_executor_passes_the_check() {
+    fn a_writer_through_the_ioport_executor_fails_only_the_executor_rule() {
         let s = scan(EXECUTOR_SYMBOLS, EXECUTOR_LISTING);
         assert_eq!(
-            (s.io_functions, s.io_ins, s.io_outs, s.io_calls),
-            (2, 1, 1, 2)
+            (
+                s.io_functions,
+                s.io_ins,
+                s.io_outs,
+                s.io_calls,
+                s.executor_calls
+            ),
+            (2, 1, 1, 2, 0)
         );
-        assert_eq!(s.findings, Vec::<String>::new());
+        let at = "in kernel::viaexec::put: call";
+        let port = "<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port";
+        assert_eq!(
+            s.findings,
+            [
+                format!(
+                    "the IOPort executor called from a function other than invoke_port: \
+                     0xffffffff800015af {at} 0xffffffff8001d9d0 <{port}_out>"
+                ),
+                format!(
+                    "the IOPort executor called from a function other than invoke_port: \
+                     0xffffffff800015f2 {at} 0xffffffff8001d9a0 <{port}_in>"
+                ),
+            ]
+        );
     }
 
     /// The guarantee the design states ("A release kernel without UART
@@ -1109,7 +1210,6 @@ ffffffff8001d9ec:      \tjmp\t0xffffffff8000ace0 <kernel::arch::x86_64::io::outb
     /// and `out`, so both of the writer's calls into the IOPort executor
     /// are findings.
     #[test]
-    #[ignore = "M7 fix-round re-review: the IOPort executor's callers are not checked"]
     fn a_writer_through_the_ioport_executor_fails_the_check() {
         let s = scan(EXECUTOR_SYMBOLS, EXECUTOR_LISTING);
         for addr in ["800015af", "800015f2"] {
@@ -1120,5 +1220,120 @@ ffffffff8001d9ec:      \tjmp\t0xffffffff8000ace0 <kernel::arch::x86_64::io::outb
                 s.findings
             );
         }
+    }
+
+    /// The executor's listing without the writer, and a function `name`
+    /// at `0xffffffff80003000`, 0x40 bytes, holding `lines`.
+    fn with_executor_caller(name: &str, lines: &str) -> Scan {
+        let mut symbols: String = EXECUTOR_SYMBOLS
+            .lines()
+            .filter(|l| !l.contains("viaexec"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        symbols += &format!("ffffffff80003000 l     F .text\t0000000000000040 .hidden {name}\n");
+        let rest = &EXECUTOR_LISTING[EXECUTOR_LISTING.find("ffffffff8000acb0 <").unwrap()..];
+        scan(
+            &symbols,
+            &format!("ffffffff80003000 <{name}>:\n{lines}\n\n{rest}"),
+        )
+    }
+
+    /// What `invoke_port` does: call `port_out` and `port_in`, or jump to
+    /// one.
+    const EXECUTOR_CALLS: &str = "\
+ffffffff80003004:      \tcall\t0xffffffff8001d9d0 <<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_out>
+ffffffff80003010:      \tcall\t0xffffffff8001d9a0 <<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_in>
+ffffffff80003016:      \tjmp\t0xffffffff8001d9d0 <<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_out>";
+
+    #[test]
+    fn the_ioport_executor_is_called_only_from_invoke_port_on_objects() {
+        for name in EXECUTOR_CALLERS {
+            let s = with_executor_caller(name, EXECUTOR_CALLS);
+            assert_eq!(
+                (s.io_calls, s.executor_calls, &s.findings[..]),
+                (2, 3, &[][..]),
+                "{name}"
+            );
+            let s = with_executor_caller(&format!("{name} (.llvm.6203)"), EXECUTOR_CALLS);
+            assert_eq!((s.executor_calls, &s.findings[..]), (3, &[][..]), "{name}");
+        }
+        // The IOPort invocation for another type, which could load a
+        // capability no slot holds; the code that calls it; a helper or a
+        // clone of it; another invocation; io.rs's other callers; a
+        // kernel type's own IoPorts passing a PortAccess on.
+        for name in [
+            "l4core::ioport::invoke_port::<kernel::arch::x86_64::paging::tests::Wired>",
+            "l4core::ioport::invoke_port",
+            "l4core::ioport::invoke_port::<kernel::arch::x86_64::objects::Objects>::{closure#0}",
+            "l4core::ioport::invoke_port::<kernel::arch::x86_64::objects::Objects>.specialized.1",
+            "l4core::invoke::invoke::<kernel::arch::x86_64::objects::Objects>",
+            "l4core::ioport::invoke_control::<kernel::arch::x86_64::objects::Objects>",
+            "kernel::arch::x86_64::pic::init",
+            "kernel::arch::x86_64::exit",
+            "<kernel::spy::Spy as l4core::ioport::IoPorts>::port_out",
+        ] {
+            let s = with_executor_caller(name, EXECUTOR_CALLS);
+            assert_eq!((s.io_calls, s.executor_calls), (2, 0), "{name}");
+            assert_eq!(s.findings.len(), 3, "{name}: {:?}", s.findings);
+            for (f, addr) in s.findings.iter().zip(["80003004", "80003010", "80003016"]) {
+                assert!(
+                    f.starts_with(
+                        "the IOPort executor called from a function other than invoke_port: "
+                    ) && f.contains(&format!("0xffffffff{addr} in {name}: ")),
+                    "{f}"
+                );
+            }
+        }
+        // A jump inside one of the executor's functions is its own; a jump
+        // from one into the other is a call from neither.
+        let inside = EXECUTOR_LISTING.replace(
+            "ffffffff8001d9c3:      \tret",
+            "ffffffff8001d9c3:      \tjne\t0xffffffff8001d9a0 <x>",
+        );
+        assert_eq!(
+            scan(EXECUTOR_SYMBOLS, &inside).findings.len(),
+            2,
+            "the writer's two calls only"
+        );
+        let across = EXECUTOR_LISTING.replace(
+            "ffffffff8001d9c3:      \tret",
+            "ffffffff8001d9c3:      \tjmp\t0xffffffff8001d9d0 <x>",
+        );
+        let s = scan(EXECUTOR_SYMBOLS, &across);
+        assert_eq!(s.findings.len(), 3, "{:?}", s.findings);
+        assert!(s.findings[2].contains("0xffffffff8001d9c3 in <kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_in: jmp"));
+    }
+
+    #[test]
+    fn the_ioport_executor_s_address_appears_only_as_a_branch_target() {
+        for line in [
+            "lea\trax, [rip + 0x1a9c0]      # 0xffffffff8001d9d0 <x>",
+            "mov\trax, -0x7ffe2630",
+            "movabs\trax, 0xffffffff8001d9a8",
+            "call\tqword ptr [rip + 0x1a9c0]      # 0xffffffff8001d9a0 <x>",
+        ] {
+            let s = with_executor_caller(
+                EXECUTOR_CALLERS[0],
+                &format!("ffffffff80003020:      \t{line}"),
+            );
+            assert_eq!(s.findings.len(), 1, "{line}: {:?}", s.findings);
+            assert!(
+                s.findings[0].starts_with("the IOPort executor's address 0xffffffff8001d9")
+                    && s.findings[0].contains("other than as a call's or jump's target"),
+                "{line}: {:?}",
+                s.findings
+            );
+        }
+        // In data, as a vtable's entry would be.
+        let port_out = 0xffffffff8001d9d0u64.to_le_bytes();
+        let file = elf(&[(".rodata", 1, 2, 0xffffffff80033000, &port_out)]);
+        assert_eq!(
+            data(EXECUTOR_SYMBOLS, &file).map(|d| d.findings),
+            Some(vec![
+                "the IOPort executor's address 0xffffffff8001d9d0 stored in .rodata at \
+                 0xffffffff80033000"
+                    .to_string()
+            ])
+        );
     }
 }

@@ -5,11 +5,14 @@
 //! kernel image sits inside one of these symbols and no caller loads a port
 //! into `dx`. A release kernel calls them from three places only, each
 //! `#[inline(never)]` so that it keeps its symbol: the IOPort executor
-//! (`Objects`' `port_in` and `port_out`), `pic::init` at boot and
+//! (`Objects`' `port_in` and `port_out`, which take a `PortAccess` only
+//! `l4core::ioport::invoke_port` builds), `pic::init` at boot and
 //! `arch::exit`. `cargo xtask test` disassembles the kernel built without
 //! `debug` and fails on a call or jump to these functions from any other
-//! function, their addresses anywhere but as a direct call's or jump's
-//! target (loaded, compared or stored, in code or in data), any `in` or
+//! function, a call or jump to the executor from any function but
+//! `invoke_port::<Objects>`, their addresses or the executor's anywhere but
+//! as a direct call's or jump's target (loaded, compared or stored, in code
+//! or in data), any `in` or
 //! `out` outside them, any immediate `0x3F8` to `0x3FF` moved into `dx`,
 //! `edx` or `rdx`, any call to them with such an immediate as the port,
 //! and any `serial` symbol (`docs/design.md`, "A release kernel without
