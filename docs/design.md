@@ -40,6 +40,7 @@ source (`manual/parts/*.tex`) and kernel files in
 | [ACPI and the timer](#acpi-and-the-timer) | Scheduling, Interrupts | M3 |
 | [Hyper-V interface](#hyper-v-interface) | Hyper-V interface | M3, M9 |
 | [Debug](#debug) | Debug | M3 to M5, M7 |
+| [User-level drivers and console](#user-level-drivers-and-console) | (user-space servers: `uart`, `console`) | M7 |
 | [Open questions](#open-questions) | | |
 
 ## Kernel execution model
@@ -4422,6 +4423,532 @@ holds.
 | Dump prints thread names (`debug_printTCB`, `include/api/debug.h`) | address, no name | no `DebugNameThread` in v0; 19 to 31 reserved |
 | `DebugCapIdentify`, `DebugSnapshot`, `DebugNameThread`, benchmark calls | none | not needed for the plan; numbers reserved |
 
+## User-level drivers and console
+
+From M7 COM1 belongs to user space. `uart` drives the 16550 through an
+IOPort capability and the IRQHandler of ISA IRQ 4; `console` multiplexes
+clients onto it, keeps each client's lines whole and edits input lines;
+`root` builds both and gives each only the capabilities listed below. In a
+kernel built without `debug` they are the only path to COM1 ([A release
+kernel without UART code](#a-release-kernel-without-uart-code)). Both are
+threads of the root image, each in a CSpace and a VSpace of its own. Their
+logic is plain code in host-tested crates; the QEMU scenarios check only
+what needs the machine: the device, the interrupt path, separate address
+spaces and the harness's input. This section is about user space: the
+kernel side is in [Interrupts](#interrupts), [I/O ports](#io-ports) and
+[Debug](#debug), and the protocols below are not part of `docs/abi.md`.
+
+### Where the servers run
+
+`uart` and `console` are threads of the root image, as every server is
+([Root-task image and address space](#root-task-image-and-address-space)):
+one ELF to build, embed and check, and no ELF loader in `root`. They do not
+share root's VSpace, as the M5 and M6 test threads do: `root` builds a VSpace
+for each from its own image frames, so a server writes only its own memory,
+and a fault stops only that server and reaches root. Clients in
+`test=console` are test code and run in root's VSpace, each with a CSpace of
+its own.
+
+| Range in a server's VSpace | Frames | Mapping |
+| --- | --- | --- |
+| text | copies of root's image frame capabilities, with Read only | RX |
+| read-only data (`.rodata`, `.eh_frame`) | the same | R, NX |
+| `.data` and `.bss` | fresh frames, each a copy of root's page as it stands at spawn | RW, NX |
+| `.thread_stack.0` to `.5` | none | unmapped |
+| `.libsys_stack`, 64 KiB | fresh zeroed frames, the server's stack; the guard page below stays unmapped | RW, NX |
+| `user_image_end`, one page | a fresh frame, the server's IPC buffer | RW, NX |
+| BootInfo's two pages | none | unmapped |
+
+The paging structures are those root's own image range needs (one PDPT, PD
+and PT with M6's image). The IPC buffer sits at root's address, so the
+pointer libsys's `_start` recorded in root's data, which the copy carries,
+names the server's own buffer, and `Ipc::root()` works unchanged. Every other
+static starts as root's value at spawn: server code keeps its state in locals
+of its entry function and relies on no static root may have written. A server
+gets no arguments; its slots are fixed (below). `user/link.ld` exports the
+segment bounds (`__rodata_start`, `__data_start`, `__data_end`,
+`__libsys_stack_start`), from which, with the thread stacks' addresses,
+`root::process::plan`, host-tested, gives each image page its role and its
+frame capability's slot: BootInfo's `user_image_frames` has one frame per
+page a segment covers, in address order. A server costs one root slot per
+text, read-only and data page, 17 for its stack and buffer, four paging
+structures, its TCB and its CNode: about 70 of the root CNode's 4,096 with
+M6's image, and some 120 KiB of RAM.
+
+#### Capabilities
+
+uart receives on endpoint U and is bound to notification NU, which IRQ 4
+signals; console receives on endpoint C and is bound to notification NC,
+which uart signals; root receives client reports and every fault on endpoint
+D. Each server's CNode has 16 slots, with guard 0 of size 60 applied through
+`TCB_Configure`, so its CPtr `n` is slot `n`. The slot numbers are constants
+of the server's crate (`uart::slot`, `console::slot`), which `root` fills
+from.
+
+| `uart` slot | Capability | Rights, badge |
+| --- | --- | --- |
+| 1 | its own CNode | for `CNode_SaveCaller` |
+| 2 | endpoint U, uart's requests | Read |
+| 3 | IOPort `0x3F8`-`0x3FF`, a copy of root's | |
+| 4 | IRQHandler of ISA IRQ 4, a copy of root's, already bound to notification NU | |
+| 5 | console's notification NC | Write, badge `RX_READY` (bit 32) |
+| 6 | root's endpoint D, its fault endpoint | Write, GrantReply, badge `UART` |
+| 7 | empty: a held request's reply capability | |
+
+| `console` slot | Capability | Rights, badge |
+| --- | --- | --- |
+| 1 | its own CNode | for `CNode_SaveCaller` |
+| 2 | endpoint C, console's requests | Read |
+| 3 | endpoint U | Write, GrantReply, badge 1 (the writer) |
+| 4 | endpoint D, its fault endpoint | Write, GrantReply, badge `CONSOLE` |
+| 8 to 15 | empty: client `b`'s saved Read reply goes in slot 7 + `b` | |
+
+A client holds endpoint C with Write and GrantReply and a badge from 1 to 8,
+which is its client number. No server holds a TCB, VSpace, untyped or paging
+capability, so none can change its priority, map memory or make objects; no
+capability carries Grant, so none can pass capabilities on. `uart` holds no
+capability to console's endpoint: it never sends to console and so can never
+block on it. It signals NC with `RX_READY` when input arrives, and console
+fetches the bytes with a `Call`.
+
+`root` binds before it hands over, so neither server holds a notification it
+could rebind: `IRQControl_GetISA(4)` into its own CNode,
+`IRQHandler_SetNotification` with a capability to NU badged `IRQ` (bit 32),
+`TCB_BindNotification` of uart to NU and of console to NC, then copies of the
+handler and the COM1 IOPort into uart's CNode.
+
+| `root` keeps | Why |
+| --- | --- |
+| IRQControl and IOPortControl | the servers of M8 and M9 |
+| the original IRQHandler and COM1 IOPort | revoking one takes uart's copy back |
+| the original of every object it retyped for a server | revoking stops the server and reclaims its memory |
+| endpoint C's original, and a client capability with badge 1 | root is console's client 1 |
+| endpoint U with badge 2 | `Stats` only |
+| endpoint D | client reports, and the faults of every server and client |
+| under QEMU, IOPort `0xF4`-`0xF7` | `isa-debug-exit`, to end a run in any kernel |
+
+#### Server priorities
+
+| Thread | Priority | Why |
+| --- | --- | --- |
+| `root` | 255 | builds everything, then only blocks: on D, or in a call to console |
+| `uart` | 200 | above everything it serves, so a receive or THRE interrupt preempts console and clients at once |
+| `console` | 150 | above its clients, as [Priorities](#priorities) asks of every server |
+| clients | 100 | |
+
+Each MCP equals its thread's priority. `root` at 255 is a console client
+above console, the inversion [Priorities](#priorities) warns of; only uart
+runs between them, briefly, so root's calls are not held up.
+
+### `uart`
+
+#### Setup
+
+Offsets are from `0x3F8`. Every access is an `IOPort_In8` or `IOPort_Out8`
+on slot 3.
+
+| Step | Access | Why |
+| --- | --- | --- |
+| 1 | IER (1) = 0 | no interrupt during setup |
+| 2 | read LSR (5) until TEMT, at most 10,000 times | bytes the loader, a debug kernel or root wrote leave before the FIFO reset |
+| 3 | LCR (3) = `0x80`; DLL (0) = 1; DLM (1) = 0; LCR = `0x03` | 115,200 baud, 8 data bits, no parity, 1 stop bit: the setting of the kernel's writer and of OVMF |
+| 4 | FCR (2) = `0x87` | FIFOs on and cleared, receive trigger at 8 bytes, as Linux's 8250 driver sets a 16550A (from memory) |
+| 5 | read IIR (2) | bits 6 and 7 both set: working FIFOs, burst 15; otherwise a 16450, burst 1 |
+| 6 | MCR (4) = `0x0B` | DTR, RTS and OUT2, which gates the interrupt line on a PC; the kernel's writer leaves OUT2 off |
+| 7 | read LSR and MSR (6) | clears latched errors and modem deltas |
+| 8 | IER = `0x05` | received data (with the character timeout) and line status; THRE only while needed; modem status never |
+| 9 | `IRQHandler_Ack`, then the service routine | an interrupt between issue and binding signalled nothing ([IRQControl and IRQHandler](#irqcontrol-and-irqhandler)) |
+
+#### The loop
+
+uart is bound to NU and receives on U with `Recv`, and with `ReplyRecv` after
+a request it answers at once. A receive is a signal when `rsi` is 0 and `rdi`
+has `IRQ` (`libsys::Event::classify` with bits 32 and up). A signal runs the
+service routine, then `IRQHandler_Ack`: wait, service, Ack, as every driver
+does. A message runs one request. uart sends only to reply capabilities and
+signals only NC, so it blocks nowhere but in its receive.
+
+The service routine reads IIR until bit 0 says no interrupt is pending, at
+most 64 times, and handles each cause in the 16550's priority order:
+
+| IIR bits 1 to 3 | Cause | uart | Cleared by |
+| --- | --- | --- | --- |
+| `0x6` | line status | read LSR; count OE as an overrun and PE, FE and BI as line errors; the byte stays in the FIFO and is read as data | the LSR read |
+| `0x4`, `0xC` | data at the trigger, or the character timeout | move bytes from RBR to the receive ring while LSR.DR is set; if the ring fills, clear IER's data bit and stop | reading RBR |
+| `0x2` | THRE: the transmit FIFO is empty | if the queue is empty, release a held Drain and clear IER.THRI; else write one burst, then release a held Write that now fits | the IIR read, or the THR writes |
+| `0x0` | modem status, never enabled | read MSR | the MSR read |
+
+If the routine moved any byte into the ring, it signals NC once.
+
+**Lost interrupts.** Draining until IIR is clear leaves the line low, so the
+next cause makes a new edge. The kernel keeps an edge pin open for the first
+edge after an Ack and masks it only on a second delivery before the Ack, which
+signals too ([IRQControl and IRQHandler](#irqcontrol-and-irqhandler)). So a
+cause that arrives after the routine's last IIR read and before the Ack, even
+one whose edge a masked pin drops, finds a signal already pending, and uart's
+next receive returns at once and services it; uart needs no check of its own
+after the Ack. As insurance against a device that loses a THRE interrupt
+anyway, every Write and Drain first reads LSR and, if THRE is set and bytes
+wait, writes a burst; every Read first moves what LSR.DR shows into the ring.
+The 64-read bound keeps a device whose IIR never clears from holding uart
+forever: uart then Acks, counts it, and its line stays high, so it delivers
+nothing more; that is a broken device.
+
+**Overruns.** An overrun loses bytes; uart counts it (`Stats`) and goes on.
+While the receive ring is full, the data bit stays clear and the 16550 keeps
+what it has. QEMU then takes no more bytes from its character device, since
+its receive path offers the guest only the FIFO's free space (from memory:
+`serial_can_receive`, `hw/char/serial.c`), so input is never lost on QEMU; on
+hardware the FIFO overruns and LSR.OE counts it. A Read that frees ring space
+sets the data bit again, and the 16550 raises its data or timeout interrupt
+for what it held.
+
+#### Transmit and receive
+
+| Item | Rule |
+| --- | --- |
+| Transmit queue | 2,048-byte ring, at least twice the largest Write |
+| Burst | 15 bytes into the 16-byte FIFO, 1 without FIFOs; the 16th place is for a debug kernel's byte (below) |
+| IER.THRI | set exactly while the queue holds bytes or a Drain is held, so an idle uart takes no THRE interrupts |
+| Write of `n` bytes | if the queue has room for all `n`, they are queued, uart writes a burst if LSR.THRE is set, and replies `n` at once; otherwise uart moves the caller's reply capability into slot 7 (`CNode_SaveCaller`), keeps the bytes, and replies through slot 7 once THRE bursts have made room for all of them. Back-pressure is a late reply |
+| Held requests | one at a time: a Write or Drain while one is held, found by `CNode_SaveCaller`'s `DeleteFirst`, gets `Busy`. console, single-threaded and the only writer, never sees it |
+| Longest hold | until 952 bytes have drained: about 83 ms at 115,200 baud |
+| Drain | answered once the queue is empty and LSR.THRE is set: at once, or at the THRE interrupt that finds the queue empty. The last byte may still be in the shift register, at most 87 µs; QEMU transmits a byte as it is written (from memory: `serial_xmit`), so a run ended then loses nothing |
+| Receive ring | 256 bytes; Read returns all it holds, possibly nothing, and uart signals NC again for anything that arrives later, so console reads once per signal |
+
+#### Sharing COM1 with a debug kernel
+
+A debug kernel's writer polls LSR until THRE and writes THR, with a bounded
+wait, and after its `serial::init` at boot touches no other register
+([Ports the kernel uses](#ports-the-kernel-uses)). uart and the writer then
+coexist:
+
+- A kernel byte can fall between any two of uart's, so output interleaves at
+  byte granularity; console's whole-line guarantee covers its own output
+  only. Tests on a debug kernel print through console alone while console
+  runs, and the kernel prints nothing then unless a test fails.
+- The writer writes only when THRE says the FIFO is empty, so when uart
+  bursts after seeing THRE the FIFO holds at most one byte the writer added
+  since; 15 bytes then never overflow it, even if uart is preempted
+  mid-burst.
+- A kernel write to THR clears a pending THRE condition; the next THRE comes
+  when that byte has drained, and uart refills then.
+- The writer's LSR reads clear LSR's error bits, so uart may miss overruns
+  and line errors in a debug kernel; its counts are exact only in a release
+  kernel.
+
+#### The uart protocol
+
+Byte strings, labels and errors are as for console ([Protocols](#protocols)).
+
+| Label | Request | Words | Reply | Errors |
+| --- | --- | --- | --- | --- |
+| `0x110` | `Write` | a byte string of at most 952 bytes | MR0 `n`, once all `n` bytes are queued | `BadLength`, `Busy` |
+| `0x111` | `Read` | none | a byte string: everything the receive ring held | |
+| `0x112` | `Drain` | none | nothing, once the queue and the FIFO are empty | `Busy` |
+| `0x113` | `Stats` | none | MR0 interrupts handled, MR1 bytes received, MR2 bytes sent, MR3 THRE bursts, MR4 overruns, MR5 line errors, MR6 Writes held, MR7 service routines cut short at 64 reads | |
+
+`Write`, `Read` and `Drain` need badge 1, console's; any other badge gets
+`BadBadge`. `Stats` takes any badge.
+
+### `console`
+
+console is bound to NC and receives on C. A signal with `RX_READY` makes it
+call uart's `Read` once and feed each byte to its terminal state; a message is
+one client request. Each event's output goes to uart in `Write`s of at most
+952 bytes, one after another; console does nothing else in between, so they
+stay contiguous on the wire. console never waits for a client: a `Read` it
+cannot answer yet is saved with `CNode_SaveCaller` into slot 7 + `b` and
+answered later with `Send` on that slot ([Reply
+capabilities](#reply-capabilities): a receive would delete it in the caller
+slot). It blocks only in calls to uart, which always reply; while it does,
+NC's signals stay pending and clients queue on C.
+
+#### Protocols
+
+A byte string travels as MR0 = its length `n` and MR1 to MR⌈`n`/8⌉ = its
+bytes, eight per word, little-endian: byte `i` is bits 8(`i` mod 8) to
+8(`i` mod 8) + 7 of MR(1 + ⌊`i`/8⌋). `length` is 1 + ⌈`n`/8⌉, at most 120, so
+`n` is at most 952. Up to 24 bytes travel in registers; more need IPC buffers
+on both sides. A server answers `BadLength` when `n` is over its limit or
+`length` does not match `n`, and ignores the unused bytes of the last word.
+It checks the label, then the badge, then the length, then whether it can
+hold the request. A request is never accepted in part: all `n` bytes or an
+error. `libsys` splits longer writes.
+
+A reply's label is 0 on success. Errors have `length` 0:
+
+| Label | Error | When |
+| --- | --- | --- |
+| `0x101` | `BadLabel` | a label the server does not know, including a reserved one |
+| `0x102` | `BadLength` | as above |
+| `0x103` | `Busy` | the server already holds the one request of this kind it can: uart's held `Write` or `Drain`, or console's saved `Read` for this badge |
+| `0x104` | `BadBadge` | a badge outside the requests' range |
+
+Request labels are above every kernel invocation label (`0x01` to `0x8F`),
+so a request sent on the wrong capability gets `IllegalOperation` from the
+kernel, never a kernel operation; error labels are above the kernel's error
+codes (1 to 10), so a client tells a server's refusal from the kernel's, such
+as `InvalidCapability` for a capability without Write.
+
+| Label | Request | Words | Reply | Errors |
+| --- | --- | --- | --- | --- |
+| `0x120` | `Attach` | a byte string of at most 16 bytes: the client's name | MR0 its client number | `BadLength` |
+| `0x121` | `Write` | a byte string of at most 952 bytes | MR0 `n`, once every line it completed is in uart's queue | `BadLength` |
+| `0x122` | `Flush` | none | nothing, once the client's unfinished line is in uart's queue | |
+| `0x123` | `Read` | none | a byte string of at most 255 bytes: the next line typed while this client had focus, without its terminator | `Busy` |
+| `0x124` | `Sync` | none | nothing, once everything console has emitted has left the UART: `Flush`, then uart's `Drain` | |
+| `0x125` | reserved for M8's raw mode | | | `BadLabel` |
+
+Every request needs a badge from 1 to 8, else `BadBadge`. A client exists from
+its first request and needs no `Attach`; `Attach` only names it in status
+lines. A saved `Read` reply vanishes if its client is suspended or deleted
+(`libsys::invoke::cnode_save_caller`); console learns it only when it answers,
+and the line is then dropped.
+
+Neither protocol is in `docs/abi.md`, which is the kernel's and the loader's
+contract: the kernel sees only messages with user labels. Both are defined
+once, in `libsys::proto`, and described here; both ends are built into one
+root image, so a change needs this note and `libsys` changed together, and no
+ADR.
+
+#### Output
+
+Each client has an unfinished output line of up to 512 bytes, which console
+holds until the client ends it with `\n`, flushes it, reads, or fills it. The
+terminal's current line has an owner:
+
+| Owner | Meaning |
+| --- | --- |
+| none | the cursor is at the start of a line |
+| output of `c` | `c`'s unfinished line, flushed or over-long, is the last thing on the terminal |
+| input of `c` | `c`'s input line, its prompt and its edit buffer, is the last thing on the terminal |
+
+A *break* is `\r\n`, sent only when the owner is neither none nor output of
+the event's client. *Showing* `f`'s input line is `\r\n` unless the owner is
+none, then `f`'s prompt and edit buffer. *Restoring* is showing the focused
+client's input line when the owner is none and it has one: a `Read` pending,
+or typed bytes.
+
+| Event | console sends, in order | Owner after |
+| --- | --- | --- |
+| A `Write` by `c` completes a line (its held bytes, then the new ones, up to `\n`) | a break; the line, `\n` as `\r\n`; then restoring | none, or input of the focused client |
+| `c`'s held bytes reach 512 with no `\n` | a break; the 512 bytes | output of `c` |
+| `Flush` by `c` with held bytes | the same, with the held bytes | output of `c` |
+| `Read` by `c` with a typed line waiting | as `Flush`; the line is the reply, at once | |
+| `Read` by `c` with none | `c`'s held bytes become its prompt; if `c` has focus, showing its input line | input of `c`, if focused |
+| A typed byte for the focused client `f` | showing `f`'s input line, unless the owner is input of `f`; then the byte's echo ([Input](#input)) | input of `f` |
+| Enter, a typed byte whose echo is `\r\n` | as a typed byte; the line answers `f`'s saved `Read`, or joins `f`'s waiting lines | none |
+| Ctrl-T and a digit `n` | `\r\n` unless the owner is none; `[console] focus n (name)\r\n`, or `client n` before it has attached; then restoring | none, or input of `n` |
+
+So a line of at most 512 bytes that its client does not flush midway reaches
+the wire whole, with no other byte inside it (a debug kernel's aside),
+whatever the client's write boundaries: the clients' output interleaves line
+by line. Only a longer line can be broken, into 512-byte pieces. Echo,
+breaks, redrawn input lines and status lines go only to the terminal, never
+to a client. A prompt is what the client wrote since its last newline and had
+not flushed; a client writes its prompt and reads, with no `Flush` between.
+
+#### Input
+
+| Byte | Effect on the focused client's edit buffer | Echo |
+| --- | --- | --- |
+| `0x20` to `0x7E` | appended, if it holds fewer than 255 bytes | the byte; BEL (`0x07`) if full |
+| `0x08` (BS), `0x7F` (DEL) | the last byte removed | `\b \b`, nothing if empty |
+| `0x15` (Ctrl-U) | emptied | `\b \b` per byte removed |
+| `0x0D` (CR) | Enter: the buffer becomes a line | `\r\n` |
+| `0x0A` (LF) | Enter, unless it follows CR, when it is dropped | `\r\n` |
+| `0x14` (Ctrl-T) | the next byte, `1` to `8`, focuses that client; any other drops both | the status line |
+| `0x1B` (ESC) | skipped with what follows: `[`, parameters and a final byte in `0x40`-`0x7E`, or one byte | none |
+| anything else | dropped | none |
+
+Focus starts on client 1. Ctrl-T and a digit focuses that client whether or
+not it has attached or is reading. Each client has its own prompt, edit
+buffer and waiting lines (up to 512 bytes of complete lines), so switching
+focus leaves a half-typed line where it was; Enter with no room for the line
+rings BEL and leaves it in the edit buffer. Each byte goes to the client
+focused when console reads it, whether or not that client is reading yet:
+routing is a function of the byte stream alone, so a test that sends the focus
+key before its text routes deterministically however its input races the
+clients. A focus key rather than a per-line prefix also works for raw
+keystrokes, which M8's `term` needs. Ctrl-T because QEMU's `-nographic`
+multiplexer, which `cargo xtask run` uses, takes Ctrl-A, and Ctrl-T has no
+role in a line editor; Ctrl-T Ctrl-T is left for M8's raw mode to pass a
+literal Ctrl-T.
+
+#### Back-pressure
+
+| Direction | Where bytes wait | When full |
+| --- | --- | --- |
+| Output | the client's unfinished line in console (512 bytes); uart's queue (2,048) | console replies to a `Write` only after uart has queued its complete lines, and uart holds console's `Write` while its queue is full, so a client that writes faster than the line waits in its call, and the clients behind it wait on C |
+| Input | the client's waiting lines (512); uart's ring (256); the 16550's FIFO (16); under QEMU, the host's pipe | Enter rings BEL; uart stops reading the FIFO; the FIFO overruns on hardware, and QEMU waits |
+
+### `libsys`
+
+| Part | What |
+| --- | --- |
+| `libsys::proto` | the byte-string encoding, the request labels of both protocols, the error labels, `MAX_BYTES` = 952 |
+| `libsys::console::Client` | a client capability: `attach`, `write` (split into messages of at most 952 bytes), `flush`, `read_line`, `sync`, and `core::fmt::Write` |
+| `libsys::uart::Client` | console's side of uart: `write`, `read`, `drain`, `stats` |
+| `libsys::output` | where `print!` and `println!` go: `DebugPutChar`, the default, or a console client capability (`use_console`, `use_debug`); `set_exit_port` names an IOPort for `isa-debug-exit`; `exit(status)` syncs the console if `print!` goes there, then writes `0x10` (status 0) or `0x11` to that port with `IOPort_Out32` if one is set, and stops, else calls `DebugHalt(status)` |
+
+The panic handler and root's `fail!` end with `libsys::exit(1)`, so a test
+that has set an exit port fails at once on a release kernel, where
+`DebugHalt` would be an `UnknownSyscall` fault with no handler; without one,
+everything behaves as before. A server's `DebugHalt` in a release kernel
+faults to root, which ends the run with failure. The output and the exit port
+are statics of a VSpace, and a CPtr names a slot of one CSpace, so:
+
+- `root` spawns the servers before it points its own output at console, and
+  each server's entry sets its output to `DebugPutChar` (a server printing
+  through console would call itself);
+- threads in root's VSpace with CSpaces of their own, such as
+  `test=console`'s clients, write through a `console::Client` of their own;
+  `print!` there would use root's CPtr;
+- in `test=release` root prints nothing until console is up, then its usual
+  summary through console.
+
+### The harness
+
+Three new scenario directives; a scenario without them runs exactly as
+before.
+
+| Directive | Meaning |
+| --- | --- |
+| `send: <text>` | writes `<text>` to QEMU's standard input, COM1's receive side, once every `expect:` above it has matched; consecutive `send:` lines go together, in order. Escapes: `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`; a `\` before anything else is an error. As for every value, the ends are trimmed and ` #` starts a comment, so a space or `#` there is `\x20` or `\x23` |
+| `kernel: release` | boots the kernel built without features (no `debug`, no `selftest`), in the run's profile; `kernel: selftest` is the default |
+| `forbid: <text>` | no line of the transcript may contain `<text>`; checked when the run ends, and the failure names the first such line |
+
+**Timing.** A `send:` must have an `expect:` above it (a parse error
+otherwise): until the guest's uart has started, OVMF reads COM1, where a key
+can stop the boot in its boot manager, and uart's FIFO reset drops whatever
+arrived. A guest line that the `expect:` before a `send:` names is printed
+through uart, so uart is running when the text is written. Text is written
+all at once: QEMU feeds the UART only as its FIFO has room, so nothing is
+lost however fast it arrives. Each `send:` is logged in `serial.log` as an
+`xtask: sent "<text>"` line at the point it was written; neither the matcher
+nor `forbid:` reads those lines.
+
+**Implementation.** The scenario becomes a list of steps (`expect`, `send`);
+the matcher, unchanged in what it matches, returns the sends it reaches as
+it advances, and the main loop writes them to QEMU's stdin, which is piped
+for scenarios with a `send:` and stays `/dev/null` for the others. Matching
+stays line-based: a prompt without a newline is never seen, so a test makes
+the line before each `send:` a whole one and checks echo with host tests.
+xtask builds the release kernel beside the selftest one; since a feature
+change rebuilds in place, it goes in a target directory of its own or is
+copied out. `cargo xtask run` and `image` keep the selftest kernel; a
+`--kernel release` option is optional.
+
+### Scenarios
+
+**`console`** (`cmdline: test=console`, the selftest kernel). Root prints its
+summary through `DebugPutChar`, builds uart and console, attaches as client 1
+(`root`), points its output at console and starts clients `a` (badge 2) and
+`b` (badge 3), which attach and report on D. Root drives each client one step
+at a time over an endpoint of the client's own and waits for its report, so
+every write boundary is fixed:
+
+| Part | What the clients do | What the transcript shows |
+| --- | --- | --- |
+| Interleaved lines | `a` writes `a1 alpha `, `b` writes `b1 bravo `, `a` writes `one\n`, `b` writes `one\n`; `b` writes a 300-byte line, `b2` and filler, in three writes of 100 bytes (through the IPC buffer), with `a`'s whole line `a2 short` between them; `a` writes `a3 x\na4 y\na5 ` in one write, `b` writes `b3 z\n`, `a` writes `end\n` | `a1 alpha one`, `b1 bravo one`, `a2 short`, the 300-byte `b2` line, `a3 x`, `a4 y`, `b3 z`, `a5 end`, each whole and in that order |
+| Burst | `b` writes twelve 200-byte lines back to back | `b burst 01` to `b burst 12`, whole; uart may hold some of console's writes (`Stats` MR6) |
+| Input | `a` and `b` each write a prompt and `Read`; root prints `console: input next` | see the steps below |
+| Totals | root asks uart's `Stats` | interrupts and THRE bursts above 0, exactly the 22 bytes the harness sent, 0 overruns and line errors |
+
+```text
+expect: console: input next
+send: \x143to b\r                  # Ctrl-T 3: focus b
+expect: [console] focus 3 (b)
+expect: b: read "to b"
+send: \x142hellp\x7fo\x15hi a\r    # Ctrl-T 2, a typo, DEL, Ctrl-U, the line
+expect: [console] focus 2 (a)
+expect: a: read "hi a"
+```
+
+Each client prints what it read and reports it to root, which checks that
+`a` received exactly `hi a` and `b` exactly `to b`, and nothing else reached
+any client (`root::check::console`). Root then prints `TEST PASS` through
+console, syncs and calls `DebugHalt(0)`; the scenario ends with `DEBUG HALT
+0 from TCB` and exit success. The echoed lines (`b> to b`) are in the
+transcript but not expected, since whether a prompt shows depends on whether
+the client's `Read` arrived before its input; host tests pin echo exactly.
+
+**`release`** (`kernel: release`, `cmdline: test=release`). The loader prints
+as always; the kernel prints nothing. Root issues the COM1 range, IRQ 4 and,
+under QEMU (`BootInfo.hypervisor_vendor`), `0xF4`-`0xF7`, builds uart and
+console, attaches as client 1, sets its output and its exit port, and prints
+through console:
+
+- its usual summary (`root: microL4 root task`, the command line, the slot
+  regions);
+- a line saying a probe thread's `DebugPutChar`, `DebugHalt`,
+  `DebugDumpScheduler` and reserved numbers 19 and 31 each raised
+  `UnknownSyscall` with the number in MR18; root answers each fault with the
+  probe's registers and `ip` + 2, so the probe goes on to the next;
+- `release: type a line`, then, after `send: release input\r`, `release: read
+  "release input"`, since focus starts on client 1;
+- uart's `Stats` (interrupts above 0, 14 bytes received, 0 overruns), then
+  `TEST PASS`.
+
+Then `Sync`, and `IOPort_Out32(0xF4, 0x10)` ends the run. xtask expects those
+lines in order and exit success, and has `forbid: microL4 kernel`, `forbid:
+bootinfo:`, `forbid: DEBUG HALT` and `forbid: KERNEL PANIC`, which a kernel
+with `debug` would print. With `cargo xtask test`'s disassembly of the same
+kernel, this is M7's "the release kernel contains no UART code". A root-task
+fault there has no handler and no output, so it shows only as the 60-second
+timeout.
+
+### Code and tests
+
+| Part | Where | Host tests |
+| --- | --- | --- |
+| Byte strings, labels, error labels; the two clients; `print!`'s output and `exit` | `libsys::proto`, `libsys::console`, `libsys::uart`, `libsys::output` | round trips for every `n` from 0 to 952, each `length`, `BadLength` cases, the ignored high bytes; writes split at 952; `fmt::Write` |
+| The 16550 driver: registers, setup, the service routine, the rings, held requests, requests; `uart::run`, the loop | crate `uart` (`user/uart`), `no_std`, `#![forbid(unsafe_code)]`, generic over a port trait; `run` for the target only | against a 16550 model (IIR priorities, THRE cleared by an IIR read or a THR write, 16-byte FIFOs, the trigger and the timeout, OE, OUT2 and an edge-triggered line) and an I/O APIC pin with the kernel's Ack rule that drops edges while masked: setup's accesses in order; random interleavings of host input, transmit progress, a kernel writer and uart's steps never lose a byte, overflow the FIFO, or leave uart blocked with a cause pending and no signal; held Writes released in order; Drain answered only when empty; a full ring stops and resumes reception |
+| The terminal: clients, output arbitration, line editing, focus; `console::run`, the loop | crate `console` (`user/console`), the same way | golden byte transcripts for every row of the event and input tables; a proptest of random writes at random boundaries, flushes, reads and typed bytes, focus keys included, by eight clients against a model of per-client lines, checking the invariants below |
+| Building a server's VSpace and CSpace | `root::process` (plan, host-tested) and `user/root/src/process.rs` | the page plan of M6's image, of an image across a 2 MiB boundary, and of segments with gaps |
+| The two tests | `user/root/src/console.rs`, `release.rs`; verdicts in `root::check::console` | the script, the lines each client must receive, the input byte counts |
+| The directives | `xtask/src/scenario.rs`; the release kernel in `xtask/src/compile.rs` | parsing `send:` escapes and placement, `kernel:` and `forbid:`; the matcher releasing each send after the expects above it, and consecutive sends together |
+
+`cargo xtask test` runs the host tests of `uart` and `console` beside
+`libsys`'s and `root`'s, and `cargo xtask clippy` lints both crates for the
+host and the target. QEMU covers what the host cannot: QEMU's 16550, IRQ 4
+through the I/O APIC to a notification, the IOPort invocations, separate
+VSpaces built from root's frames, the harness's input through COM1, and the
+release kernel.
+
+### Invariants
+
+| Invariant | Enforced by | Milestone |
+| --- | --- | --- |
+| uart is the only holder of the COM1 IOPort and the IRQ 4 handler besides root, which keeps the originals; no server holds a TCB, VSpace, untyped, paging or Grant capability | `root::process` fills each CNode from its crate's slot table only; `test=console` and `test=release` start no other holder; review | M7 |
+| No page is writable in two VSpaces: a server maps root's text and read-only pages read-only, and its own data, stack and IPC buffer frames | `root::process::plan` host tests; review | M7 |
+| uart never blocks except in its receive on U: it sends only to reply capabilities and signals only NC; the one endpoint it could send on is its fault endpoint, which only the kernel uses | the crate's structure and slot table; review | M7 |
+| uart never writes more than 15 bytes into the FIFO per THRE seen, so even a debug kernel's byte cannot overflow it | `uart` host test with a kernel writer in the model | M7 |
+| uart never blocks with an interrupt cause pending and no signal pending, whatever the order of device events, edges dropped on a masked pin included | draining until IIR is clear before every Ack; `uart` host test against the I/O APIC model | M7 |
+| Every byte queued for transmit is sent once and in order; every byte received, unless overrun, reaches console once and in order | `uart` host tests; `console` scenario totals | M7 |
+| IER.THRI is set exactly while the transmit queue holds bytes or a Drain is held; IER's data bit is clear only while the receive ring is full | `uart` host tests after every step | M7 |
+| console emits each client's bytes once and in order, `\n` as `\r\n`; a line of at most 512 bytes that its client does not flush midway reaches the wire with no other byte from console inside it | `console` proptest; `console` scenario | M7 |
+| Each typed line reaches exactly one client, the one focused while its bytes were read, as edited; echo, status and redrawn lines reach no client | `console` proptest and goldens; `console` scenario, where root checks each client's lines | M7 |
+| Every `Read` is answered at most once, and exactly once if its client survives and a line is typed for it | `console` proptest; `CNode_SaveCaller` refuses a second save (`Busy`) | M7 |
+| console never blocks on a client; it blocks only in calls to uart, which always reply | the crate's structure; review | M7 |
+| Priorities: uart above console above its clients | `root::process`; both scenarios print them | M7 |
+| In a release kernel, everything on COM1 after the loader comes from uart | `release` scenario's `forbid:` lines; the disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)) | M7 |
+
+### Compared with seL4
+
+seL4 itself has no console; the rows compare the seL4 ecosystem's usual
+structure, written from memory of the seL4 Device Driver Framework (sDDF)
+and CAmkES.
+
+| seL4 ecosystem | microL4 | Reason |
+| --- | --- | --- |
+| sDDF serial: a driver and separate transmit and receive virtualisers, each a protection domain, passing bytes through shared-memory queues and signalling each other with notifications | `uart` and `console` pass bytes in IPC messages; uart only signals that input waits | at 115,200 baud a call per 952 bytes costs nothing that matters, and no shared frames or memory-ordering rules are needed. Lost: zero-copy throughput, which a serial line does not need |
+| sDDF's receive virtualiser sends input to one client and switches on a control character followed by a client number | Ctrl-T and one digit | the same idea; one digit, so the sequence ends without a terminator |
+| sDDF does no line editing; clients see raw bytes | console edits lines; raw mode is reserved for M8 | PLAN.md puts line editing in console |
+| CAmkES builds such systems from components, each an ELF that the capDL loader places in an address space of its own, connected by RPC and dataport connectors | servers are threads of root's own image, in VSpaces root builds from its image frames | one ELF to build and embed, and no loader in root; text is shared read-only |
+| A seL4 kernel with `CONFIG_PRINTING` writes to the UART that a user driver also drives | the same in a debug kernel; lines may interleave | debug kernels make no isolation claim ([ADR 0021](adr/0021-debug-feature.md)) |
+
 ## Open questions
 
 Each question has a default that this note and `docs/abi.md` already assume,
@@ -4462,6 +4989,8 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Decided by the M7 spec check ([ADR 0027](adr/0027-stale-remote-irr.md)); check in M7. QEMU's I/O APIC is version `0x20`, Hyper-V's `0x11` (the M3 Hyper-V check). Normal operation needs nothing: the local APIC's EOI broadcast clears Remote IRR on any version, as in seL4, because a pin keeps its vector and trigger. For a stale one, issue writes the entry level-triggered and masked, then writes the old vector to the EOI register from version `0x20`, or below it switches the entry to edge-triggered and back, as Linux's `__eoi_ioapic_pin` does (from memory). Masking and unmasking leaves Remote IRR set, and the local APIC broadcasts an EOI only for a vector in service, so neither is an option. A self-test runs both paths on QEMU, whose I/O APIC takes `version=0x11` (from memory). Hyper-V's path stays unchecked: no planned driver there uses a level pin (COM1 is edge; VMBus uses SINTs) |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
 | Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 | Yes; raise the radix to 13 if not |
+| Does Hyper-V's COM1 behave as a 16550A for `uart`: FIFOs (IIR bits 6 and 7), the character timeout, a THRE interrupt when THRI is set with the FIFO empty, OUT2 gating the line, and a transmitter that drains with no client on the named pipe? | `uart`'s setup, its 15-byte burst and its lost-interrupt reasoning assume it ([`uart`](#uart)); a transmitter that stalls without a pipe client would hold console's writes, and every client's, for good | M8 Hyper-V check | Yes, as Linux guests' 8250 driver assumes there (from memory); without FIFOs `uart` falls back to 1-byte bursts. Boot `test=release` with a client on the pipe and type its line, then once with none |
+| Does M8's `term` read keystrokes through console's raw mode (label `0x125`) or straight from `uart`? | Focus switching keeps working only if console sees every byte | M8 | Through console: raw mode for the focused client, so `uart` keeps one reader |
 | Must `vmbus` send VMBus `UNLOAD` before `INITIATE_CONTACT` because the firmware left a connection open? | Contact fails or channels are stale if the host still sees the firmware's session | M9 | Yes, as other guests do after kexec; confirm against FreeBSD's `vmbus.c` |
 | Which value goes into `HV_X64_MSR_GUEST_OS_ID`? | The TLFS asks open-source guests for an OS type Microsoft allocates; microL4 has none | M9 | Bit 63 (open source) set, OS type 0, version 0, build = the kernel's build number |
 | Should an MSI vector be quarantined after its handler is deleted? | A device that keeps sending gives the vector's next owner spurious signals | M9 | No: drivers treat signals as hints, and an MSI-capable driver is trusted with the machine anyway |
