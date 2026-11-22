@@ -6,12 +6,12 @@
 //! register travels. The endpoint objects and their queues, with
 //! [`IpcEnv`], what IPC needs from the kernel, are in `endpoint`; the state
 //! machine (send, receive and reply phases, message transfer, reply
-//! capabilities, cancellation and fault delivery) in `machine`. M5 builds
-//! endpoints without capability transfer (ADR 0023); M6 adds capability
-//! transfer, notifications and `CNode_SaveCaller`.
+//! capabilities, `CNode_SaveCaller`, cancellation and fault delivery) in
+//! `machine`; capability transfer, the capabilities a message names, in
+//! `transfer`; `CNode_CancelBadgedSends`'s queue side in `badge`.
 //!
-//! The notification objects (M6), with signal, wait and poll, binding,
-//! their cancellation and their invariants, are in `notification`.
+//! The notification objects, with signal, wait and poll, binding, their
+//! cancellation and their invariants, are in `notification`.
 
 mod badge;
 mod endpoint;

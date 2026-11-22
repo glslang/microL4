@@ -146,7 +146,7 @@ impl EndpointCap {
         self.rights.contains(Rights::READ)
     }
 
-    /// Grant: capabilities move with the message (M6), and a reply
+    /// Grant: capabilities move with the message, and a reply
     /// capability made for a caller received through it may grant.
     pub const fn can_grant(&self) -> bool {
         self.rights.contains(Rights::GRANT)

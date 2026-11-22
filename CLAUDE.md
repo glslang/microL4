@@ -31,16 +31,18 @@ guest on the owner's machine.
 | `cargo xtask acpidump [--from-log <file>] [--out <file>]` | dump the ACPI tables the loader reads, from a QEMU boot or a COM1 log (the Hyper-V check), for `core/tests/acpi/` |
 
 Plain `cargo test` and `cargo build` cover only the host crates (`core`,
-`xtask`); the kernel and loader need their own targets, which xtask passes.
+`model`, `xtask`); the kernel and loader need their own targets, which xtask
+passes.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader, the kernel and the user crates (handoff ABI, ELF parser, command line; from M2 the capability core; from M3 the CPU feature check, ACPI parser, page-table builder, trap decoding, APIC, HPET, Hyper-V and timer arithmetic; from M4 BootInfo, the boot plan and untyped with checks of their invariants, the Untyped and CNode invocation decoder, and the memory kernel objects may occupy; from M5 the system-call numbers and dispatch, kernel entry and exit, x87 and SSE state, registers and faults, TCBs and their invocations, the scheduler, the paging objects with their back-references and invocations, endpoint IPC with reply capabilities and fault delivery, and the root image's checks and VSpace) |
+| `core/` | crate `l4core`: `no_std`, `#![forbid(unsafe_code)]`, host-tested logic shared by the loader, the kernel and the user crates (handoff ABI, ELF parser, command line; from M2 the capability core; from M3 the CPU feature check, ACPI parser, page-table builder, trap decoding, APIC, HPET, Hyper-V and timer arithmetic; from M4 BootInfo, the boot plan and untyped with checks of their invariants, the Untyped and CNode invocation decoder, and the memory kernel objects may occupy; from M5 the system-call numbers and dispatch, kernel entry and exit, x87 and SSE state, registers and faults, TCBs and their invocations, the scheduler, the paging objects with their back-references and invocations, endpoint IPC with reply capabilities and fault delivery, and the root image's checks and VSpace; from M6 notifications and binding, capability transfer, `CNode_SaveCaller` and badged-send cancellation) |
+| `model/` | crate `l4model`, host only: slow, obviously correct reference models written from the design, each run beside `l4core` by a harness that compares them after every step: M2's capability model (`model.rs`, `harness.rs`; `tests/random.rs`, `tests/scenarios.rs`) and M6's IPC model (`ipc.rs`, `ipc_harness.rs`; `tests/ipc_random.rs`, `tests/ipc_scenarios.rs`) |
 | `kernel/` | the kernel, `x86_64-unknown-none`, linked at `0xFFFF_FFFF_8000_0000` by `kernel/linker.ld` |
 | `loader/` | the UEFI loader, `x86_64-unknown-uefi`, with its own minimal UEFI bindings |
-| `user/` | user programs, built for `x86_64-unknown-none` by xtask and linked at `0x40_0000` by `user/link.ld`: `libsys` (`_start`, system calls, kernel invocations, slot and untyped allocation, `print!`) and `root`, the root task the kernel embeds in `.rootimage` |
+| `user/` | user programs, built for `x86_64-unknown-none` by xtask and linked at `0x40_0000` by `user/link.ld`: `libsys` (`_start`, system calls, kernel invocations, capability transfer, notifications, slot and untyped allocation, `print!`) and `root`, the root task the kernel embeds in `.rootimage` |
 | `xtask/` | build, image, QEMU runner and scenario harness |
 | `tests/qemu/` | boot scenarios, one `*.scenario` file each |
 | `tools/` | `setup.sh`, and `hyperv/` scripts for the owner's host |

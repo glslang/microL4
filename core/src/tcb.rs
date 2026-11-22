@@ -212,7 +212,7 @@ pub enum ThreadState {
     BlockedOnReceive { ep: EpRef, can_grant: bool },
     /// After a Call, or after its fault message was received.
     BlockedOnReply,
-    /// Waiting on `ntfn` (M6).
+    /// Waiting on `ntfn`.
     BlockedOnNotification { ntfn: NtfnRef },
 }
 
@@ -590,7 +590,7 @@ pub trait Threads: Kernel + Scheduling {
     fn write_buffer_word(&mut self, paddr: u64, value: u64);
 
     /// The word at byte `offset` of notification `n`: one of
-    /// [`crate::ipc::ntfn_field`]'s (M6). `TCB_BindNotification` reads and
+    /// [`crate::ipc::ntfn_field`]'s. `TCB_BindNotification` reads and
     /// writes notifications, so their words are here and not in
     /// [`crate::ipc::IpcEnv`], which extends this trait; the typed
     /// accessors are [`crate::ipc::notification`] and

@@ -1,7 +1,9 @@
 //! The endpoint state machine (`docs/design.md`, "IPC", "Faults"; ADRs
 //! 0016, 0018, 0023): the send, receive and reply phases, message transfer,
-//! reply capabilities, cancellation and fault delivery. M6 adds capability
-//! transfer, notifications and `CNode_SaveCaller`.
+//! reply capabilities, `CNode_SaveCaller`, cancellation and fault delivery.
+//! Capability transfer itself is in the `transfer` module, which
+//! [`transfer`] calls; notifications, which [`receive`] and [`cancel_ipc`]
+//! call into, are in the `notification` module.
 //!
 //! Every function runs to completion in one kernel entry with no
 //! preemption point, in time bounded by the message, or for
