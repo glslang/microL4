@@ -3369,10 +3369,11 @@ priority 200 for each of 1-, 0- and 120-word messages, checking every
 reply, and prints the TSC cycles per round trip (mean, fastest and median).
 In the 120-word run the server checks every word of MR4 to MR119 it
 received and answers each plus one, and the root task checks every word of
-the reply. Under TCG on a busy host, M6's
-fastest 1-word round trip took 166,000 to 185,000 cycles, about 80 to 90
-µs at 2.1 GHz, and the fastest 120-word one 524,000 to 771,000; the numbers
-show trends, not performance ([Open questions](#open-questions)).
+the reply. Under TCG on a busy host, M6's fastest 1-word round trip took
+166,000 to 185,000 cycles, about 80 to 90 µs at 2.1 GHz. The fastest
+120-word one took 524,000 to 771,000 before both sides checked every word,
+and about 615,000 with those checks timed in. The numbers show trends, not
+performance ([Open questions](#open-questions)).
 
 ### Invariants
 
