@@ -1,5 +1,5 @@
 # Status
-Current milestone: M5 · Threads, address spaces and the root task. Its done-when test passes on QEMU, and both fresh reviewers signed off. The owner's Hyper-V check is still to run (`tools/hyperv/README.md`, "At the M5 check"). Next: M6 · IPC and notifications.
+Current milestone: M5 · Threads, address spaces and the root task, complete: the done-when test passed on QEMU and on the owner's Hyper-V host (2026-11-22), both fresh reviewers signed off, and the red-team finding is fixed and confirmed. Next: M6 · IPC and notifications.
 
 ## Done
 - [x] M0 · Bootstrap and tooling (PR #1, merged 2026-10-29)
@@ -8,7 +8,7 @@ Current milestone: M5 · Threads, address spaces and the root task. Its done-whe
 - [x] M3 · Paging and interrupts (PR #4, merged 2026-11-02): the kernel's own GDT, TSS, IDT and page tables, decoded ring-0 faults, the ACPI parser with QEMU and Hyper-V table dumps, the local APIC, PIC, I/O APIC and HPET set up, and a 100 Hz timer calibrated against the HPET or Hyper-V's reference counter. A fresh reviewer signed off.
 - [x] The M3 Hyper-V check passed on the owner's host (2026-10-30): ten ticks at 100.002 Hz against the reference counter; the results are under "Hyper-V checks".
 - [x] M4 · Kernel objects and BootInfo (PR #5, merged 2026-11-02): the boot plan, the untyped and BootInfo in `l4core::{bootinfo, boot}`, the Untyped and CNode decoder `l4core::invoke`, boot steps 6, 7 and 9, and the `bootinfo` and `retype` self-tests. A fresh reviewer signed off and a red-team pass on the decoder found nothing.
-- [ ] M5 · Threads, address spaces and the root task (PR #6). QEMU done; the Hyper-V check remains.
+- [x] M5 · Threads, address spaces and the root task (PR #6). Done on QEMU and on Hyper-V.
   - **Threads** (`l4core::{tcb, regs, sched}`):
     - TCBs with the design's layout and states;
     - every TCB invocation, with errors in `docs/abi.md`'s order;
@@ -59,17 +59,12 @@ Current milestone: M5 · Threads, address spaces and the root task. Its done-whe
     - scenario disk images deleted after a pass;
     - `IA32_TSC_AUX` set to 0;
     - exit warnings printed once per boot.
-- [x] The M5 red-team pass found one probable denial of service: with TF set, `mov ss; int3` defers the single step into ring 0 at the `#BP` stub's first instruction (the CVE-2018-8897 mechanism), and the kernel panicked.
+- [x] The M5 red-team pass found one denial of service, now fixed and confirmed on Hyper-V: with TF set, `mov ss; int3` defers the single step into ring 0 at the `#BP` stub's first instruction (the CVE-2018-8897 mechanism), and the kernel panicked.
   - The kernel now returns from that `#DB` as it does at `syscall_entry` (`docs/redteam/m5-movss-db.md`).
-  - QEMU raises the `#DB` in ring 3, so the finding and the fix are proven only on Hyper-V, by `redteam-movss`.
+  - QEMU raises the `#DB` in ring 3. At the M5 Hyper-V check `redteam-movss` probe 1 read `0x3/0x0`: Hyper-V does defer the step into ring 0 at the `#BP` stub, and the kernel returned from it. The `int n` and `int1` variants proved not real.
   - Everything else held: 80 exception probes from ring 3, every unmap path then a stale read, and threads deleting their own TCB or the memory under them.
 
 ## Next
-- [ ] The M5 Hyper-V check: boot the six images of CI's `microl4-vhdx-m5-check` (`tools/hyperv/README.md`, "At the M5 check") and paste the logs into PR #6.
-  - `threads` and `fault` are the done-when.
-  - `ring3` shows TF at `syscall_entry`, `#XM` and UMIP.
-  - `tlb` and `isolation` exercise a real TLB and XSAVE.
-  - `redteam-movss` proves the deferred `#DB` fix: probe 1 should read `0x3/0x0`; a panic on probe 2 or 3 means the `int n` or `int1` variants are real after all.
 - [ ] M6 · IPC and notifications:
   - capability transfer;
   - notifications and binding;
@@ -85,7 +80,7 @@ Current milestone: M5 · Threads, address spaces and the root task. Its done-whe
 - **#DF stack overflow:** it re-enters the #DF handler over its own frames, so the first report may be cut short (`df_stack`). Accepted: nothing runs on.
 - **`int1` (`0xF1`):** in ring 0 it raises #UD on QEMU 8.2 TCG, not #DB. Recheck the design's `int1` claims on real hardware or Hyper-V in M10, brief 5.
 - **HPET above MAXPHYADDR:** an HPET base under 2^52 but above the CPU's MAXPHYADDR would fault when mapped instead of counting as no HPET. No known firmware does this.
-- **Unchecked hardware facts:** H10 (MTRR and PAT combination) is checked in M8. UMIP (H11) was confirmed on QEMU in M5; Hyper-V's answer comes from `ring3` at the M5 check.
+- **Unchecked hardware facts:** H10 (MTRR and PAT combination) is checked in M8. UMIP (H11) is confirmed on QEMU and on Hyper-V.
 - A partial revoke, one whose work destroys a CNode on its slot's lookup path, ends where preemption falls, as in seL4: the restart fails its lookup and the work left stays undone. Delete finishes a Zombie it leaves in a slot the user can name, and a revoke of an ancestor untyped the rest; under a boot untyped that region is dead (`docs/design.md`, Slot operations). A Delete named through a path that runs through its own slot can be cut short the same way. The harness checks that a revoke cut short left a safe state, then runs the same revoke unpreempted from the same start: the leftover's memory and back-references must equal that run's at one of its preemption points, and its hook calls must be that run's up to there. Later steps go on from the unpreempted run's end.
 - The model harness covers user operations on a Zombie only through hand-written tests. It no longer deletes the Zombies a revoke cut short leaves, so no random sequence does; `l4core`'s `a_revoke_restarted_by_looking_its_slot_up_again_is_cut_short` checks that such a Delete finishes the work.
 - **Is 4 KiB the right reset chunk?** Answered on QEMU; Hyper-V is unmeasured. Build `cargo xtask image --cmdline "test=retype"` and boot it (`tools/hyperv/README.md`, the optional M4 check).
@@ -97,13 +92,7 @@ Current milestone: M5 · Threads, address spaces and the root task. Its done-whe
 - **The kernel's `SlotAddr` debug check** tests only that a slot lies in object memory (`l4core::objmem`), which is weaker than core's invariant; M7 must add the IRQ node's static range to it.
 - **No differential check against `model/`** of decoded invocation sequences; `l4core::invoke`'s own tests and the red-team harness cover them.
 - **The boot region** rounds to whole pages, so the 2 KiB after the root TCB is lost; seL4 turns such slack into small untyped.
-- **QEMU cannot show:**
-  - the deferred `#DB` (`redteam-movss`);
-  - `#XM` (QEMU TCG never raises it);
-  - `int1` in ring 3 gives `#UD` on QEMU;
-  - 11 of the `retfq`/`iretq` red-team probes stop at a SMAP `#PF` (error code 1) before the selector check, which looks like a QEMU bug.
-
-  Hyper-V runs of `ring3` and `redteam-exceptions` settle these.
+- **Still unchecked on hardware:** 11 of the `retfq`/`iretq` red-team probes stop at a SMAP `#PF` (error code 1) on QEMU before the selector check, which looks like a QEMU bug; booting `test=redteam-exceptions` on Hyper-V would settle it. `int1` in ring 0 gives `#UD` on QEMU (M10 brief 5).
 - **The scheduler state is a static** that kernel code reaches through one `arch::Objects` at a time; a second live `Objects` calling the scheduler would be unsound. Reviewer K checked that today's code holds to this; keep it so.
 - **`Kernel::finalise` gets no slot:** a paging capability's slot is found through its back-reference and checked to hold exactly that capability, slightly weaker than the design's two-way check. Passing the slot is a small API change for later.
 - **Debug kernels:** `DebugDumpScheduler` walks every TCB with no preemption point. Accepted, since debug kernels make no security claim (ADR 0021).
@@ -154,11 +143,15 @@ Current milestone: M5 · Threads, address spaces and the root task. Its done-whe
   - Paging: the direct map covers 4 GiB, 256 WB and 1792 UC 2 MiB pages; the device window holds 2 pages (no HPET).
   - `Test-L4Vhdx.ps1` reported FAIL only because the owner ran it with its defaults, which then expected `cmdline: "test=hello"`. The defaults now hold only the lines every image prints.
 - **M4:** no check was required. CI's `microl4-vhdx-m4-check` boots `test=retype`. Its log would show three things: the BootInfo summary (expected boot region `0x1ff00000-0x1ff23000` and 73 to 115 untyped), the retype record, and the longest stretch between preemption polls, which answers the 4 KiB question on Hyper-V.
-- **M5:** not yet run. CI's `microl4-vhdx-m5-check` holds six images:
-  - `threads` and `fault` (the done-when);
-  - `ring3`, `tlb`, `isolation` and `redteam-movss`.
-
-  `tools/hyperv/README.md`, "At the M5 check", has the loop and what each log must show.
+- **M5** (CI's `microl4-vhdx-m5-check`, 2026-11-22): all six images reached `TEST PASS`, with no panic.
+  - Boot: `cpu: features NX PGE PAT SMEP SMAP XSAVE UMIP`; physical address width 46 bits; 83 untyped (521,416 KiB of RAM), inside the 73 to 115 the host tests predicted; boot region `0x1fee0000-0x1ff40000`; the framebuffer as one device untyped.
+  - Entry and FP: the same `IA32_STAR` and `IA32_FMASK` as on QEMU; `IA32_TSC_AUX 0x0`; XCR0 `0x3` of `0x7` supported, a 576-byte XSAVE area; CR4 `0x340ee8`, EFER `0xd01`.
+  - `threads`: A and B each preempted 16 times with the other running in between; lines ABABABABABABABAB.
+  - `fault`: the `VMFault` at `0xdeadbee8` (ip `0x400010`, fsr `0x4`) reached handler H; F was blocked, H killed it with `TCB_Suspend`, and F stayed stopped.
+  - `ring3`: `#XM` raised (step 9) and MXCSR `0x1d84` with ZE set (step 10); a `syscall` with TF set took no ring-0 `#DB` (step 12); `sgdt` under UMIP took `#GP` (step 22).
+  - `tlb`: every phase faulted after `Frame_Remap`, `Frame_Unmap` and `PageTable_Unmap`, and restarted once mapped again.
+  - `isolation`: check 0 for both threads and the root task.
+  - `redteam-movss`: probe 1 `0x3/0x0` (the deferred step reached ring 0 and the kernel returned), probe 2 `0xd/0x402`, probe 3 `0x1/0x0`.
 
 ## Last session
 2026-11-02: M5.
@@ -180,4 +173,5 @@ Current milestone: M5 · Threads, address spaces and the root task. Its done-whe
   - Codex caught the temporary dispatch restarting a self-deleted caller (gone with the real dispatch, and host-tested);
   - the shared disk filled twice, from builders' `target/` directories and kept scenario images;
   - Miri approached CI's 20-minute limit (now two shards).
-- **Next:** the owner's M5 Hyper-V check, then merge PR #6, then M6.
+- **Hyper-V:** the owner booted all six M5 check images on 2026-11-22; all passed (above). The first try failed in `Set-L4Vhdx.ps1` because `Get-VM` found no VM named `l4`: an unelevated window, or the VM missing.
+- **Next:** merge PR #6, then M6.

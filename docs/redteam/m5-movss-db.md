@@ -5,12 +5,13 @@ It cannot run code in ring 0 or read kernel memory.
 
 **Where:** on hardware and on Hyper-V. QEMU 8.2 TCG does not reproduce it.
 
-**Status:** fixed for `int3` in the M5 fix round ([The fix](#the-fix)):
-the kernel returns from a ring-0 `#DB` on the first instruction of the
-`#BP` stub. Not proven on a real CPU either way: the test passes on QEMU
-before and after the fix. The `int n` and `int1` variants below are
-judged not real and stay unfixed; the M5 Hyper-V check settles all three
-([What stays to be confirmed on Hyper-V](#what-stays-to-be-confirmed-on-hyper-v)).
+**Status:** confirmed on Hyper-V and fixed. The M5 fix round made the
+kernel return from a ring-0 `#DB` on the first instruction of the `#BP`
+stub ([The fix](#the-fix)). At the M5 Hyper-V check (2026-11-22) probe 1
+read `0x3/0x0`: Hyper-V defers the single step past `int3` into ring 0, the
+case that panicked before the fix, and the kernel returned from it. Probes
+2 and 3 showed the `int n` and `int1` variants are not real
+([The Hyper-V result](#the-hyper-v-result)).
 
 ## What breaks
 
@@ -195,3 +196,25 @@ Every test below passes on QEMU and stays as an ordinary scenario.
   `docs/abi.md`'s "`int1` gives 1" holds only on hardware.
 - `ldmxcsr`, `fxrstor` and `xrstor` accept reserved MXCSR bits. Unmasked
   SSE exceptions raise no `#XM`.
+
+## The Hyper-V result
+
+The owner booted CI's `redteam-movss` image on Hyper-V on 2026-11-22. It
+reached `TEST PASS` with no panic, and every probe ended in the thread's own
+fault:
+
+```text
+redteam: movss: probe 0 (mov ss; syscall (Yield) with TF): label 3, 0x1/0x0 at ip 0x4005dc, rsp 0x420fb8, rflags 0x302
+redteam: movss: probe 1 (mov ss; int3 with TF): label 3, 0x3/0x0 at ip 0x4005f2, rsp 0x420fb8, rflags 0x302
+redteam: movss: probe 2 (mov ss; int 0x80 with TF): label 3, 0xd/0x402 at ip 0x400606, rsp 0x420fb8, rflags 0x10302
+redteam: movss: probe 3 (mov ss; int1 (ICEBP) with TF): label 3, 0x1/0x0 at ip 0x40061d, rsp 0x420fb8, rflags 0x302
+redteam: movss: probe 4 (mov ss; ud2 with TF): label 3, 0x6/0x0 at ip 0x400631, rsp 0x420fb8, rflags 0x10302
+```
+
+- Probe 1's `0x3` is the deferred step: the `#BP` reached the thread, so the
+  `#DB` that fired on the `#BP` stub's first instruction in ring 0 was
+  returned from, as the fix does. Before the fix this panicked.
+- Probe 2's `#GP` (error `0x402`, the IDT entry for vector 0x80) dropped the
+  pending step, as reviewer K argued.
+- Probe 3's single `#DB` from ring 3 shows `int1` folds the pending step into
+  its own `#DB`; no second `#DB` reached the `#DB` stub on IST4.

@@ -125,7 +125,7 @@ how M3 or M5 checked it.
 | H8 | PAT index = 4·PAT + 2·PCD + PWT; the PAT bit is bit 7 of a 4 KiB PTE and bit 12 of a 2 MiB PDE. Type encodings: UC `00h`, WC `01h`, WT `04h`, WB `06h`, UC- `07h`. A page mapped UC or WC must not also be mapped WB (SDM vol. 3, 11.12.4). | Checked in M3 against seL4's entry layouts (`structures.bf`) and `init_pat_msr`, and pinned by host tests in `l4core::vspace`; the aliasing rule is from memory |
 | H9 | `sysretq` with a non-canonical RCX raises #GP in ring 0 on Intel CPUs, after the kernel has restored the user's RSP. | Not checked: `l4core::entry::exit_frame` never lets `sysretq` see such an RCX. `test=ring3` makes a `syscall` that returns to 2^47, and the kernel leaves by `iretq` to RIP 0 ([Exit](#exit)). From memory |
 | H10 | An MTRR type of UC with a PAT type of WB gives UC; a PAT type of WC gives WC whatever the MTRR. Fixed-range MTRRs make the legacy hole at `0xA0000` UC. | M8, when the framebuffer is first mapped WC; M3 maps no page whose type depends on it |
-| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | Checked in M5 on QEMU for `sgdt`: under `-cpu max`, which has UMIP, `test=ring3` runs `sgdt` in ring 3 and takes #GP with error 0. The other four are from memory. M3 sets CR4.UMIP when CPUID reports it; on Hyper-V, open until the M5 Hyper-V check boots `test=ring3` |
+| H11 | UMIP makes `sgdt`, `sidt`, `sldt`, `smsw` and `str` raise #GP at CPL 3. | Checked in M5 on QEMU for `sgdt`: under `-cpu max`, which has UMIP, `test=ring3` runs `sgdt` in ring 3 and takes #GP with error 0. The other four are from memory. M3 sets CR4.UMIP when CPUID reports it. Checked on Hyper-V at the M5 Hyper-V check (2026-11-22): `cpu: features` lists UMIP and `test=ring3` step 22 takes #GP with error 0 for `sgdt` in ring 3 |
 | H12 | CPUID: leaf 1 EDX bit 13 PGE, bit 16 PAT; leaf `0x8000_0001` EDX bit 20 NX; leaf 7.0 EBX bit 7 SMEP, bit 20 SMAP; leaf 7.0 ECX bit 2 UMIP. | Checked in M3: `l4core::cpu` reads these bits, and the boots agree with H1 (`qemu64` lacks exactly SMEP, SMAP and XSAVE in `cpu_refuse`; `-cpu max,la57=off` has all seven in `hello`) |
 | H13 | The CPU may fill TLB and paging-structure-cache entries at any time, in any ring, from any present entry reachable from CR3, including for speculative accesses that never retire (SDM vol. 3, 4.10.2.3). So a flush must follow the entry write it covers, never precede it. | As H5; `Flush` is returned by the operation that wrote the entry, so the order holds by construction |
 | H14 | CPUID leaf 7.0 EDX bit 29 says `IA32_ARCH_CAPABILITIES` (MSR `0x10A`) exists; its bit 0, `RDCL_NO`, says the CPU is not open to Meltdown (rogue data cache load). | Checked in M3: TCG's `-cpu max` does not report the MSR, so QEMU boots print `unknown`; the owner's Hyper-V host reports it with `RDCL_NO` set, `cpu: meltdown: not vulnerable` |
@@ -1289,7 +1289,7 @@ the one to RIP 0 included, whose fetch faults in ring 3).
 
 | Vector | Stack | From ring 3 | From ring 0 |
 | --- | --- | --- | --- |
-| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults); QEMU 8.2's TCG raises #UD for `int1` in ring 0, so M10 brief 5 rechecks `int1` from ring 3) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there) or the first instruction of the #BP stub (`mov ss` with TF set, then `int3`; below), `iretq` at once with the saved state unchanged (`l4core::entry::single_step_into_syscall_entry`, `single_step_into_breakpoint_stub`, `entry::return_to_kernel`); otherwise panic, on the #DB stub's own first instruction too. QEMU takes no trap at either: `test=ring3` runs a `syscall` with TF set, counts no ring-0 #DB, and takes the single step in ring 3 at the return address, and `test=redteam-movss` sees every `mov ss` probe's single step in ring 3. On Hyper-V, open until the M5 Hyper-V check boots `test=ring3` and `test=redteam-movss` |
+| 1, #DB | IST4 | `swapgs`, save the frame into the TCB, continue on the kernel stack; UserException 1 (`int1`, TF; [Faults](#faults); QEMU 8.2's TCG raises #UD for `int1` in ring 0, so M10 brief 5 rechecks `int1` from ring 3) | if the saved RIP is exactly `syscall_entry` (a `syscall` executed with TF set, if the CPU traps there) or the first instruction of the #BP stub (`mov ss` with TF set, then `int3`; below), `iretq` at once with the saved state unchanged (`l4core::entry::single_step_into_syscall_entry`, `single_step_into_breakpoint_stub`, `entry::return_to_kernel`); otherwise panic, on the #DB stub's own first instruction too. QEMU takes no trap at either: `test=ring3` runs a `syscall` with TF set, counts no ring-0 #DB, and takes the single step in ring 3 at the return address, and `test=redteam-movss` sees every `mov ss` probe's single step in ring 3. On Hyper-V (the M5 Hyper-V check, 2026-11-22) a `syscall` with TF set still takes no ring-0 #DB (`test=ring3` step 12), but `mov ss; int3` with TF set does reach the #BP stub's first instruction, and the kernel returns from it (`test=redteam-movss` probe 1, `0x3/0x0`) |
 | 2, NMI | IST2 | panic | panic |
 | 8, #DF | IST1 | panic | panic |
 | 18, #MC | IST3 | panic | panic |
@@ -1328,9 +1328,12 @@ single step (Linux's `tools/testing/selftests/x86/mov_ss_trap.c` notes); and
 `mov ss; int1` raises a #DB from ring 3 into which, by the SDM's description of
 pending debug exceptions, the CPU folds the pending single step. A second #DB
 on the #DB stub's first instruction would have been delivered on IST4 over the
-first one's frame, so the kernel must never return from it, and panics. Both
-are open until the M5 Hyper-V check boots `test=redteam-movss`, whose probes
-2 (`int 0x80`) and 3 (`int1`) would panic if they were wrong.
+first one's frame, so the kernel must never return from it, and panics. The M5
+Hyper-V check (2026-11-22) confirmed all three: `test=redteam-movss` probe 1
+(`int3`) read `0x3/0x0`, so Hyper-V defers the single step past `int3` into
+ring 0 and the kernel returned from it; probe 2 (`int 0x80`) read
+`0xd/0x402`, a #GP that dropped the step; probe 3 (`int1`) read `0x1/0x0`,
+one #DB from ring 3; and nothing panicked.
 
 ### Interrupts and exceptions taken in ring 0
 
@@ -2609,9 +2612,10 @@ difference. On QEMU the boot summary's CR0 `0x80010033` and CR4 `0x340ee8`
 show MP, NE, OSFXSR, OSXMMEXCPT and OSXSAVE set and EM, TS, AM, FSGSBASE and
 PKE clear. Of the bit meanings, M5 checked on QEMU that with CR0.NE an
 unmasked x87 exception raises #MF in ring 3 (`test=ring3`); that
-CR4.OSXMMEXCPT makes an unmasked SIMD exception raise #XM is open until the M5
-Hyper-V check boots `test=ring3`, since QEMU's TCG raises no SIMD exception
-([FP exceptions](#fp-exceptions)). The rest are from memory. The M3 feature
+CR4.OSXMMEXCPT makes an unmasked SIMD exception raise #XM was checked at the
+M5 Hyper-V check, since QEMU's TCG raises no SIMD exception: `test=ring3`
+step 9 takes #XM for a `divsd` by zero with ZM clear ([FP
+exceptions](#fp-exceptions)). The rest are from memory. The M3 feature
 check already requires CPUID.1:ECX.XSAVE (bit 26) ([CPU
 features](#cpu-features)). M5 checks that CPUID.(EAX=0xD, ECX=0).EAX has bits
 0 and 1 before XSETBV (as seL4's `Arch_initFpu` checks its feature mask),
@@ -2674,7 +2678,9 @@ carries a pending, unmasked x87 divide by zero (FCW `0x37b`, FSW `0xb8a4`)
 across XSAVE64 and XRSTOR64 with nothing raised in ring 0, and the thread
 takes #MF at its next `fwait`. QEMU's TCG raises no SIMD exception: a
 `divsd` by zero with ZM clear sets ZE in MXCSR and nothing traps, so the #XM
-path is open until the M5 Hyper-V check boots `test=ring3`. No invocation
+path ran first at the M5 Hyper-V check: on Hyper-V `test=ring3` step 9 takes
+#XM (vector 19) as UserException 19, and step 10 reads MXCSR `0x1d84` with ZE
+set. No invocation
 exposes FP state, so a handler cannot read FSW or MXCSR ([Open
 questions](#open-questions)).
 
@@ -4150,8 +4156,8 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Are boot-created objects (root CNode, TCB, VSpace, BootInfo) covered by an untyped? | If they are, revoking that untyped destroys the root task; if not, their memory is never reclaimed | M4 (answered) | Answered in M4: as seL4, they come from the boot region, outside every untyped, and their capabilities are derivation roots. `check_untyped` and `test=bootinfo` check that no untyped covers the region, and `check_root_cnode` that every boot capability is an original at depth 0 with no links |
 | Are 448 untyped descriptors enough? | Boot panics if not | M4, from the recorded QEMU and Hyper-V memory maps (answered) | Answered in M4: yes, by several times on both targets. At every physical address width from 36 to 52 bits, QEMU's recorded map gives 106 to 148 untyped, 342 to 300 below 448, and Hyper-V's 73 to 115, 375 to 333 below ([Untyped](#untyped)). If a machine needs more, BootInfo grows to four pages as version 2 |
 | What if the framebuffer shares a 2 MiB page with RAM-like memory? | It could not be device untyped without aliasing the write-back direct map, so `fb` could not run | M4 (answered) | Answered in M4: no untyped covers it, `framebuffer_untyped` is empty, BootInfo's `framebuffer` still describes it, and the boot summary prints a `bootinfo: warning:` line with the reason (host test `framebuffer_sharing_a_2mib_page_with_ram`). Not seen: QEMU's framebuffer at 2 GiB gets 6 device untyped, and Hyper-V's at `0xF8000000` 2 on the recorded map |
-| Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5 on QEMU (answered); Hyper-V (open) | Answered on QEMU in M5: no. `test=ring3` runs a `syscall` with TF set and counts no ring-0 #DB; `sysretq` restores TF, and the thread traps at the return address before its next instruction runs. The RIP special case stays as insurance. Open on Hyper-V until the M5 Hyper-V check boots `test=ring3`. The same question for `mov ss` with TF set, then `int3`, `int n` or `int1`, is open until it boots `test=redteam-movss` ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)) |
-| Does an unmasked SIMD exception raise #XM with CR4.OSXMMEXCPT set? | QEMU's TCG raises no SIMD exception, so the #XM path, UserException 19, has not run | M5 Hyper-V check (open) | Open until the M5 Hyper-V check boots `test=ring3`, whose step 9 expects #XM; on QEMU a `divsd` by zero with ZM clear only sets ZE ([FP exceptions](#fp-exceptions)) |
+| Does a `syscall` executed with RFLAGS.TF set raise `#DB` on the first kernel instruction? | Any thread can set TF; the `#DB` handler returns only when RIP is exactly `syscall_entry`, and a trap anywhere else in ring 0 panics | M5 on QEMU and Hyper-V (answered) | Answered in M5: no, on QEMU and on Hyper-V. `test=ring3` runs a `syscall` with TF set and counts no ring-0 #DB; `sysretq` restores TF, and the thread traps at the return address before its next instruction runs. The RIP special case stays as insurance. At the M5 Hyper-V check `test=ring3` step 12 counted 0 as well. For `mov ss` with TF set the answer differs: Hyper-V defers the step past `int3` into ring 0 (`test=redteam-movss` probe 1, `0x3/0x0`), which the kernel now returns from; `int n` drops it and `int1` folds it into one ring-3 #DB ([NMI, double fault, machine check and debug](#nmi-double-fault-machine-check-and-debug)) |
+| Does an unmasked SIMD exception raise #XM with CR4.OSXMMEXCPT set? | QEMU's TCG raises no SIMD exception, so the #XM path, UserException 19, had not run | M5 Hyper-V check (answered) | Answered at the M5 Hyper-V check (2026-11-22): yes. `test=ring3` step 9 takes #XM, vector 19, for a `divsd` by zero with ZM clear, and step 10 reads MXCSR `0x1d84` with ZE set; on QEMU the same `divsd` only sets ZE ([FP exceptions](#fp-exceptions)) |
 | Is `swapgs` worth keeping on one core? | seL4's uniprocessor build avoids it and a class of mistakes with it | M5 (answered) | Answered in M5: kept, for the multi-core stretch goal. `swapgs` runs once per entry from ring 3 and once per exit, the IST handlers never read GS, and `test=ring3` checks `IA32_GS_BASE` at every entry from ring 3 |
 | Which register is a cancelled thread's restart point? | Cancelled threads become `Restart` and re-execute `syscall`; IPC relies on their argument registers being untouched | M5 (answered) | Answered in M5: `fault_ip`, the saved user `rcx` minus 2, the length of `syscall` (`l4core::entry::save`); `tcb::activate` sets `next_ip` to it when a `Restart` thread next runs. IPC writes a blocked thread's registers only on completion (host tests in `core/src/ipc/tests.rs`) |
 | In what order are each invocation's errors checked? | The M10 fuzzer's model needs it | M5 (answered) | Answered in M5: the order `docs/abi.md` lists them in, with the label first; the TCB invocations that install capabilities check seL4's order (buffer, long-running delete, CSpace root, VSpace root) before any slot changes. The other choices the ABI leaves open are in [Invocations](#invocations); host tests check every error row of the TCB and paging invocations in order |
