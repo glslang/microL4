@@ -1,0 +1,19 @@
+# Review test for M7's failure path (user/root/src/release_fault.rs;
+# docs/design.md, "Failures"): on the kernel built without features, the
+# root task revokes its COM1 IOPort, deleting uart's copy, while it waits
+# in console's Write and console in uart's. uart's port access fails, its
+# panic message's DebugPutChar raises UnknownSyscall, the kernel sends the
+# fault to endpoint F, and watch writes TEST FAIL through Polled on the
+# root task's COM1 IOPort and ends the run through isa-debug-exit with
+# failure. Nothing else reports it: the kernel prints nothing.
+kernel: release
+cmdline: test=release_fault
+exit: failure
+expect: loader: microL4 loader
+expect: release_fault: revoking the COM1 IOPort, which deletes uart's copy
+expect: TEST FAIL: uart fault 2 (UnknownSyscall), MR0 to MR3
+forbid: console answered after uart lost its IOPort
+forbid: watch did not end the run
+forbid: microL4 kernel
+forbid: DEBUG HALT
+forbid: KERNEL PANIC
