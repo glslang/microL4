@@ -11,12 +11,15 @@
 //! every reply checked against its request ([`root::check::pingpong`]):
 //! one-word messages first, the done-when's, then zero-length and
 //! full-length (120-word) ones, whose MR4 to MR119 the kernel copies
-//! between the two buffers both ways. Neither thread does anything else,
-//! so each `Call` switches straight to S and each `ReplyRecv` straight
-//! back. Each run prints its total and mean cycles, and the fastest and
-//! median round trip, with nanoseconds from BootInfo's `tsc_hz`. Under TCG
-//! the numbers show trends, not real performance, and the TSC follows host
-//! time, so a busy host inflates the mean more than the median.
+//! between the two buffers both ways: S checks every word of each request
+//! and answers each plus one, and the root task checks every word of each
+//! reply and adds one for its next request. Neither thread does anything
+//! else, so each `Call` switches straight to S and each `ReplyRecv`
+//! straight back. Each run prints how many round trips it checked, its
+//! total and mean cycles, and the fastest and median round trip, with
+//! nanoseconds from BootInfo's `tsc_hz`. Under TCG the numbers show
+//! trends, not real performance, and the TSC follows host time, so a busy
+//! host inflates the mean more than the median.
 
 use core::fmt;
 
@@ -26,7 +29,7 @@ use libsys::{
     BootInfo, CPtr, Ipc, Message, ObjectAlloc, ObjectType, Rights, call, println, rdtsc, recv,
     reply_recv,
 };
-use root::check::pingpong::{self as pp, LAST, Shape};
+use root::check::pingpong::{self as pp, FIRST_BUFFER_MR, LAST, Shape};
 
 use crate::fail;
 use crate::spawn::{self, STACKS, Space, Thread};
@@ -88,14 +91,20 @@ pub fn run(bi: &BootInfo) -> ! {
         buffer.addr
     );
 
-    // MR4 to MR118 of the full-length runs: S echoes them.
-    for i in 4..LAST {
-        ipc.set_mr(i, pp::pattern(i));
-    }
     let mut samples = [0; ROUND_TRIPS as usize];
     for shape in Shape::ALL {
+        if shape == Shape::Full {
+            // MR4 to MR119 of request 0; each checked reply makes the next.
+            for k in FIRST_BUFFER_MR..=LAST {
+                ipc.set_mr(k, pp::word(k, pp::request_number(0)));
+            }
+        }
+        // Round trips whose reply passed its check: a failed check ends
+        // the test.
+        let mut checked = 0u64;
         for i in 0..WARM_UP {
             round_trip(ipc, badged, shape, i);
+            checked += 1;
         }
         // One rdtsc between two round trips: each sample is one round
         // trip, and their sum the whole run.
@@ -105,13 +114,14 @@ pub fn run(bi: &BootInfo) -> ! {
             let now = rdtsc();
             *sample = now.wrapping_sub(last);
             last = now;
+            checked += 1;
         }
         let t = pp::Timing::of(&mut samples);
         let hz = bi.tsc_hz;
         println!(
-            "pingpong: {} round trips of {}-word messages, every reply checked: {} TSC cycles in all; per round trip {} on average, fastest {}, median {}",
-            t.trips,
+            "pingpong: {checked} round trips of {}-word messages, every reply checked, the last {} timed: {} TSC cycles in all; per round trip {} on average, fastest {}, median {}",
             shape.words(),
+            t.trips,
             t.total,
             Cycles(t.mean, hz),
             Cycles(t.fastest, hz),
@@ -122,14 +132,9 @@ pub fn run(bi: &BootInfo) -> ! {
         0 => println!("pingpong: BootInfo has no TSC rate, so no times in nanoseconds"),
         hz => println!("pingpong: nanoseconds at BootInfo's TSC rate, {hz} Hz"),
     }
-    if let Some(i) = (4..LAST).find(|&i| ipc.mr(i) != pp::pattern(i)) {
-        fail!(
-            "pingpong: after the full-length runs MR{i} is {:#x}, not {:#x}",
-            ipc.mr(i),
-            pp::pattern(i)
-        );
-    }
-    println!("pingpong: MR4 to MR118 came back unchanged from every full-length round trip");
+    println!(
+        "pingpong: every full-length round trip carried MR4 to MR119 both ways: S checked each word it received and answered it plus one, and the root task checked each word of the reply"
+    );
     println!("TEST PASS");
     libsys::debug_halt(0)
 }
@@ -148,19 +153,20 @@ impl fmt::Display for Cycles {
     }
 }
 
-/// Round trip `i` of `shape` through `ep`, its reply checked.
+/// Round trip `i` of `shape` through `ep`, its reply checked: for a
+/// full-length one every buffer word, which then makes request `i + 1`.
 fn round_trip(ipc: Ipc, ep: CPtr, shape: Shape, i: u64) {
-    let full = shape == Shape::Full;
-    if full {
-        ipc.set_mr(LAST, pp::last_word(i));
-    }
     let reply = call(ep, &pp::request(shape, i));
-    let last = if full { ipc.mr(LAST) } else { 0 };
-    if let Err(m) = pp::check_reply(shape, i, &reply, last) {
+    if let Err(m) = pp::check_reply(shape, i, &reply) {
         fail!(
             "pingpong: round trip {i} of {}-word messages: {m}",
             shape.words()
         );
+    }
+    if shape == Shape::Full
+        && let Err(m) = pp::advance(pp::reply_number(i), |k| ipc.mr(k), |k, v| ipc.set_mr(k, v))
+    {
+        fail!("pingpong: round trip {i} of 120-word messages: the reply's {m}");
     }
 }
 
@@ -175,17 +181,20 @@ extern "C" fn server(ep: CPtr, buffer: u64, _: u64, _: u64) -> ! {
                 r.badge
             );
         }
-        let full = r.msg.info.length() as usize > LAST;
-        let last = if full { ipc.mr(LAST) } else { 0 };
-        let answer: Message = match pp::answer(&r.msg, last) {
-            Ok((answer, last)) => {
-                if full {
-                    ipc.set_mr(LAST, last);
-                }
-                answer
-            }
+        let answer: Message = match pp::answer(&r.msg) {
+            Ok(answer) => answer,
             Err(m) => fail!("pingpong: server: {m}"),
         };
+        // Every word of a full-length request, each answered plus one.
+        if let Ok((Shape::Full, i)) = pp::parse_request(&r.msg)
+            && let Err(m) = pp::advance(
+                pp::request_number(i),
+                |k| ipc.mr(k),
+                |k, v| ipc.set_mr(k, v),
+            )
+        {
+            fail!("pingpong: server: request {i}'s {m}");
+        }
         r = reply_recv(ep, &answer);
     }
 }

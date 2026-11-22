@@ -7,11 +7,13 @@
 # answers every request with ReplyRecv, checking the badge each time.
 # Each run is 16 warm-up round trips, then 1,000 with an rdtsc between
 # each two, every reply checked: the label's counter and MR0 come back
-# plus one, and in the full-length run MR119 too, through both IPC
-# buffers. One-word messages first, the done-when's, then zero-length and
-# 120-word ones; the root task prints the total cycles and, per round
-# trip, the mean, the fastest and the median, with nanoseconds from
-# BootInfo's tsc_hz. Under TCG the numbers show trends, not performance,
+# plus one. In the full-length run MR4 to MR119 travel through both IPC
+# buffers: S checks every word of each request and answers each plus one,
+# and the root task checks every word of each reply. One-word messages
+# first, the done-when's, then zero-length and 120-word ones; the root
+# task prints how many round trips it checked, the total cycles of the
+# timed ones and, per round trip, the mean, the fastest and the median,
+# with nanoseconds from BootInfo's tsc_hz. Under TCG the numbers show trends, not performance,
 # and the TSC follows host time: a busy host inflates the mean most.
 cmdline: test=pingpong
 exit: success
@@ -22,13 +24,13 @@ expect: root: cmdline "test=pingpong"
 expect: pingpong: server S (TCB slot
 expect: priority 200, IPC buffer at
 expect: badge 0x9090
-expect: pingpong: 1000 round trips of 1-word messages, every reply checked:
+expect: pingpong: 1016 round trips of 1-word messages, every reply checked, the last 1000 timed:
 expect: TSC cycles in all; per round trip
-expect: pingpong: 1000 round trips of 0-word messages, every reply checked:
+expect: pingpong: 1016 round trips of 0-word messages, every reply checked, the last 1000 timed:
 expect: TSC cycles in all; per round trip
-expect: pingpong: 1000 round trips of 120-word messages, every reply checked:
+expect: pingpong: 1016 round trips of 120-word messages, every reply checked, the last 1000 timed:
 expect: TSC cycles in all; per round trip
 expect: pingpong: nanoseconds at BootInfo's TSC rate
-expect: pingpong: MR4 to MR118 came back unchanged from every full-length round trip
+expect: pingpong: every full-length round trip carried MR4 to MR119 both ways: S checked each word it received and answered it plus one, and the root task checked each word of the reply
 expect: TEST PASS
 expect: DEBUG HALT 0 from TCB
