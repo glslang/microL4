@@ -9,6 +9,9 @@
 //! overwrite another client's or console's status line
 //! (`docs/redteam/m7-console-escapes.md`). M8's raw mode (label `0x125`,
 //! reserved until then) is where a client's bytes would pass as they are.
+//! console's own status lines are in reverse video ([`STATUS_ON`]), which
+//! a client, unable to send ESC, cannot produce: a client's text that
+//! reads like one shows as plain text.
 
 use libsys::proto::MAX_BYTES;
 
@@ -33,6 +36,14 @@ const CTRL_U: u8 = 0x15;
 const ESC: u8 = 0x1B;
 const DEL: u8 = 0x7F;
 const RUBOUT: &[u8] = b"\x08 \x08";
+
+/// What starts console's own status line: reverse video (SGR 7), which
+/// every VT100-compatible terminal shows. A client's ESC reaches the
+/// terminal as `^[`, so no client can start it, and a client's text that
+/// reads like a status line is plain.
+pub const STATUS_ON: &[u8] = b"\x1b[7m";
+/// What ends it, before its `\r\n`: every attribute off (SGR 0).
+pub const STATUS_OFF: &[u8] = b"\x1b[0m";
 
 /// Whether a client's byte reaches the terminal as it is: printable ASCII
 /// and tab, which moves the cursor only forward along its line.
@@ -446,11 +457,13 @@ impl Terminal {
         None
     }
 
-    /// Ctrl-T and a digit: focus on client `n`, with a status line.
+    /// Ctrl-T and a digit: focus on client `n`, with a status line in
+    /// reverse video.
     fn focus_on(&mut self, n: usize, out: &mut impl Out) {
         if self.owner != Owner::None {
             out.put(Source::Console, b"\r\n");
         }
+        out.put(Source::Console, STATUS_ON);
         out.put(Source::Console, b"[console] focus ");
         out.put(Source::Console, &[b'1' + n as u8]);
         out.put(Source::Console, b" (");
@@ -461,7 +474,9 @@ impl Terminal {
             out.put(Source::Console, b"client ");
             out.put(Source::Console, &[b'1' + n as u8]);
         }
-        out.put(Source::Console, b")\r\n");
+        out.put(Source::Console, b")");
+        out.put(Source::Console, STATUS_OFF);
+        out.put(Source::Console, b"\r\n");
         self.owner = Owner::None;
         self.focus = n;
         self.restore(out);

@@ -98,6 +98,13 @@ M7 fix round, in `user/console/src/terminal.rs`:
   own, and fails any client or prompt byte that reaches the terminal as a
   control byte but tab and the line's CR LF.
 - `docs/design.md` ("Output" and the console invariants) states the rule.
-- Not done: a distinct mark on status lines. A client can still print a
-  line that reads like `[console] focus 1 (root)`, but only on a line of
-  its own, below the real status line, which it can no longer erase.
+- Done in M7 fix round 2: a distinct mark on status lines. console puts
+  its own in reverse video (`ESC [7m` before, `ESC [0m` after:
+  `console::STATUS_ON` and `STATUS_OFF`), which a client, whose ESC shows
+  as `^[`, cannot ask for. A client can still print a line that reads like
+  `[console] focus 1 (root)`, but only on a line of its own, below the real
+  status line, which it can no longer erase, and in plain text. The screen
+  model now keeps reverse video, and the guarantee test
+  (`a_client_cannot_rewrite_console_s_status_line`) has the client print
+  two look-alikes, one plain and one with its own SGR 7 escapes, and finds
+  that only console's status line is in reverse video.
