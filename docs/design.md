@@ -29,7 +29,7 @@ source (`manual/parts/*.tex`) and kernel files in
 | [Memory and retype](#memory-and-retype) | Memory | M2, M4 |
 | [Capability addressing](#capability-addressing) | Capability addressing | M2, M4 |
 | [Derivation tracking](#derivation-tracking) | Derivation tracking | M2, M4 |
-| [Threads and TCBs](#threads-and-tcbs) | (TCB) | M5 |
+| [Threads and TCBs](#threads-and-tcbs) | (TCB) | M5, M6 |
 | [Scheduling](#scheduling) | Scheduling | M3, M5 |
 | [FP and SIMD](#fp-and-simd) | FP and SIMD | M5 |
 | [Faults](#faults) | (faults) | M5, M6 |
@@ -83,7 +83,7 @@ The kernel never blocks and has no kernel threads.
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | Kernel code runs with interrupts disabled, from entry to exit; only the idle thread's halt loop runs with `IF = 1` in ring 0 | `IA32_FMASK` clears IF; every IDT gate is an interrupt gate; no `sti` outside the idle loop (review, M10 brief 5); `test=ring3` reads RFLAGS at every entry from ring 3 and requires IF clear | M3, M5 |
-| Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; from M5 an invocation cut short leaves its caller `Restart` (`l4core::syscall`), and the paging loops touch at most 512 entries with no preemption point ([Deletion](#deletion)); M10 brief 6 | M2, M4, M5, M6, M10 |
+| Every kernel operation whose length a ring-3 task can grow has a preemption point, except the IPC queue-cancel loops, which are bounded by the number of TCBs the task could retype ([IPC](#ipc)) | `core/` loops call the kernel's `preempt` hook after each unit of work; from M5 an invocation cut short leaves its caller `Restart` (`l4core::syscall`), and the paging loops touch at most 512 entries with no preemption point ([Deletion](#deletion)); the queue-cancel loops, `ipc::cancel_all_ipc` (M5), `ipc::cancel_badged_sends` and `ipc::cancel_all_signals` (M6), take one O(1) step per queued thread ([Deletion and cancellation](#deletion-and-cancellation)); M10 briefs 6 and 9 | M2, M4, M5, M6, M10 |
 | A system call restarted after a preemption point continues its work and never repeats a completed step. Two exceptions, both as in seL4: a partial revoke, whose work destroyed a CNode on the lookup path that named its slot (a Delete can do this only through a path that runs through its own slot), so its restart fails the lookup and leaves the rest undone, with an outcome that depends on where preemption fell; and a Delete or Revoke that finalises the caller's own TCB, which is never restarted ([Slot operations](#slot-operations)) | progress lives in the objects (untyped watermark, Zombie capabilities, the derivation list itself); proptest with preemption injected at random, restarting Delete and Revoke by looking their slots up again, and requiring a revoke cut short to stop exactly where the unpreempted revoke passed one of its preemption points, in memory and in the hook calls made so far | M2, M4 |
 | The kernel allocates no memory after boot | the kernel links no allocator; every object comes from `Untyped_Retype` | M4 |
 | The kernel never dereferences a user virtual address | user memory is reached only through frames, via the direct map: an IPC buffer word through `l4core::tcb::buffer_word`, which gives the physical address in the frame of the TCB's buffer slot, and `arch::Objects`' buffer accessors; the root image through `Objects::copy_into_frame` (boot step 8); SMAP on (M3); no `stac` anywhere (CI grep over `kernel/`) | M3, M5 |
@@ -935,9 +935,13 @@ The kernel gives the root task no stack. As in seL4, root's `_start` in
 `user/link.ld` makes a segment of its own one page above the segment below
 it. No segment covers that page, so nothing maps it, and a stack overflow
 faults instead of overwriting what lies below. Between `.bss` and it lie the
-root task's two 16 KiB thread stacks (`.thread_stack.0` and `.1`,
-`user/root/src/spawn.rs`), each a segment above a guard page in the same way.
-The image ends at the top of the libsys stack.
+root task's six 16 KiB thread stacks (`.thread_stack.0` to `.5`,
+`user/root/src/spawn.rs`), each a segment above a guard page in the same
+way. M6 raised them from two to six: `test=ipcntfn` runs five threads
+besides the root task. The image ends at the top of the libsys stack. With
+M6's tests it spans `0x40_0000` to `0x46_0000`, 96 pages, of which the seven
+guard pages get no frame, so boot maps 89 image frames (the boot summary of
+`test=root`).
 
 ### Initial CSpace and BootInfo
 
@@ -1356,7 +1360,7 @@ the system call or none; none raises an `UnknownSyscall` fault
 
 | System call | Kernel action |
 | --- | --- |
-| `Call`, `Send`, `NBSend` | look up `rdi` (up to 64 bits, stopping at the first slot that is not a CNode), then, if the caller has a readable IPC buffer, the `extra_caps` pointers in `caps_or_badges`, and dispatch on the type of the capability `rdi` names: Endpoint, Notification, Reply ([IPC](#ipc), [Notifications](#notifications)); any other object decodes `label` within its type's range ([Invocation label index](abi.md#invocation-label-index)), else `IllegalOperation`, with MR0 to MR3 from the registers and MR4 and up from the IPC buffer. `Call` gets the result or error as a kernel reply; `Send` and `NBSend` drop it. Until M6 a Notification capability is a kernel object without invocations ([Decoding a system call](#decoding-a-system-call)) |
+| `Call`, `Send`, `NBSend` | look up `rdi` (up to 64 bits, stopping at the first slot that is not a CNode), then, if the caller has a readable IPC buffer, the `extra_caps` pointers in `caps_or_badges`, and dispatch on the type of the capability `rdi` names: Endpoint, Notification, Reply ([IPC](#ipc), [Notifications](#notifications)); any other object decodes `label` within its type's range ([Invocation label index](abi.md#invocation-label-index)), else `IllegalOperation`, with MR0 to MR3 from the registers and MR4 and up from the IPC buffer. `Call` gets the result or error as a kernel reply; `Send` and `NBSend` drop it ([Decoding a system call](#decoding-a-system-call)) |
 | `Recv`, `NBRecv` | Endpoint or Notification receive ([Receive phase](#receive-phase), [Wait and poll](#wait-and-poll)) |
 | `Reply` | the caller slot's reply capability ([Reply capabilities](#reply-capabilities)) |
 | `ReplyRecv` | `Reply`, then `Recv` on `rdi` |
@@ -1417,24 +1421,40 @@ chooses:
 
 - An empty or Zombie invoked slot is `InvalidCapability` 0, whatever the
   label.
-- The label comes before `TruncatedMessage`. `CNode_CancelBadgedSends` and
-  `CNode_SaveCaller` are `IllegalOperation` until M6, before any length check
-  or lookup.
+- The label comes before `TruncatedMessage`. A reserved label is
+  `IllegalOperation` at once, before any length check or lookup.
 - `Untyped_Retype` checks `type` and `size_bits` (`untyped::check_object`)
   before the destination lookup. With `node_depth` 0, a `root` that is not a
   CNode is `FailedLookup` `InvalidRoot`.
 - In Copy, Mint, Move and Mutate the source's `depth` is checked as part of
   the source lookup, after the destination's `DeleteFirst`.
 - Rotate looks up the destination, then the source, then the pivot.
+- `CNode_CancelBadgedSends` (M6) looks up its slot, then needs an Endpoint
+  capability with all four rights (`IllegalOperation`), and only then does
+  nothing for badge 0: seL4 checks `hasCancelSendRights` before
+  `invokeCNodeCancelBadgedSends` looks at the badge.
+- `CNode_SaveCaller` (M6) looks up its destination, then checks
+  `DeleteFirst`, then the caller slot ([Reply
+  capabilities](#reply-capabilities)). With no invoking thread, a
+  self-test's invocation, it has nothing to save and is `IllegalOperation`.
+- Neither M6 method is preemptible, as in seL4: one moves one capability,
+  and the other's loop is bounded by the TCBs that exist ([Deletion and
+  cancellation](#deletion-and-cancellation)).
 
 Each is seL4's order except the `node_depth` 0 case
-([Memory and retype](#memory-and-retype), Compared with seL4); seL4 decodes
-the two M6 methods.
+([Memory and retype](#memory-and-retype), Compared with seL4).
 
 From M5 `invoke` takes a TCB capability to `l4core::tcb::invoke` and a Frame,
 PDPT, PageDirectory or PageTable capability to `l4core::vspace::invoke`, and
 needs `K: Kernel + PagingStore + Threads`; a Reply's `length` counts the
-result words, MR0 and up.
+result words, MR0 and up. From M6 the CNode methods use `Threads` too:
+`CNode_SaveCaller` takes the invoking thread from the scheduler's current
+thread, as seL4 takes `ksCurThread`, and `CNode_CancelBadgedSends` reaches
+IPC through the `Threads::cancel_badged_sends` hook, because `invoke` is
+generic over `Threads`, not `IpcEnv` ([`core/` and
+`arch/`](#core-and-arch-2)). Host tests in `core/src/invoke/ipc_tests.rs`
+check both methods' effects, every error row in order, and that a failed
+call changes nothing.
 
 Before M5 nothing ran in ring 3, so only a self-test called `invoke`, and it
 restarted a preempted call as a thread does. The preemption point polls the
@@ -1455,10 +1475,10 @@ a hook, the idle path ends in `thread::exit_to_scheduled`.
 | Syscall MSRs (`init`), `syscall_entry`, `compat_entry`, `exit_sysret`, `exit_iret`, the ring-0 #DB return at `syscall_entry` and the #BP stub; the seams `user_syscall`, `user_exception`, `user_interrupt`; `exit_to_user`, `load_user_bases`, `save_user_bases` | `arch/x86_64/entry.rs`; `trap_from_user` in `trap.rs` hands ring-3 traps to it | M5 |
 | The end of every entry: `exit_to_scheduled`, the thread switch, idling on the kernel PML4 | `arch/x86_64/thread.rs` | M5 |
 | `Syscall::from_number`; `STAR`, `FMASK`, the RFLAGS masks, `classify`, `save`, `exit_frame`, `single_step_into_syscall_entry`, `single_step_into_breakpoint_stub` | `l4core::abi`, `l4core::entry`; host tests at `2^47 - 1`, `2^47`, `2^64 - 2^47`, and proptest over all `u64` | M5 |
-| Dispatch: `handle_syscall`, `handle_exception`, `Outcome`, `invoked_by_call` | `l4core::syscall`; host tests of every system call over fake memory | M5 |
+| Dispatch: `handle_syscall`, `handle_exception`, `Outcome`, `invoked_by_call`; from M6 signals, waits and polls on notifications | `l4core::syscall`; host tests of every system call over fake memory | M5, M6 |
 | What only the kernel does with an `Outcome`: debug system calls, the report of a stopped thread, the count of preempted calls | `kernel/src/dispatch.rs` | M5 |
 | `test=ring3`: the paths between ring 3 and the kernel, before any real thread exists, in 24 steps through a hook that takes every entry from ring 3 | `arch/x86_64/ring3.rs` (`selftest` only) | M5 |
-| The Untyped and CNode decoder: `invoke`, `Message`, `ExtraCap`, `Reply`, `InvokeError`, the labels in `invoke::label` | `l4core::invoke`; host tests of every error row and of errors that occur together, the depth limit, retype, revoke and delete preempted at every point and restarted by decoding again, and proptest over random messages | M4 |
+| The Untyped and CNode decoder: `invoke`, `Message`, `ExtraCap`, `Reply`, `InvokeError`, the labels in `invoke::label`; from M6 `CNode_SaveCaller` and `CNode_CancelBadgedSends` | `l4core::invoke`; host tests of every error row and of errors that occur together, the depth limit, retype, revoke and delete preempted at every point and restarted by decoding again, and proptest over random messages; the M6 methods' tests in `core/src/invoke/ipc_tests.rs` | M4, M6 |
 | The resume hook on the idle path, after `irq::handle`, which restarts an M4 self-test's preempted call; without one, the idle path ends in the scheduler | `arch/x86_64/trap.rs` (`interrupt_from_idle`, `set_resume_hook`), `selftest` only | M4 |
 
 ### Invariants
@@ -1641,25 +1661,25 @@ static range for slot addresses.
 M4 left the hooks inert. From M5 they are live, and each arm not yet filled
 names its milestone:
 
-| Hook | Capability | What it does (M5) |
+| Hook | Capability | What it does (M5, M6) |
 | --- | --- | --- |
 | `init_object` | TCB | `tcb::init` (a full slice, RFLAGS `0x202`), `fpu::init_area` (the FP template; a zeroed MXCSR would unmask every SIMD exception), and in debug builds a place in the debug list |
 | `init_object` | PML4 | the kernel's half, entries 256 to 511 (`arch::paging::init_object`) |
-| `finalise` | TCB, last | `tcb::suspend` (IPC cancelled, off its ready queue, `Inactive`), `fpu::forget` and `thread::forget` (its FP and FS and GS base ownership dropped without saving), and off the debug list |
-| `finalise` | Endpoint, last; Reply | `ipc::finalise`: an endpoint's queue is released with `cancel_all_ipc`; a reply capability needs nothing |
+| `finalise` | TCB, last | `tcb::finalise`: its notification unbound (M6), then `tcb::suspend` (IPC cancelled, off its ready queue, `Inactive`); `fpu::forget` and `thread::forget` (its FP and FS and GS base ownership dropped without saving), and off the debug list |
+| `finalise` | Endpoint or Notification, last; Reply | `ipc::finalise`: an endpoint's queue is released with `cancel_all_ipc`; a notification is unbound, then its waiters are released with `cancel_all_signals` (M6); a reply capability needs nothing |
 | `finalise` | Frame, paging structure, PML4 | `arch::paging::finalise`: a mapped Frame or structure is unmapped, and a PML4's last capability empties its user half, loading the kernel PML4 first if CR3 holds it |
 | `moved` | Frame, paging structure | `arch::paging::moved`: a mapped capability's back-reference follows it |
 
 `finalise` returns no cleanup for any type before M7. For an Untyped,
 IRQControl, IOPortControl or Hypervisor capability, which `core/` passes with
-`last` set on every deletion, it never does anything. Notifications (M6),
-IRQHandlers and IOPorts (M7) keep inert arms, and `after_delete` does
-nothing before M7. `arch::Objects` also implements `Tcbs`, `Scheduling`,
-`Threads`, `IpcEnv` and `PagingStore`. The scheduler lives in a static that
-only `Objects` reaches, which is sound while kernel code uses one `Objects`
-at a time for scheduler calls. `preempt` reads the IRR; with `selftest` it
-also counts polls, times the stretches between them and can report a
-preemption with nothing pending, for the self-tests.
+`last` set on every deletion, it never does anything. IRQHandlers and
+IOPorts (M7) keep inert arms, and `after_delete` does nothing before M7.
+`arch::Objects` also implements `Tcbs`, `Scheduling`, `Threads`, `IpcEnv`
+and `PagingStore`. The scheduler lives in a static that only `Objects`
+reaches, which is sound while kernel code uses one `Objects` at a time for
+scheduler calls. `preempt` reads the IRR; with `selftest` it also counts
+polls, times the stretches between them and can report a preemption with
+nothing pending, for the self-tests.
 
 ### Deletion and finalisation
 
@@ -1675,7 +1695,7 @@ never names an empty slot.
 | --- | --- | --- |
 | Untyped, IRQControl, IOPortControl, Hypervisor | nothing | [Memory and retype](#memory-and-retype); [Interrupts](#interrupts), [I/O ports](#io-ports), [Hyper-V interface](#hyper-v-interface) |
 | CNode | becomes a Zombie; every slot is deleted, the highest first | this section |
-| TCB | suspended and unbound (off every queue, IPC cancelled, notification unbound), then its slots are deleted as a CNode's | [Suspend, Resume and deletion](#suspend-resume-and-deletion) |
+| TCB | unbound from its notification, then suspended (off every queue, IPC cancelled), then its slots are deleted as a CNode's | [Suspend, Resume and deletion](#suspend-resume-and-deletion) |
 | Endpoint | every queued thread is released and restarts its system call | [Deletion and cancellation](#deletion-and-cancellation) |
 | Notification | unbound from its TCB; every waiter released | [Notifications](#deletion-1) |
 | Reply | see [Reply capabilities](#reply-capabilities); a master is deleted only when its TCB is finalised | [IPC](#ipc) |
@@ -1743,9 +1763,9 @@ Hypervisor capabilities.
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | A capability never outlives its object: an object's memory is reused only when the untyped covering it is reset, which needs it to have no descendants, and every capability to an object in that region, except a reply capability (next row), is a descendant | `l4core` retype, insert and delete; proptest against `model/` with object liveness | M2 |
-| Reply capabilities, the one exception (a master is a derivation root), never outlive their TCB: TCB finalisation deletes the outstanding reply capability (suspend, `cancel_ipc`) and the Zombie deletes the master before the TCB's last capability's slot empties | the TCB `finalise` hook's `tcb::suspend`, which calls `ipc::cancel_ipc`; host tests `suspending_a_caller_deletes_the_reply_capability_to_it` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`; `test=fault`; from M6 proptest deleting TCBs blocked in `Call` | M2, M5 |
+| Reply capabilities, the one exception (a master is a derivation root), never outlive their TCB: TCB finalisation deletes the outstanding reply capability (suspend, `cancel_ipc`) and the Zombie deletes the master before the TCB's last capability's slot empties | the TCB `finalise` hook's `tcb::finalise`, whose `tcb::suspend` calls `ipc::cancel_ipc`; host tests `suspending_a_caller_deletes_the_reply_capability_to_it` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`; `test=fault`; from M6 the IPC model's proptest (`model/tests/ipc_random.rs`), which deletes TCBs whatever their state, a `Call` included, and its scenario `a_saved_reply_goes_when_its_caller_is_suspended_and_survives_its_holder` | M2, M5, M6 |
 | No kernel object lies at physical address 0 | `l4core::boot::page_class` makes no untyped below 1 MiB, which `check_untyped` checks in host tests and `test=bootinfo`; `core/` handles are `NonZeroU64` | M2, M4 |
-| No kernel reference (queue, binding, mapping) survives the last capability to its target | `finalise` hooks called by `core/` delete (M5: TCBs, Endpoints, Frames and paging structures, above); proptest counts finalisations; each subsystem's tests, M5's in `core/src/{tcb,ipc,syscall}/tests.rs` and the `vspace` proptest | M2, M5 to M7, M9 |
+| No kernel reference (queue, binding, mapping) survives the last capability to its target | `finalise` hooks called by `core/` delete (M5: TCBs, Endpoints, Frames and paging structures; M6: Notifications and TCB bindings, above); proptest counts finalisations; each subsystem's tests, M5's in `core/src/{tcb,ipc,syscall}/tests.rs` and the `vspace` proptest, M6's in `core/src/ipc/notification/tests.rs` (`deleting_a_notification_restarts_its_waiters_in_order_and_unbinds_it`, `deleting_a_bound_tcb_unbinds_its_notification`) and the IPC model's proptest, which deletes endpoints, notifications and TCBs | M2, M5 to M7, M9 |
 | A back-reference never names an empty slot | `finalise` runs before unlink and zeroing, and the paging `finalise` unmaps through the slot its capability still occupies; the `vspace` proptest with mapped capabilities ([Address spaces](#address-spaces)) | M2, M5 |
 | The last capability to an object is finalised exactly once, before its slot empties | `is_final` and the Zombie algorithm; proptest with random preemption | M2 |
 | Every TCB, Endpoint, Notification, CNode and paging structure lies in RAM inside the direct map, below 64 GiB | retype refuses kernel objects from device untyped; RAM untyped only below the direct map's end, `min(phys_map_size, 64 GiB)` (`page_class`, checked by `check_untyped` in host tests and `test=bootinfo`); in debug builds `arch::Objects` checks every slot and zeroed range against `ObjectMemory` | M2, M4 |
@@ -1754,7 +1774,7 @@ Hypervisor capabilities.
 | Destroying a CNode or TCB is preemptible, recurses at most two levels, and keeps every invariant at each step | Zombie algorithm; proptest with random preemption points over nested and cyclic containers, including deleting a slot inside the container its own deletion destroys | M2 |
 | No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; the TCB `finalise` hook suspends the thread before `core/` clears its slots; proptest | M2, M5 |
 | The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container; proptest | M2, M7 |
-| Every relocation of a capability to another slot calls `moved(cap, old_slot, new_slot)` before the next preemption point, so back-references stay exact | one `l4core::cdt` move and one swap function, used by Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; `arch::paging::moved` rewrites the back-reference; proptest over nested CNode deletion with a mapped capability in slot 0 of the nested CNode, rotates and swaps of mapped capabilities, and untyped revoke, at random preemption points (the `vspace` proptest from M5); host test `moves_rotates_and_swaps_rewrite_back_references`; red-team brief 4 | M2, M5, M6, M10 |
+| Every relocation of a capability to another slot calls `moved(cap, old_slot, new_slot)` before the next preemption point, so back-references stay exact | one `l4core::cdt` move and one swap function, used by Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; `arch::paging::moved` rewrites the back-reference; proptest over nested CNode deletion with a mapped capability in slot 0 of the nested CNode, rotates and swaps of mapped capabilities, and untyped revoke, at random preemption points (the `vspace` proptest from M5); host test `moves_rotates_and_swaps_rewrite_back_references`; `CNode_SaveCaller` moves with `cdt::move_slot` (M6; host test `save_caller_moves_the_reply_capability_below_its_callers_master`); red-team brief 4 | M2, M5, M6, M10 |
 
 ### Compared with seL4
 
@@ -2142,8 +2162,10 @@ proptest compares capabilities and parents after every step, including at
 random preemption points. M4: CNode invocations decoded by `l4core::invoke`,
 with `CNode_CancelBadgedSends` and `CNode_SaveCaller` `IllegalOperation`
 until M6. M5: reply masters and reply capabilities, the TCB installs. M6: IPC
-transfer, `CNode_SaveCaller` and `CNode_CancelBadgedSends`. M7: the
-IRQ-node install. M9: Hypervisor narrowing.
+transfer (`ipc::transfer`, which copies through `cnode::copy`),
+`CNode_SaveCaller` (`ipc::save_caller`, a `cdt::move_slot`) and
+`CNode_CancelBadgedSends` (`ipc::cancel_badged_sends`). M7: the IRQ-node
+install. M9: Hypervisor narrowing.
 
 ### Invariants
 
@@ -2151,14 +2173,14 @@ IRQ-node install. M9: Hypervisor narrowing.
 | --- | --- | --- |
 | Revoke deletes exactly the capabilities derived, directly or not, from the slot, unless it is a partial revoke ([Slot operations](#slot-operations)) | `low`-run walk; proptest against `model/`'s transitive parent map | M2 |
 | Deleting a capability changes no survivor's ancestry except that its children pass to its nearest surviving ancestor | `low` update in unlink; proptest | M2 |
-| Rights never grow, a badge is set once, only Mint sets a badge, and a Hypervisor Mint never widens | `derive`, Mint and Mutate rules; proptest; badge scenario (M6); `core::hyperv` host tests; red-team brief 1 | M2, M6, M9, M10 |
+| Rights never grow, a badge is set once, only Mint sets a badge, and a Hypervisor Mint never widens | `derive`, Mint and Mutate rules; proptest; from M6 IPC transfer copies with `cnode::copy` and every right of the source (host test `a_copy_of_a_copy_is_its_sibling_and_a_badged_original_keeps_its_badge`, the transfer proptest `random_sends_move_capabilities_where_the_model_says`), and `test=badge`, whose clients call through copies of the badged originals B1 and B2 with fewer rights and the original badges; `core::hyperv` host tests; red-team brief 1 | M2, M6, M9, M10 |
 | A PDPT, PageDirectory or PageTable capability is never derived, and a derived Frame capability is never mapped | `derive`, which gives an unmapped copy of a Frame; the `vspace` proptest copies mapped capabilities and checks every mapping record against its model; red-team brief 4 | M2, M5, M10 |
 | A plain copy never has children, so holding one gives no power over other copies | the `original` rule; proptest | M2 |
 | All capabilities to one object are adjacent, so `is_final` is exact | insertion next to the source; proptest compares `is_final` with `model/` | M2 |
 | The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step, through the decoder too (`random_messages_keep_every_slot_consistent`); debug asserts | M2, M4 |
-| No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless it is a partial revoke ([Slot operations](#slot-operations)) | single-step revoke with restart; red-team brief 2 | M2, M5, M6, M10 |
+| No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless it is a partial revoke ([Slot operations](#slot-operations)) | single-step revoke with restart; a capability received by IPC is a descendant of the sender's (host test `a_received_copy_is_a_descendant_that_revoke_reaches`; `test=captransfer`, where the client's revoke of its frame takes the server's copy and its mapping), and a revoke of a badged original before `CNode_CancelBadgedSends` leaves the released senders nothing to send with (host test `revoking_first_retires_the_badge`, `test=badge`) (M6); red-team brief 2 | M2, M5, M6, M10 |
 | `depth` never exceeds 4095 and never wraps, so no capability leaves its ancestors' runs | one child-insert function in `l4core::cdt` checks the limit; proptest drives a chain to 4095 by copy and delete; red-team brief 1 | M2, M10 |
-| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5; host test `installs_stop_at_the_depth_limit`) and `IRQHandler_SetNotification` (M7); IPC transfer skips the capability (M6); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
+| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5; host test `installs_stop_at_the_depth_limit`) and `IRQHandler_SetNotification` (M7); IPC transfer stops at that capability (M6; host test `a_copy_refused_at_the_depth_limit_ends_the_transfer`); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
 
 ### Compared with seL4
 
@@ -2304,7 +2326,7 @@ thread, which has none, leaves it alone.
 Labels `0x20` to `0x2D`, in seL4's order: ReadRegisters, WriteRegisters,
 CopyRegisters, Configure, SetPriority, SetMCPriority, SetSchedParams,
 SetIPCBuffer, SetSpace, Suspend, Resume, BindNotification and
-UnbindNotification (M6; semantics in [Binding](#binding)), SetTLSBase. The
+UnbindNotification (from M6; semantics in [Binding](#binding)), SetTLSBase. The
 caller may not be the target of Read/WriteRegisters nor either side of
 CopyRegisters. Priority setters check an authority TCB's MCP
 ([Priorities and MCP](#priorities-and-mcp)).
@@ -2318,9 +2340,12 @@ SetTimeoutEndpoint (MCS). Nothing is added.
 first error in `docs/abi.md`'s order, changing nothing (`decode`), then
 performs it (`perform`). Where the ABI leaves an order or a choice open:
 
-- The label comes first: a label outside `0x20` to `0x2D`, and
-  BindNotification and UnbindNotification until M6, are `IllegalOperation`
-  before any length check.
+- The label comes first: a label outside `0x20` to `0x2D` is
+  `IllegalOperation` before any length check.
+- BindNotification and UnbindNotification (M6) take no length check:
+  BindNotification needs only its extra capability, and its
+  `IllegalOperation` cases come in the ABI's order, seL4's
+  (`decodeBindNotification`).
 - Every check of Configure, SetSpace and SetIPCBuffer, the depth limit
   included, runs in `decode`, before any slot is emptied, in seL4's order:
   the buffer, the long-running delete, the CSpace root, the VSpace root.
@@ -2330,7 +2355,8 @@ performs it (`perform`). Where the ABI leaves an order or a choice open:
   caller's registers alone, as for any dropped reply.
 
 Host tests check every error row in the ABI's order, and that a failed
-invocation changes nothing (`core/src/tcb/tests.rs`).
+invocation changes nothing (`core/src/tcb/tests.rs`; from M6
+`bind_notification_errors_in_order`).
 
 ### Creation and configuration
 
@@ -2376,19 +2402,23 @@ fetch; with an empty CSpace slot every lookup fails. Neither is a kernel error.
 | `Inactive` | no effect | `Restart`, made runnable |
 
 Cancelling IPC clears a pending fault in every state, so a thread suspended
-while its fault message waits never sends it later.
+while its fault message waits never sends it later. Suspend and Resume leave
+a binding alone (seL4 `suspend`, `restart`; host test
+`suspend_and_resume_keep_a_binding`).
 
-Deleting the last capability to a TCB unbinds its notification (M6), suspends
-it (`tcb::suspend`, which also clears a scheduler action naming it), drops FP
+Deleting the last capability to a TCB runs `tcb::finalise`, which unbinds
+its notification (`ipc::unbind_notification`) and then suspends it
+(`tcb::suspend`, which also takes it out of any queue, cancels its IPC and
+clears a scheduler action naming it). The kernel's hook then drops FP
 ownership and FS and GS base ownership without saving (`fpu::forget`,
-`thread::forget`), removes it from the debug list (debug builds), then deletes
-the five slots with the long-running delete of
-[Deletion and finalisation](#deletion-and-finalisation) (seL4 `finaliseCap`,
-`src/object/objecttype.c`). Afterwards nothing in the kernel names the TCB,
-except `current` until the kernel entry ends. A thread deleting its own last
-TCB capability is `Inactive` at once and gets no reply; if its slot deletion
-hits a preemption point, the remainder waits in the slot until someone deletes
-it again, as with seL4's Zombie.
+`thread::forget`) and removes it from the debug list (debug builds), and
+`core/` deletes the five slots with the long-running delete of [Deletion and
+finalisation](#deletion-and-finalisation). seL4's `finaliseCap` also
+unbinds, then suspends (`src/object/objecttype.c`). Afterwards nothing in the
+kernel names the TCB, except `current` until the kernel entry ends. A thread
+deleting its own last TCB capability is `Inactive` at once and gets no reply;
+if its slot deletion hits a preemption point, the remainder waits in the slot
+until someone deletes it again, as with seL4's Zombie.
 
 A fault handler is whichever thread receives on the fault endpoint; no TCB
 names it. Deleted while waiting, it leaves the endpoint queue and faulting
@@ -2415,19 +2445,30 @@ nothing; the thread stays stopped.
   with `from_exception` and its TCB record; `fault_message`, the encoder; and
   `fault_reply`, the reply decoder, which returns `FaultOutcome::Restart` or
   `Inactive`.
-- `l4core::tcb` (M5): the layout offsets (`field`); `ThreadState` with its
-  blocking data; the handles `TcbRef`, `EpRef` and `NtfnRef`, physical
+- `l4core::tcb` (M5, M6): the layout offsets (`field`); `ThreadState` with
+  its blocking data; the handles `TcbRef`, `EpRef` and `NtfnRef`, physical
   addresses; `Tcbs`, which reads and writes a word at a multiple of 8 in
   `[160, 1024)` and builds the typed accessors on it; `Threads`, a `Kernel`
   and `Scheduling` with the hooks the kernel and IPC fill (`cancel_ipc`,
-  `invoked_by_call`, `synic_pages`, `set_current_fs_base`,
-  `write_buffer_word`); `init`, `init_root`, `suspend`, `restart`, `activate`,
+  from M6 `cancel_badged_sends`, `invoked_by_call`, `synic_pages`,
+  `set_current_fs_base`, `write_buffer_word`) and, from M6, the
+  notification words (`notification_word`, `set_notification_word`);
+  `init`, `init_root`, `suspend`, `finalise` (M6), `restart`, `activate`,
   `buffer_word` and `set_mr`. `tcb::invocation` decodes and performs the
   invocations, which `l4core::invoke` sends to it; the M10 fuzzer targets it.
+- Why those M6 members are on `Threads` and not on `IpcEnv`, which extends
+  it: `l4core::invoke` and `tcb::invocation` are generic over `Threads`, so
+  `CNode_CancelBadgedSends` reaches `ipc::cancel_badged_sends` through the
+  hook, and `TCB_BindNotification`, which reads a notification's binding
+  and queue and may deliver its word, needs the notification words there.
+  The typed accessors on those words are `ipc::notification` and
+  `ipc::set_notification`, and only `l4core::ipc` writes notifications.
 - `arch` (M5): `arch::Objects` implements `Tcbs` over the direct map, and
-  `Threads`; `fpu.rs` owns XSAVE and the control registers, `entry.rs` the
-  MSRs and the frame, `thread.rs` the switch. Host tests implement the traits
-  over fake memory (`l4core::testing`).
+  `Threads`, from M6 with the notification words read and written by value
+  through raw pointers, as endpoint words are; `fpu.rs` owns XSAVE and the
+  control registers, `entry.rs` the MSRs and the frame, `thread.rs` the
+  switch. Host tests implement the traits over fake memory
+  (`l4core::testing`).
 
 ### Invariants
 
@@ -2440,7 +2481,7 @@ nothing; the thread stays stopped.
 | In a TCB that is not itself being destroyed, slot 0 holds only a CNode or a Zombie left by an interrupted deletion, slot 1 only a VSpace root, slot 2 only a non-device Frame that is not a SynIC page, or nothing; no CPtr names a TCB slot | `l4core::tcb::invocation::decode` checks; host tests `configure_errors_in_order`, `set_space_errors_in_order`, `set_ipc_buffer_errors_in_order` and `configure_refuses_a_long_running_cspace_deletion` | M5 |
 | The kernel never uses a SynIC message or event page as an IPC buffer | SetIPCBuffer and Configure refuse a frame containing either page the kernel records at boot (`Threads::synic_pages`, none before M9); host tests `set_ipc_buffer_errors_in_order` and `configure_errors_in_order` | M5, M9 |
 | No TCB slot install exceeds `MAX_DERIVATION_DEPTH` | the one child-insert function in `l4core::cdt`; host test `installs_stop_at_the_depth_limit`: a source at 4094 installs at 4095, one at 4095 is refused | M5 |
-| At every kernel exit after a TCB is finalised, no ready or endpoint queue, reply capability, scheduler action, `current`, FP owner or debug list names it; nor, from M6, any notification queue or bound notification | the TCB `finalise` hook ([How `core/` reaches kernel memory](#how-core-reaches-kernel-memory)); host tests `a_thread_that_deletes_its_own_tcb_gets_no_reply` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`, which check the scheduler's and IPC's invariants at every exit; IPC state-machine proptest (M6); red-team brief 2 | M5, M6 |
+| At every kernel exit after a TCB is finalised, no ready or endpoint queue, reply capability, scheduler action, `current`, FP owner or debug list names it; nor, from M6, any notification queue or bound notification | the TCB `finalise` hook ([How `core/` reaches kernel memory](#how-core-reaches-kernel-memory)), from M6 through `tcb::finalise`, which unbinds before it suspends; host tests `a_thread_that_deletes_its_own_tcb_gets_no_reply` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`, which check the scheduler's and IPC's invariants at every exit; from M6 `tcb_finalisation_unbinds_then_suspends`, `deleting_a_bound_tcb_unbinds_its_notification`, `deleting_a_waiting_tcb_takes_it_out_of_the_queue` and `a_thread_that_deletes_its_own_bound_tcb_leaves_nothing_naming_it`, which also run `ipc::check_notifications`; the notification proptest (`random_notification_operations_match_the_model`) and the IPC model's proptest (`model/tests/ipc_random.rs`), which delete TCBs whatever their state and check the invariants at every exit; red-team brief 2 | M5, M6 |
 | A suspended or deleted thread has no pending fault | `ipc::cancel_ipc` clears `fault` in every state; host test `a_handler_that_suspends_the_faulting_thread_cancels_its_reply`; `test=fault` | M5 |
 | A thread that suspends itself and is resumed continues after its `syscall` with a NoError reply | Suspend by `Call` writes the reply first; host tests `a_thread_that_suspends_itself_resumes_after_its_syscall_with_no_error` and `a_thread_that_suspends_itself_by_call_resumes_after_its_syscall` | M5 |
 | User threads cannot set debug registers; DR7 keeps its reset value `0x400`, with no breakpoint enabled | no invocation writes them; `gdt::init` writes `0x400` in boot step 3 | M5 |
@@ -2504,6 +2545,12 @@ thread is not queued (seL4 `switchToThread` dequeues it).
 - `make_runnable(t)` (seL4 `possibleSwitchTo`): `ResumeCurrent` becomes
   `SwitchTo(t)`; otherwise `reschedule()` runs and `t` is appended to its
   queue.
+- `set_thread_state(t, s)` (seL4 `setThreadState` and `scheduleTCB`): if
+  `s` is not runnable, `t` leaves its ready queue, a `SwitchTo(t)` becomes
+  `ChooseNew`, and so does `ResumeCurrent` if `t` is the current thread, so
+  a current thread that blocks, stops or is deleted is never resumed at the
+  end of the entry. `schedule()` also treats `ResumeCurrent` with a current
+  thread that is no longer runnable as `ChooseNew`.
 - `schedule()`, at the end of every kernel entry, unless `ResumeCurrent`:
   1. A runnable, unqueued current thread is pushed at the head of its queue,
      so a preempted thread keeps its turn.
@@ -2815,6 +2862,12 @@ system call a handler adds 2 to MR15. Registers set by a reply go through
   `deliver_fault` returns a `DoubleFault`, and `kernel/src/dispatch.rs` prints
   `thread <TCB> stopped at <fault_ip>: <fault>; its fault endpoint: <lookup
   failure>`. The root task's `fault_ep` is 0, so a fault stops it.
+- The fault endpoint's failure is a send-phase CapFault on `fault_ep`: the
+  lookup's own failure if the `CPtr` does not resolve, and
+  `MissingCapability` with 0 bits left if it resolves to anything but an
+  endpoint capability with Write and Grant or GrantReply, as seL4's
+  `sendFaultIPC` reports it (host test
+  `a_fault_without_a_suitable_handler_stops_the_thread`).
 - A handler that faults sends to its own fault endpoint. A thread that handles
   its own faults deadlocks with itself, a user error the kernel ignores.
 - A ring-0 exception is a kernel bug and panics.
@@ -2825,14 +2878,20 @@ system call a handler adds 2 to MR15. Registers set by a reply go through
 (M3 decodes, M5 classifies). `l4core::regs` holds `Fault`, the encoder
 (`fault_message`) and the reply decoder (`fault_reply`) (M5). Delivery
 (`ipc::deliver_fault`), reply capabilities and fault replies are built in M5
-with the endpoint path they need, in `l4core::ipc`, under host tests; from
-M6 the IPC state machine's proptest covers them too.
+with the endpoint path they need, in `l4core::ipc`, under host tests. From
+M6 the IPC model's proptest covers them too: it raises faults of every type,
+with and without a handler, and replies to them
+([Where the code lives](#where-the-code-lives-1)); M6's host tests add that
+a fault message and a fault reply move no capability
+(`fault_messages_and_fault_replies_move_no_capability`) and that
+`CNode_CancelBadgedSends` restarts a queued fault
+(`callers_already_received_keep_waiting_and_a_queued_fault_restarts`).
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Every ring-3 exception the configuration allows, and every failed lookup, ends with a fault message on an endpoint the thread could Call, or with the thread `Inactive`; never with a kernel panic | `l4core::entry::classify`, `l4core::syscall` and `ipc::deliver_fault`; host tests `exceptions_classify_as_docs_abi_says`, the fault tests in `core/src/ipc/tests.rs` and `a_pointer_that_does_not_resolve_faults_except_for_nbsend`; `test=fault` (a VMFault reaches its handler); `test=ring3` raises #BP, #MF, #DB, #PF, #UD and #GP from ring 3 into its own hook; IPC state-machine proptest (M6) | M5, M6 |
+| Every ring-3 exception the configuration allows, and every failed lookup, ends with a fault message on an endpoint the thread could Call, or with the thread `Inactive`; never with a kernel panic | `l4core::entry::classify`, `l4core::syscall` and `ipc::deliver_fault`; host tests `exceptions_classify_as_docs_abi_says`, the fault tests in `core/src/ipc/tests.rs` and `a_pointer_that_does_not_resolve_faults_except_for_nbsend`; `test=fault` (a VMFault reaches its handler); `test=ring3` raises #BP, #MF, #DB, #PF, #UD and #GP from ring 3 into its own hook; from M6 the receive-phase fault on a notification bound to another thread (host test `a_bound_thread_may_wait_on_its_notification_and_no_other_thread_may`) and the IPC model's proptest (`random_ipc_sequences_match_the_model`), whose random system calls, exceptions and failed lookups each end in a fault message to a handler or a stopped thread, as in the model | M5, M6 |
 | A fault is sent only to an endpoint capability with Write plus Grant or GrantReply, checked at fault time | delivery step 1 (`deliver_fault`); host test `a_fault_without_a_suitable_handler_stops_the_thread`; `test=fault`'s fault endpoint has Write and GrantReply only | M5 |
 | A fault message carries only the faulting thread's own registers and fault data | `l4core::regs::fault_message` reads only the fault and the faulting thread's registers; host test `fault_messages_carry_the_abi_words` | M5 |
 | A fault reply changes only the registers its fault type names, through `sanitise`, and only label 0 restarts | `l4core::regs::fault_reply`; host tests `a_fault_reply_sets_only_the_registers_its_type_names`, `fault_reply_values_are_sanitised` and `a_fault_reply_with_another_label_stops_the_thread` | M5 |
@@ -2858,9 +2917,10 @@ kernel entry then moves the whole message: up to 120 words, the sender's
 badge, and at most one copied capability. `Call` leaves a one-shot reply
 capability in the receiver's TCB. The state machine is safe Rust in
 `l4core::ipc`, generic over a trait the kernel implements in
-`kernel/src/arch/`. M5 builds the endpoint calls that fault delivery needs
-([ADR 0023](adr/0023-fault-ipc-in-m5.md)); M6 adds capability transfer and
-notifications and tests the whole machine on the host under proptest.
+`kernel/src/arch/`. M5 built the endpoint calls that fault delivery needs
+([ADR 0023](adr/0023-fault-ipc-in-m5.md)); M6 added capability transfer,
+`CNode_SaveCaller`, `CNode_CancelBadgedSends` and notifications, and a
+reference model that proptest runs the whole machine against on the host.
 
 ### Endpoint states and queues
 
@@ -2941,11 +3001,17 @@ listed in [Errors, faults and silent
 drops](abi.md#errors-faults-and-silent-drops). `Reply` and the reply phase of
 `ReplyRecv` take no capability: they use the caller slot.
 
-Until M6 builds notifications, a Notification capability is a kernel object
-without invocations: `Call` on it returns `IllegalOperation`, `Send` and
-`NBSend` drop it, and a receive on it is a capability fault, as on any
-capability that is not an endpoint. `l4core::syscall` does this decoding
-([System-call dispatch](#system-call-dispatch)).
+A signal ignores its message registers; its `extra_caps` pointers are
+looked up at send time, so a failed lookup faults as for an endpoint, but
+nothing is transferred. A notification capability without Write gets
+`InvalidCapability` for `Call` and nothing for `Send` and `NBSend`, as an
+endpoint capability without Write does. `l4core::syscall` does this
+decoding ([System-call dispatch](#system-call-dispatch)): its `invocation`
+signals before it tries a reply capability or a kernel object, and its
+`receive` waits on a notification only with Read and `ipc::may_wait`; any
+other receive falls through to the endpoint case, whose capability fault is
+`MissingCapability` with 0 bits left
+([ADR 0026](adr/0026-receive-phase-cap-faults.md)).
 
 ### Send phase
 
@@ -3047,8 +3113,10 @@ nothing is copied or unwrapped and `R` receives `extra_caps` and
    (`ipc.tex`, "Errors", says the earlier ones still move).
 2. The receive slot is found once: `receive_cnode`, resolved with all 64 bits
    in `R`'s CSpace, must be a CNode capability; `receive_index`, resolved
-   from it with `receive_depth` bits, must reach a slot; the slot must be
-   empty. Otherwise there is no slot.
+   from it with `receive_depth` bits, must reach a slot, and a
+   `receive_depth` of 0 or above 64 reaches none (seL4 `getReceiveSlots`,
+   `lookupTargetSlot`); the slot must be empty. Otherwise there is no
+   slot.
 3. For each capability `i` in order: if it is an endpoint capability to `E`,
    whatever its rights, its badge goes into `R`'s `caps_or_badges[i]`, bit
    `i` of `caps_unwrapped` is set, and the capability itself is not copied
@@ -3101,8 +3169,9 @@ The reply capability is classic seL4's
   others; the saved capability is used with `Send`, `NBSend` or `Call`. A
   full destination is `DeleteFirst` and is checked first; an empty caller
   slot is then `IllegalOperation`, where seL4 succeeds (see Compared with
-  seL4 below). The move keeps the capability's place below the caller's
-  master, so `cancel_ipc` still finds it.
+  seL4 below), and so is an invocation no thread made, which only a
+  self-test can make. The move keeps the capability's place below the
+  caller's master, so `cancel_ipc` still finds it.
 - **Lost reply.** If it is destroyed without a reply, the caller stays
   `BlockedOnReply` until it is suspended, restarted or deleted. The kernel
   never invents a reply: `Call` trusts the server for liveness, as in seL4.
@@ -3127,7 +3196,7 @@ or waits on plays no part (seL4 `receiveIPC`, `receiveSignal`).
 | Event | Queue side | The removed thread becomes |
 | --- | --- | --- |
 | The final capability to endpoint `E` is deleted | `cancel_all_ipc(E)`: every queued thread leaves, and is made runnable, in queue order; `E` becomes `Idle` | `Restart` |
-| `CNode_CancelBadgedSends` on a capability to `E` with badge `b` and all four rights, Read, Write, Grant and GrantReply ([Badges, revoke and `CNode_CancelBadgedSends`](#badges-revoke-and-cnode_cancelbadgedsends)) | `cancel_badged_sends(E, b)`: every `BlockedOnSend` thread whose stored badge is `b` leaves, in queue order, the rest keep their order; nothing for `b` = 0 or a `Recv` queue | `Restart` |
+| `CNode_CancelBadgedSends` on a capability to `E` with badge `b` and all four rights, Read, Write, Grant and GrantReply ([Badges, revoke and `CNode_CancelBadgedSends`](#badges-revoke-and-cnode_cancelbadgedsends)) | `cancel_badged_sends(E, b)`: every `BlockedOnSend` thread whose stored badge is `b` leaves, and is made runnable, in queue order, as for `cancel_all_ipc`; the rest keep their order, and `E` becomes `Idle` if none is left; nothing for `b` = 0 or a `Recv` queue | `Restart` |
 | Thread `T` is suspended, restarted or deleted ([Suspend, Resume and deletion](#suspend-resume-and-deletion)) | `cancel_ipc(T)`: `T` leaves its queue; if `BlockedOnReply`, the reply capability to `T` is deleted wherever it is | what [Suspend, Resume and deletion](#suspend-resume-and-deletion) sets |
 
 Each also clears the thread's fault record. A restarted thread re-executes
@@ -3195,18 +3264,23 @@ and MCP](#priorities-and-mcp)) stops a client raising itself past it.
 | Part | Where | Milestone |
 | --- | --- | --- |
 | `MessageInfo` packing, IPC buffer word indices (`word::*`, pinned by offset asserts), message-register mapping (`mr_location`, `delivered_length`) | `l4core::ipc::message`, shared with `libsys` | M5 |
-| Endpoint and thread-state types; `Send`, `NBSend`, `Call`, `Recv`, `NBRecv`, `Reply`, `ReplyRecv` on endpoints without capability transfer; reply capabilities; fault delivery; `cancel_ipc`, `cancel_all_ipc`; `check`, the invariants below as a function | `l4core::ipc` (`endpoint.rs`: the endpoint, its queue, `IpcEnv`, `EndpointCap`; `machine.rs`: `send`, `receive`, `reply`, `transfer`, `cancel_ipc`, `cancel_all_ipc`, `finalise`, `deliver_fault`, `check`), generic over `IpcEnv` | M5 |
-| Capability transfer and unwrapping, badge tests, notifications and binding, `CNode_SaveCaller`, `cancel_badged_sends`, `cancel_all_signals` | `l4core::ipc` | M6 |
-| Reference model and the IPC state-machine proptest | `model/`; tests in `core/` | M6 |
-| `IpcEnv` and `Threads` for the kernel: endpoint words, IPC buffer words, saved register frames, the scheduler | `arch::Objects` (`kernel/src/arch/x86_64/objects.rs`) | M5, M6 |
+| Endpoint and thread-state types; `Send`, `NBSend`, `Call`, `Recv`, `NBRecv`, `Reply`, `ReplyRecv` on endpoints; reply capabilities; fault delivery; `cancel_ipc`, `cancel_all_ipc`; `check`, the invariants below as a function | `l4core::ipc` (`endpoint.rs`: the endpoint, its queue, `IpcEnv`, `EndpointCap`; `machine.rs`: `send`, `receive`, `reply`, `transfer`, `cancel_ipc`, `cancel_all_ipc`, `finalise`, `deliver_fault`, `check`), generic over `IpcEnv` | M5 |
+| Capability transfer and unwrapping | `l4core::ipc::transfer` (`transfer_caps`, which `transfer` calls for a message that is not a fault; the re-lookup `lookup_extra_caps`; `receive_slot`), copying through `l4core::cnode::copy` with every right | M6 |
+| `CNode_SaveCaller` | `ipc::save_caller` in `machine.rs`, over `Kernel`: one `cdt::move_slot` from the caller slot; decoded in `l4core::invoke` | M6 |
+| `CNode_CancelBadgedSends` | `ipc::cancel_badged_sends` (`badge.rs`), over `IpcEnv`; decoded in `l4core::invoke`, which reaches it through the `Threads::cancel_badged_sends` hook | M6 |
+| Notifications, binding and `cancel_all_signals` | `l4core::ipc::notification` ([Notifications](#where-the-code-lives-2)) | M6 |
+| Reference model and the IPC state-machine proptest | `model/src/ipc.rs` (the model), `model/src/ipc_harness.rs` (the two run side by side), `model/tests/ipc_random.rs` and `model/tests/ipc_scenarios.rs` | M6 |
+| `IpcEnv` and `Threads` for the kernel: endpoint and notification words, IPC buffer words, saved register frames, the scheduler, the `cancel_ipc` and `cancel_badged_sends` hooks | `arch::Objects` (`kernel/src/arch/x86_64/objects.rs`) | M5, M6 |
 | System-call dispatch, capability lookup, rights checks | `l4core::syscall`, host-tested; the kernel's `dispatch.rs` acts on its `Outcome` | M5, M6 |
+| Messages with words past MR3 and extra capabilities, and what a receive says about the capabilities it got | `libsys::transfer` (`compose`, `ReceivedCaps`; `Ipc::set_receive_slot` names the receive slot) | M6 |
 
-M5 builds what its done-when test needs: a page fault reaches a handler
+M5 built what its done-when test needs: a page fault reaches a handler
 thread through an endpoint, which needs fault delivery and reply
 capabilities, and the handler kills the faulting thread, which is
 `BlockedOnReply` and so needs `cancel_ipc` (`test=fault`). Once user code can
 delete an endpoint, its finalisation needs `cancel_all_ipc`. M5's host tests
-cover these functions; M6 adds the rest and the proptest.
+cover these functions. M6 added capability transfer, the two CNode methods
+that act on IPC state, notifications, and the reference model.
 
 `core/` names objects by physical-address handles (`TcbRef`, `EpRef`,
 `NtfnRef`) that wrap `NonZeroU64`: no kernel object lies at physical address
@@ -3215,19 +3289,24 @@ are made only from a capability of the matching type or from links IPC
 maintains. `IpcEnv` extends `l4core::tcb::Threads`, and so the capability
 core's `Kernel`, `Scheduling` and `Tcbs`: it adds the endpoint words
 (`endpoint_word`, `set_endpoint_word`) and the read side of IPC buffers
-(`read_buffer_word`). The TCB's IPC fields come through `Tcbs`; a message word
-is found by index with `tcb::buffer_word` (0 to 3 in saved registers, 4 to 119
-in the buffer, `None` without a usable buffer) and written with
-`Threads::write_buffer_word`; the scheduler is called through `l4core::sched`
-(`make_runnable`, `set_thread_state`). Since `Threads` can set priorities, the
-type no longer shows that IPC changes none ([ADR
+(`read_buffer_word`). The notification words (`notification_word`,
+`set_notification_word`) and the `cancel_badged_sends` hook are on
+`Threads` itself, because `TCB_BindNotification` and the CNode methods are
+decoded over `Threads`, which has no `IpcEnv` ([`core/` and
+`arch/`](#core-and-arch-2)). The TCB's IPC fields come through `Tcbs`; a
+message word is found by index with `tcb::buffer_word` (0 to 3 in saved
+registers, 4 to 119 in the buffer, `None` without a usable buffer) and
+written with `Threads::write_buffer_word`; the scheduler is called through
+`l4core::sched` (`make_runnable`, `set_thread_state`). Since `Threads` can
+set priorities, the type no longer shows that IPC changes none ([ADR
 0018](adr/0018-ipc-priorities.md)); the host tests check it after every step
 instead. As for slots, `arch/` reads and writes through raw pointers into the
 direct map and never forms a Rust reference into an object or an IPC buffer.
 Buffers may alias: two threads may name the same 1 KiB (sender and receiver
 included), and a DMA-capable device may write it. The `SAFETY:` argument is
-the no-dangling invariant below and the rule that no object lies at address 0;
-from M6 `model/` implements the same trait over maps.
+the no-dangling invariant below and the rule that no object lies at address 0.
+On the host, `l4core::testing::IpcTestKernel` implements the same traits over
+fake physical memory, with the kernel's hooks.
 
 M5's host tests (`core/src/ipc/tests.rs`, `core/src/syscall/tests.rs`) cover
 every call, its errors and silent drops, the caller slot, `ReplyRecv` and its
@@ -3235,35 +3314,73 @@ restart, each fault type with restart and stop, a handler deleting or
 suspending the faulting thread, a missing handler, an endpoint deleted with
 threads queued, queue order and preemption, and self-suspend and self-delete.
 At every kernel exit they check the scheduler's and IPC's invariants
-(`sched::check_exit`, `ipc::check`) and that no priority changed. From M6,
-proptest runs random system calls by a few threads on a few endpoints and
-notifications, mixed with kernel signals, binds, suspends, deletions and badge
-cancellations; each step lets any `Running` thread act, so the model does not
-depend on the scheduler's choice. After every step it compares thread states,
-queues, notification words, caller slots and delivered registers with the
-model.
+(`sched::check_exit`, `ipc::check`, and from M6 `ipc::check_notifications`)
+and that no priority changed. M6's host tests do the same:
+
+- `core/src/ipc/transfer/tests.rs`: each rule of [Capability
+  transfer](#capability-transfer), driven through system calls, with the
+  capability core's invariants checked over every slot after every step,
+  and the proptest `random_sends_move_capabilities_where_the_model_says`,
+  random sends checked against a model of where each capability must end
+  up;
+- `core/src/invoke/ipc_tests.rs`: `CNode_SaveCaller` and
+  `CNode_CancelBadgedSends`;
+- `core/src/ipc/notification/tests.rs` and its proptest
+  ([Notifications](#where-the-code-lives-2)).
+
+The reference model, `l4model::ipc`, is plain data written from this note
+and `docs/abi.md`, not from `l4core`: threads with their whole register
+sets, IPC buffers and caller slots, endpoints and notifications as
+`VecDeque`s, CNodes as vectors of capabilities, and the scheduler's queues,
+action and current thread, each system call applied atomically. Its
+harness (`l4model::ipc_harness::World`) runs `l4core::syscall` over
+`IpcTestKernel` beside it, from six threads, four endpoints, three
+notifications and a 64-slot root CNode, restarts a preempted TCB deletion
+until it completes, and after every step compares every live thread's
+state, registers, fault, caller slot, binding, priority and slice, every
+IPC buffer word, every endpoint's and notification's state and queue, the
+ready queues and the current thread, every root CNode slot and the outcome,
+and runs `ipc::check`, `ipc::check_notifications`, `sched::check_exit` and
+the model's own check. `ipc_random.rs` generates intents resolved against
+the world: system calls, signals, faults, ticks, invocations and deletions,
+20,000 cases of up to 60 steps by default (`PROPTEST_CASES` for more). Each
+step lets a thread at the highest runnable priority act, the current one or
+one queued at its priority, since `sched::check_exit` forbids a lower one to
+run, so the model does not depend on the scheduler's choice among them.
+`ipc_scenarios.rs` holds 66 hand-written sequences, one rule each. The model
+has limits: an untyped is never sent, and derivation depth and revoke are
+not modelled, so the transfer proptest and host tests above cover where a
+received copy sits in the derivation list.
+
+On QEMU `test=pingpong` makes 1,000 `Call` and `ReplyRecv` round trips
+between the root task and a server thread at priority 200 for each of 1-,
+0- and 120-word messages, checking every reply, and prints the TSC cycles
+per round trip (mean, fastest and median). Under TCG on a busy host, M6's
+fastest 1-word round trip took 166,000 to 185,000 cycles, about 80 to 90
+µs at 2.1 GHz, and the fastest 120-word one 524,000 to 771,000; the numbers
+show trends, not performance ([Open questions](#open-questions)).
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | No kernel object lies at physical address 0 | M4 untyped builder, host test; `core/` handles are `NonZeroU64` | M2, M4 |
-| A thread is in at most one queue, and it is in object `O`'s queue exactly when it is `BlockedOnSend`, `BlockedOnReceive` or `BlockedOnNotification` on `O` | `l4core::ipc` queue functions; `ipc::check` at every kernel exit of the host tests; proptest against `model/` after every step (M6) | M5, M6 |
-| An endpoint is `Idle` exactly when its queue is empty; in `Send` every queued thread is `BlockedOnSend` on it, in `Recv` every one is `BlockedOnReceive` | `l4core::ipc`; `ipc::check` in the host tests (`check_finds_broken_states` shows it catches each breach); proptest (M6) | M5, M6 |
-| Queued threads are served in arrival order | host tests `queues_are_fifo_whatever_the_priority` and `deleting_an_endpoint_restarts_every_queued_thread_in_order`; proptest against the model's FIFO queues (M6) | M5, M6 |
-| No queue, link or reply capability refers to a deleted endpoint, notification or TCB: finalisation empties queues and bindings, and deleting a TCB cancels its IPC, before the memory can be retyped | `cancel_all_ipc` from an endpoint's last capability (`ipc::finalise`) and `cancel_ipc` from the TCB's (`tcb::suspend`) (M5); host tests `deleting_an_endpoint_restarts_its_receivers` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`; `cancel_all_signals` and unbind (M6); proptest with deletions; red-team brief 2 | M5, M6, M10 |
-| A reply capability, other than a master, exists only while the thread it names is `BlockedOnReply`, and there is at most one per thread | `send`, `receive`, `reply`, `cancel_ipc`; `ipc::check` in the host tests; proptest (M6) | M5, M6 |
-| Every TCB's `reply` slot holds its own master reply capability, a derivation root at depth 0, from retype (or, for the root task's TCB, from boot) until finalisation; nothing but that finalisation copies, moves, revokes or deletes a master, and only a master has a reply capability derived from it | TCB retype inserts the master as a root, and boot step 8 the root TCB's; the capability core refuses masters as sources and inserts reply capabilities only under one; `ipc::check`; host test `tcb_retype_makes_a_reply_master_root`; proptest (M6) | M5, M6 |
-| A thread `BlockedOnReceive` has an empty caller slot | receive step 1; `ipc::check`; host test `receiving_again_before_replying_gives_up_the_reply`; proptest (M6) | M5, M6 |
-| The receiver gets the first delivered-length words of the sender's message and nothing else from any thread; its other message registers keep its own values | `transfer`; host tests `a_send_to_a_waiting_receiver_moves_the_message` and `nbrecv_with_nothing_pending_returns_zeros_and_keeps_the_message_registers`; proptest comparing register sets and ping-pong scenario (M6) | M5, M6 |
+| A thread is in at most one queue, and it is in object `O`'s queue exactly when it is `BlockedOnSend`, `BlockedOnReceive` or `BlockedOnNotification` on `O` | `l4core::ipc` queue functions; `ipc::check` at every kernel exit of the host tests, which from M6 also follows each `BlockedOnNotification` thread into its notification's queue, and `ipc::check_notifications`; from M6 the IPC model's proptest (`random_ipc_sequences_match_the_model`, `model/tests/ipc_random.rs`), which compares every endpoint's and notification's queue with the model's after every step, and the notification proptest (`random_notification_operations_match_the_model`), which does the same in its own world | M5, M6 |
+| An endpoint is `Idle` exactly when its queue is empty; in `Send` every queued thread is `BlockedOnSend` on it, in `Recv` every one is `BlockedOnReceive` | `l4core::ipc`; `ipc::check` in the host tests (`check_finds_broken_states` shows it catches each breach); from M6 the IPC model's proptest, which compares every endpoint's state and queue with the model's and runs `ipc::check` after every step | M5, M6 |
+| Queued threads are served in arrival order | host tests `queues_are_fifo_whatever_the_priority` and `deleting_an_endpoint_restarts_every_queued_thread_in_order`; from M6 `cancel_badged_sends_restarts_exactly_that_badges_senders_in_queue_order` and `deleting_a_notification_restarts_its_waiters_in_order_and_unbinds_it`, the IPC model's proptest against the model's `VecDeque` queues, and `test=badge`, whose server receives the queued clients in the order they called | M5, M6 |
+| No queue, link or reply capability refers to a deleted endpoint, notification or TCB: finalisation empties queues and bindings, and deleting a TCB cancels its IPC, before the memory can be retyped | `cancel_all_ipc` from an endpoint's last capability (`ipc::finalise`) and `cancel_ipc` from the TCB's (`tcb::suspend`) (M5); host tests `deleting_an_endpoint_restarts_its_receivers` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`; from M6 a notification's last capability unbinds it and runs `cancel_all_signals` (`ipc::finalise`), and a TCB's unbinds it before `tcb::suspend` (`tcb::finalise`): host tests `deleting_a_notification_restarts_its_waiters_in_order_and_unbinds_it`, `deleting_a_bound_tcb_unbinds_its_notification` and `deleting_a_waiting_tcb_takes_it_out_of_the_queue`, and the IPC model's and the notification proptests, which delete endpoints, notifications and TCBs; red-team brief 2 | M5, M6, M10 |
+| A reply capability, other than a master, exists only while the thread it names is `BlockedOnReply`, and there is at most one per thread | `send`, `receive`, `reply`, `cancel_ipc`, and from M6 `save_caller`, which keeps a saved reply capability below its caller's master, where `cancel_ipc` finds it; `ipc::check` in the host tests; from M6 host tests `save_caller_moves_the_reply_capability_below_its_callers_master` and `a_saved_reply_capability_goes_when_its_caller_is_suspended`, and the IPC model's proptest, which saves, uses and deletes reply capabilities and compares every root CNode slot | M5, M6 |
+| Every TCB's `reply` slot holds its own master reply capability, a derivation root at depth 0, from retype (or, for the root task's TCB, from boot) until finalisation; nothing but that finalisation copies, moves, revokes or deletes a master, and only a master has a reply capability derived from it | TCB retype inserts the master as a root, and boot step 8 the root TCB's; the capability core refuses masters as sources and inserts reply capabilities only under one; `ipc::check`; host test `tcb_retype_makes_a_reply_master_root`; from M6 the IPC model's proptest, which runs `ipc::check` after every step | M5, M6 |
+| A thread `BlockedOnReceive` has an empty caller slot | receive step 1; `ipc::check`; host test `receiving_again_before_replying_gives_up_the_reply`; from M6 the IPC model's proptest, which compares every caller slot after every step | M5, M6 |
+| The receiver gets the first delivered-length words of the sender's message and nothing else from any thread; its other message registers keep its own values | `transfer`; host tests `a_send_to_a_waiting_receiver_moves_the_message` and `nbrecv_with_nothing_pending_returns_zeros_and_keeps_the_message_registers`; from M6 the IPC model's proptest, which compares every thread's whole register set and every IPC buffer word after every step and checks that the kernel wrote buffers only where it may, and `test=pingpong`, which checks every reply and that MR4 to MR118 came back unchanged from each 120-word round trip | M5, M6 |
 | The kernel reads an IPC buffer only through a non-device frame capability in the TCB's IPC buffer slot, writes it only with Write, and touches only its 128 words | `l4core::tcb::buffer_word` takes a word index below 128 and needs Read, and Write to write (host test `buffer_words_need_a_frame_with_the_rights`); `TCB_SetIPCBuffer` checks ([Creation and configuration](#creation-and-configuration)) | M5 |
-| A capability moves by IPC only if the sender's capability has Grant, only into an empty slot the receiver named, at most one per message, with unchanged rights and badge, derived from the sender's capability by `derive` and `insert_derived` below `MAX_DERIVATION_DEPTH` | transfer loop; proptest; capability-transfer scenario; red-team brief 1 | M6, M10 |
-| Only an endpoint capability to the endpoint carrying the message is unwrapped, and the receiver learns only its badge | transfer loop; proptest | M6 |
-| The badge a receiver sees is the badge of the capability the sender invoked, or 0 for a reply; no sender can choose it | `send` stores the capability's badge in `BlockedOnSend` (M5; host test `the_badge_is_the_one_the_sender_invoked_when_it_sent`); badge scenario (M6) | M5, M6 |
+| A capability moves by IPC only if the sender's capability has Grant, only into an empty slot the receiver named, at most one per message, with unchanged rights and badge, derived from the sender's capability by `derive` and `insert_derived` below `MAX_DERIVATION_DEPTH` | `ipc::transfer`'s `transfer_caps`: Grant, both buffers and `extra_caps` checked first, one receive slot found once, copies through `cnode::copy` with every right; host tests in `core/src/ipc/transfer/tests.rs`, among them `without_grant_nothing_is_copied_or_unwrapped`, `a_sender_needs_a_readable_buffer_and_a_receiver_a_writable_one`, `an_unusable_receive_slot_takes_no_copy_but_badges_still_arrive`, `the_first_capability_that_can_be_neither_unwrapped_nor_copied_ends_the_transfer`, `a_copy_of_a_copy_is_its_sibling_and_a_badged_original_keeps_its_badge` and `a_copy_refused_at_the_depth_limit_ends_the_transfer`; the proptest `random_sends_move_capabilities_where_the_model_says`, with the capability core's checks over every slot; the IPC model's proptest, which compares every root CNode slot but models no derivation; `test=captransfer`; red-team brief 1 | M6, M10 |
+| Only an endpoint capability to the endpoint carrying the message is unwrapped, and the receiver learns only its badge | `transfer_caps` unwraps only a capability to the endpoint the message goes through, and never in a reply; host tests `a_capability_to_the_endpoint_carrying_the_message_arrives_as_its_badge` and `a_reply_never_unwraps`; the transfer proptest and the IPC model's; `test=captransfer`, where capabilities to the endpoint arrive as their badges, 0 included, whatever their rights | M6 |
+| The badge a receiver sees is the badge of the capability the sender invoked, or 0 for a reply; no sender can choose it | `send` stores the capability's badge in `BlockedOnSend` (M5; host test `the_badge_is_the_one_the_sender_invoked_when_it_sent`); from M6 the IPC model's proptest, whose world holds badged and unbadged copies of the endpoints and compares every receiver's `rdi`, and `test=badge`, where every call of four clients arrives with its own capability's badge | M5, M6 |
 | `Send` and `Call` need Write, `Call` also Grant or GrantReply, receiving needs Read, and a fault endpoint needs Write and Grant or GrantReply, checked at fault time | `l4core::syscall` and `ipc::deliver_fault` (`EndpointCap::can_send`, `can_call`, `can_receive`); host tests `call_needs_write_and_grant_or_grant_reply`, `send_needs_write_but_no_grant` and `receiving_needs_read`; syscall fuzzer, red-team brief 6 | M5, M10 |
-| A thread leaves a blocked state only by completing its operation (a bound thread's endpoint receive also completes with a signal from its notification, through `signal` or bind) or through `cancel_ipc`, `cancel_all_ipc`, `cancel_badged_sends` or `cancel_all_signals`, so a restarted thread re-executes its system call with its own arguments | `l4core::ipc` state machine; host tests `suspend_takes_a_thread_out_of_its_queue_and_resume_restarts_it` and `a_restarted_reply_recv_is_harmless`; proptest (M6) | M5, M6 |
-| A thread's fault record is set only while it is `BlockedOnSend` or `BlockedOnReply` for that fault | `deliver_fault`, `reply`, `cancel_*`; `ipc::check` in the host tests; proptest (M6) | M5, M6 |
-| Every IPC system call finishes in one kernel entry, in time bounded by the message (120 words, 3 capabilities) or, for a cancellation, by its queue, which holds at most the TCBs that exist (2^18 in 512 MiB with `TCB_BITS` = 11); no argument makes the kernel block or panic | no preemption point and no other loop in `l4core::ipc`; syscall fuzzer, red-team brief 6; worst-case cancellation measured by red-team brief 9 | M5, M6, M10 |
+| A thread leaves a blocked state only by completing its operation (a bound thread's endpoint receive also completes with a signal from its notification, through `signal` or bind) or through `cancel_ipc`, `cancel_all_ipc`, `cancel_badged_sends` or `cancel_all_signals`, so a restarted thread re-executes its system call with its own arguments | `l4core::ipc` state machine; host tests `suspend_takes_a_thread_out_of_its_queue_and_resume_restarts_it` and `a_restarted_reply_recv_is_harmless`; from M6 the IPC model's and the notification proptests, which compare every thread's state and registers after every step | M5, M6 |
+| A thread's fault record is set only while it is `BlockedOnSend` or `BlockedOnReply` for that fault | `deliver_fault`, `reply`, `cancel_*`; `ipc::check` in the host tests; from M6 host test `callers_already_received_keep_waiting_and_a_queued_fault_restarts` and the IPC model's proptest, which compares every thread's fault after every step | M5, M6 |
+| Every IPC system call finishes in one kernel entry, in time bounded by the message (120 words, 3 capabilities) or, for a cancellation, by its queue, which holds at most the TCBs that exist (2^18 in 512 MiB with `TCB_BITS` = 11); no argument makes the kernel block or panic | no preemption point and no other loop in `l4core::ipc`; from M6 capability transfer is at most three lookups, one receive-slot lookup and one copy (`transfer_caps`), and `cancel_badged_sends` and `cancel_all_signals` take one O(1) step per queued thread; syscall fuzzer, red-team brief 6; worst-case cancellation measured by red-team brief 9 | M5, M6, M10 |
 | IPC never changes a thread's priority or timeslice | no function in `l4core::ipc` sets either; `IpcEnv` extends `Threads`, which can, so the type no longer enforces it ([ADR 0018](adr/0018-ipc-priorities.md)), and the host tests check after every step that no priority changed; red-team brief 9 | M5, M10 |
 
 ### Compared with seL4
@@ -3369,14 +3486,21 @@ with word 0. In any other state the signal stays pending, as in
 
 A bound thread gets a pending signal instead of an IPC at step 2 of the
 receive phase, is woken out of an endpoint receive by a signal, and may still
-wait on the notification directly. It tells a signal from a message by
-badge: `root` gives the notification capabilities badges that no endpoint
-capability uses. `TCB_UnbindNotification` clears both links and nothing
-else: the notification keeps its state and word, a thread in an endpoint
-receive stays there, and a thread already waiting directly on the
-notification stays queued (seL4 `unbindNotification`). Suspend and Resume
-leave a binding alone (seL4 `suspend`, `restart`). Deleting the TCB, or the
-final capability to the notification, also unbinds.
+wait on the notification directly. It tells a signal from a message by `rsi`
+and badge: a signal returns `rsi` = 0 with the notification word in `rdi`,
+and a message its `MessageInfo` in `rsi` with the sender's badge in `rdi`.
+A message's `MessageInfo` may also be 0, so `root` gives every notification
+capability a non-zero badge in bits that no endpoint capability's badge
+touches, and a receive is a signal when `rsi` is 0 and `rdi` has one of
+those bits (`libsys::Event::classify`; `test=ipcntfn` uses bit 32 and up
+for signals and `0x1` to `0x3` for endpoints).
+
+`TCB_UnbindNotification` clears both links and nothing else: the
+notification keeps its state and word, a thread in an endpoint receive stays
+there, and a thread already waiting directly on the notification stays
+queued (seL4 `unbindNotification`). Suspend and Resume leave a binding alone
+(seL4 `suspend`, `restart`). Deleting the TCB, or the final capability to
+the notification, also unbinds.
 
 ### Deletion
 
@@ -3392,20 +3516,50 @@ is bounded by the TCBs that exist. `cancel_ipc` on a
 
 ### Where the code lives
 
-`Notification`, `signal`, `wait`, bind, unbind and `cancel_all_signals` live
-in `l4core::ipc` and share the endpoint code's `IpcEnv`, model and proptest
-(M6). The kernel's interrupt signal is M7's; the SynIC one is M9's.
+| Part | Where | Milestone |
+| --- | --- | --- |
+| The object: `Notification`, `NtfnState`, the word offsets `ntfn_field`, `NotificationCap` (`can_signal`, `can_wait`), the typed accessors `notification` and `set_notification` | `l4core::ipc::notification` (`core/src/ipc/notification.rs`) | M6 |
+| `signal`; `wait` and `may_wait`; `complete_bound_signal`, step 2 of an endpoint receive; `bind_notification`, `unbind_notification`; `cancel_all_signals`; `finalise`, which `ipc::finalise` calls for a notification's last capability; `cancel_signal`, the `BlockedOnNotification` arm of `cancel_ipc`; `check_notifications`, the invariants below as a function | the same | M6 |
+| Dispatch: `Send`, `NBSend` and `Call` signal, `Recv`, `NBRecv` and the receive phase of `ReplyRecv` wait or poll | `l4core::syscall` (`invocation`, `receive`) | M6 |
+| `TCB_BindNotification` and `TCB_UnbindNotification` | `l4core::tcb::invocation`, over `Threads`; TCB finalisation unbinds through `tcb::finalise` | M6 |
+| The notification words in the kernel | `arch::Objects` (`Threads::notification_word`, `set_notification_word`), by value through raw pointers into the direct map | M6 |
+| Signal, wait and poll, and telling a signal from a message | `libsys::notification` (`signal`, `wait`, `poll`, `Event::classify`); `tcb_bind_notification` and `tcb_unbind_notification` in `libsys::invoke` | M6 |
+| The kernel's signal for an interrupt; for a SynIC event | M7; M9 | M7, M9 |
+
+The notification words are on `Threads`, not `IpcEnv`, because
+`TCB_BindNotification` is decoded over `Threads` ([`core/` and
+`arch/`](#core-and-arch-2)). Every function but `signal` is generic over
+`Threads`; `signal` may take a bound thread out of an endpoint receive with
+IPC's `cancel_ipc` and so needs `IpcEnv`, while `bind_notification` does the
+same through the `Threads::cancel_ipc` hook.
+
+`core/src/ipc/notification/tests.rs` checks each rule of this section
+through system calls, with the scheduler's, IPC's and the notifications'
+invariants at every kernel exit, and `check_notifications_finds_broken_states`
+shows the checker catches each breach. Its proptest, `random_notification_operations_match_the_model`
+(`core/src/ipc/notification/tests/model.rs`, 1,024 cases of up to 80 steps),
+runs random signals by system call and by the kernel, waits, polls, binds,
+unbinds, endpoint sends and receives, suspends, resumes and deletions by six
+threads on three notifications and two endpoints against a model of words,
+queues and bindings, and compares them after every step;
+`random_sequences_reach_every_path` checks that the sequences reach every
+path the model knows. The IPC model's proptest ([Where the code
+lives](#where-the-code-lives-1)) covers notifications too, mixed with every
+other system call. On QEMU `test=ipcntfn` runs a server bound to a
+notification that takes calls and signals on one receive, with
+`TCB_BindNotification`'s refusals, scripted orderings and two clients and
+two signallers running freely.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| A notification is `Waiting` exactly when its queue is non-empty; `Idle` and `Waiting` have word 0; `Active` has an empty queue | `l4core::ipc`; proptest against `model/` | M6 |
-| Binding is one to one and symmetric: `T.bound_notification` = `N` exactly when `N.bound_tcb` = `T` | bind, unbind and finalisation; proptest | M6 |
-| While a notification is bound, only its bound thread waits on it | bind refuses a notification with waiters; dispatcher check; red-team brief 1 | M6, M10 |
-| A bound thread is never `BlockedOnReceive` while its notification is `Active` | `signal` and bind deliver at once; proptest | M6 |
-| No signalled bit is lost: each is returned to exactly one waiter or bound receiver, or is still pending, until the notification is deleted | proptest against the model | M6 |
-| A signal never blocks or fails, so interrupt delivery never waits on user space | `signal` has no blocking path; IRQ scenario | M6, M7 |
+| A notification is `Waiting` exactly when its queue is non-empty; `Idle` and `Waiting` have word 0; `Active` has an empty queue | `l4core::ipc::notification`'s queue functions; `check_notifications` at every kernel exit of the host tests (`check_notifications_finds_broken_states`); the notification proptest and the IPC model's, which compare every notification's state, word and queue with the model's after every step | M6 |
+| Binding is one to one and symmetric: `T.bound_notification` = `N` exactly when `N.bound_tcb` = `T` | `bind_notification`, `unbind_notification`, `notification::finalise` and `tcb::finalise`; `check_notifications`; host tests `bind_sets_both_links_and_unbind_clears_them`, `deleting_a_bound_tcb_unbinds_its_notification` and `tcb_finalisation_unbinds_then_suspends`; the notification proptest and the IPC model's, which compare every binding after every step | M6 |
+| While a notification is bound, only its bound thread waits on it | `TCB_BindNotification` refuses a notification with waiters (`tcb::invocation::decode`; host tests `bind_errors_in_order` and `bind_notification_errors_in_order`); the dispatcher's `ipc::may_wait` check (host test `a_bound_thread_may_wait_on_its_notification_and_no_other_thread_may`); `check_notifications`; the notification proptest, whose sequences include waits by another thread on a bound notification; `test=ipcntfn`, where binding a second thread to N is `IllegalOperation`; red-team brief 1 | M6, M10 |
+| A bound thread is never `BlockedOnReceive` while its notification is `Active` | `signal` and `bind_notification` deliver at once, and an endpoint receive takes a pending signal first (`complete_bound_signal`); `check_notifications`; host tests `a_signal_wakes_a_bound_thread_out_of_an_endpoint_receive`, `binding_delivers_a_pending_signal_to_a_thread_in_an_endpoint_receive` and `a_bound_thread_receiving_on_an_endpoint_takes_a_pending_signal_first`; the notification proptest and the IPC model's | M6 |
+| No signalled bit is lost: each is returned to exactly one waiter or bound receiver, or is still pending, until the notification is deleted | the notification proptest and the IPC model's, which compare every notification word and every thread's `rdi` and `rsi` with the model's after every step; host test `signals_with_nobody_waiting_or_their_badges_into_the_word`; `test=ipcntfn`, where a shared sequence number shows each signaller's bit reached the server after its last signal | M6 |
+| A signal never blocks or fails, so interrupt delivery never waits on user space | `ipc::signal` has no blocking path and no error; the kernel's own signal takes the same path (host test `the_kernel_signals_through_the_same_path`, and the `Interrupt` action of the IPC model's proptest); IRQ scenario (M7) | M6, M7 |
 
 ### Compared with seL4
 
@@ -4213,9 +4367,9 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | May device frames be mapped write-back? | Device memory that is really memory would run uncached | M5 (answered) | Answered in M5: no; a device frame maps only `Uncached` or `WriteCombining`. Neither target needs more. Revisit with an ADR if a driver does |
 | Should page 0 be mappable? | Some programs place data at 0 | M5 (answered) | Answered in M5: no; `Frame_Map` below `USER_MIN` is `InvalidArgument` 0. No program here needs page 0 |
 | Should `Frame_Remap` on an unmapped capability return `InvalidCapability`, as Map does for a capability in the wrong mapping state? | One error convention is simpler for `libsys` | M5 (answered) | Answered in M5: it returns `IllegalOperation`, as seL4 does for an operation the capability's state does not allow |
-| Should a caller whose reply capability is destroyed be woken with an error? | A server that receives again, deletes the reply or dies leaves its client blocked until someone suspends it | M6 | No, as seL4: any error label would be indistinguishable from a reply; a client needing a timeout uses a watchdog thread holding its TCB capability |
-| How does a server tell "nothing pending" from a message or signal with badge 0? | `NBRecv` returns badge 0 both for nothing and for unbadged senders | M6, `libsys` | `root` gives every client and signaller of a polled object a non-zero badge |
-| What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 | Reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint; a saved reply capability vanishes when its client is suspended or deleted |
+| Should a caller whose reply capability is destroyed be woken with an error? | A server that receives again, deletes the reply or dies leaves its client blocked until someone suspends it | M6 (answered) | Answered in M6: no, as in seL4. Any error label would be indistinguishable from a reply; a client needing a timeout uses a watchdog thread holding its TCB capability. `CNode_CancelBadgedSends` leaves such a caller waiting too ([Reply capabilities](#reply-capabilities); host tests `receiving_again_before_replying_gives_up_the_reply` and `callers_already_received_keep_waiting_and_a_queued_fault_restarts`, the model's `deleting_a_saved_reply_capability_leaves_its_caller_waiting`) |
+| How does a server tell "nothing pending" from a message or signal with badge 0? | `NBRecv` returns badge 0 both for nothing and for unbadged senders | M6, `libsys` (answered) | Answered in M6: an empty `NBRecv` returns `rdi` = 0 and `rsi` = 0, so a server that polls gives every signaller a non-zero badge, and every client a non-zero badge or a message whose `MessageInfo` is not 0. `root` does both: `test=badge`'s server stops at a receive with `rdi` and `rsi` both 0, and its unbadged client sends a non-zero label; `test=ipcntfn` gives every notification capability a single bit from bit 32 up, and `libsys::Event::classify` takes a receive for a signal only when `rsi` is 0 and `rdi` has one of those bits ([Binding](#binding)) |
+| What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 (answered) | Answered in M6: reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint (`libsys::notification`); a saved reply capability vanishes when its client is suspended or deleted (`libsys::invoke::cnode_save_caller`). `cnode_cancel_badged_sends` says to revoke the badged original first |
 | Are the IMCR ports `0x22` and `0x23` real on q35 and Hyper-V? | They are kept from user space on the assumption that they can route PIC interrupts around the local APIC | M7 | Keep them reserved; reserving an absent port costs nothing |
 | What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Open. QEMU's I/O APIC is version `0x20`, but Hyper-V's is `0x11` (the M3 Hyper-V check), which has no EOI register. M7 must clear a stale Remote IRR there another way, such as switching the pin to edge-triggered and back while masked, as Linux does for older I/O APICs (from memory; check in M7) |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
