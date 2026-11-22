@@ -13,8 +13,9 @@
 # first, the done-when's, then zero-length and 120-word ones; the root
 # task prints how many round trips it checked, the total cycles of the
 # timed ones and, per round trip, the mean, the fastest and the median,
-# with nanoseconds from BootInfo's tsc_hz. Under TCG the numbers show trends, not performance,
-# and the TSC follows host time: a busy host inflates the mean most.
+# with nanoseconds from BootInfo's tsc_hz. Under TCG the numbers show
+# trends, not performance, and the TSC follows host time: a busy host
+# inflates the mean most.
 cmdline: test=pingpong
 exit: success
 expect: microL4 kernel

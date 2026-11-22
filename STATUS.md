@@ -1,5 +1,5 @@
 # Status
-Current milestone: M5 · Threads, address spaces and the root task, complete: the done-when test passed on QEMU and on the owner's Hyper-V host (2026-11-22), both fresh reviewers signed off, and the red-team finding is fixed and confirmed. Next: M6 · IPC and notifications.
+Current milestone: M6 · IPC and notifications, complete: the done-when scenarios pass on QEMU, both fresh reviewers signed off, and the red-team pass found nothing. M6 has no Hyper-V check. Next: M7 · User-level drivers and console.
 
 ## Done
 - [x] M0 · Bootstrap and tooling (PR #1, merged 2026-10-29)
@@ -8,69 +8,20 @@ Current milestone: M5 · Threads, address spaces and the root task, complete: th
 - [x] M3 · Paging and interrupts (PR #4, merged 2026-11-02): the kernel's own GDT, TSS, IDT and page tables, decoded ring-0 faults, the ACPI parser with QEMU and Hyper-V table dumps, the local APIC, PIC, I/O APIC and HPET set up, and a 100 Hz timer calibrated against the HPET or Hyper-V's reference counter. A fresh reviewer signed off.
 - [x] The M3 Hyper-V check passed on the owner's host (2026-10-30): ten ticks at 100.002 Hz against the reference counter; the results are under "Hyper-V checks".
 - [x] M4 · Kernel objects and BootInfo (PR #5, merged 2026-11-02): the boot plan, the untyped and BootInfo in `l4core::{bootinfo, boot}`, the Untyped and CNode decoder `l4core::invoke`, boot steps 6, 7 and 9, and the `bootinfo` and `retype` self-tests. A fresh reviewer signed off and a red-team pass on the decoder found nothing.
-- [x] M5 · Threads, address spaces and the root task (PR #6). Done on QEMU and on Hyper-V.
-  - **Threads** (`l4core::{tcb, regs, sched}`):
-    - TCBs with the design's layout and states;
-    - every TCB invocation, with errors in `docs/abi.md`'s order;
-    - the user register set and `sanitise`;
-    - fault messages and replies;
-    - 256 ready queues, with round-robin and whole-tick charging.
-    - A proptest checks the scheduler against 256 `VecDeque`s.
-  - **Address spaces** (`l4core::vspace`):
-    - paging objects with back-references checked both ways;
-    - the map, unmap and remap invocations;
-    - every change returns a `Flush`, which `arch::paging::apply` turns into `invlpg` or a CR3 reload.
-    - A proptest with a TLB model catches every flush left out.
-  - **Entry and exit** (`l4core::{abi, entry, fpu}`, `arch::{entry, fpu, thread}`):
-    - `syscall` in, `sysretq` or `iretq` out, with `swapgs`;
-    - `iretq` whenever registers were written or `next_ip` is at or above 2^47;
-    - eager XSAVE64 and XRSTOR64 into each TCB;
-    - XCR0 `0x3` and a 576-byte area;
-    - `IA32_TSC_AUX` set to 0.
-  - **IPC** (`l4core::{ipc, syscall}`):
-    - endpoints with `Send`, `NBSend`, `Call`, `Recv`, `NBRecv`, `Reply` and `ReplyRecv`, without capability transfer (M6, ADR 0023);
-    - reply capabilities;
-    - fault delivery and replies;
-    - `cancel_ipc` and `cancel_all_ipc`;
-    - the system-call dispatch as one host-tested function per entry.
-  - **The root task:**
-    - `user/libsys` (system calls, invocations, allocators) and `user/root`;
-    - xtask builds, strips and checks the root ELF and embeds it in `.rootimage`;
-    - boot runs steps 6, 9, 7, 8 and 10: step 8 maps the root VSpace, copies the image, and reclaims `.rootimage` as untyped;
-    - a `test=` name the kernel does not know goes to the root task.
-  - **Scenarios** (36 in all):
-    - `threads` and `fault`, the done-when;
-    - `root`, `rootimage`, `vspace` and `ring3`, the paths in isolation;
-    - `tlb`, which proves the flushes on the machine and fails without `invlpg` or the CR3 reload;
-    - `isolation`, two preempted threads keeping their own FP state, bases, registers, DF and AC;
-    - four red-team scenarios.
-  - **`threads`:** A and B at priority 100 were each preempted 16 times by the 100 Hz timer with the other running in between.
-  - **`fault`:**
-    - F reads `0xdeadbee8`, and handler H receives the `VMFault` (ip, address, fsr `0x4`);
-    - `DebugDumpScheduler` shows F `BlockedOnReply`;
-    - H kills F with `TCB_Suspend`, and F stays stopped.
-  - **ADR 0025:** user code may read the TSC; `IA32_TSC_AUX` reads 0.
-  - **CI:** Miri runs in two shards. `microl4-vhdx-m5-check` holds six Hyper-V images.
-- [x] Both fresh M5 reviewers signed off; reviewer K re-checked the fix round at 8cc6c74 and signed off again.
-  - Reviewer C (core logic and ABI) and reviewer K (kernel and machine) each had one must-fix: `threads.scenario` expected A's first line before B's, which failed about half the runs; it no longer expects an order.
-  - Their should-fixes are done:
-    - `test=tlb`, after both found the flushes untested on the machine;
-    - `test=isolation`;
-    - scenario disk images deleted after a pass;
-    - `IA32_TSC_AUX` set to 0;
-    - exit warnings printed once per boot.
-- [x] The M5 red-team pass found one denial of service, now fixed and confirmed on Hyper-V: with TF set, `mov ss; int3` defers the single step into ring 0 at the `#BP` stub's first instruction (the CVE-2018-8897 mechanism), and the kernel panicked.
-  - The kernel now returns from that `#DB` as it does at `syscall_entry` (`docs/redteam/m5-movss-db.md`).
-  - QEMU raises the `#DB` in ring 3. At the M5 Hyper-V check `redteam-movss` probe 1 read `0x3/0x0`: Hyper-V does defer the step into ring 0 at the `#BP` stub, and the kernel returned from it. The `int n` and `int1` variants proved not real.
-  - Everything else held: 80 exception probes from ring 3, every unmap path then a stale read, and threads deleting their own TCB or the memory under them.
+- [x] M5 · Threads, address spaces and the root task (PR #6, merged 2026-11-22): TCBs and every TCB invocation, the scheduler, the paging objects with their flushes, `syscall`/`sysretq`/`iretq` entry and exit with eager XSAVE, endpoint IPC with reply capabilities and fault delivery, the system-call dispatch in `l4core`, and the root task (`user/libsys`, `user/root`) in ring 3. The done-when passed on QEMU and on Hyper-V; two fresh reviewers signed off; the red team's `mov ss` deferred-`#DB` denial of service is fixed and confirmed on Hyper-V (`docs/redteam/m5-movss-db.md`). `docs/design.md` has the details.
+- [x] M6 · IPC and notifications (PR #7). Done on QEMU.
+  - **Spec check first:** a fresh agent checked the design's capability-transfer, badge, notification, binding, `CNode_SaveCaller` and `CNode_CancelBadgedSends` rules against seL4's sources; 14 clarifications, no mistakes, and ADR 0026.
+  - **Notifications** (`l4core::ipc::notification`): Signal (`Send`, `NBSend`, `Call`), Wait (`Recv`, the receive phase of `ReplyRecv`) and Poll (`NBRecv`); `TCB_BindNotification` and `TCB_UnbindNotification`; an endpoint receive takes a pending bound signal first, and a signal wakes a bound thread blocked in one; deleting a notification unbinds it and restarts its waiters; `tcb::finalise` unbinds, then suspends.
+  - **Capability transfer** (`l4core::ipc::transfer`): Grant and both IPC buffers gate it; every pointer is looked up again at transfer, all or nothing; the receive slot is found once (depth 1 to 64); capabilities to the carrying endpoint unwrap to badges, whatever their rights, never in a reply; at most one copy per message, placed as `CNode_Copy` places it; replies carry capabilities through the reply capability's Grant.
+  - **`CNode_SaveCaller`** and **`CNode_CancelBadgedSends`** (`l4core::ipc::badge`), with errors in `docs/abi.md`'s order.
+  - **The IPC reference model** (`model/src/ipc.rs`, `ipc_harness.rs`): written from the design, run beside `l4core`'s `IpcTestKernel` and compared after every step. `ipc_random` runs 20,000 random cases by default, `ipc_scenarios` 70 hand-written ones. It covers M5's paths (calls, replies, faults, cancellation, deletion) and M6's. Builder M planted 25 bugs; each was caught.
+  - **Scenarios** (41 in all): `pingpong` (1,016 checked round trips each of 1-, 0- and 120-word messages, the last 1,000 timed with the TSC; the fastest 1-word round trip under TCG is about 170,000 to 185,000 cycles, 80 to 90 µs), `captransfer`, `badge`, `ipcntfn` (one server bound to a notification takes calls and signals in one receive loop), and the red team's `redteam-ipc`.
+  - **Kernel:** the notification words over the direct map and the Notification and TCB arms of `Objects::finalise`; nothing else changed.
+- [x] Both fresh M6 reviewers signed off with no must-fix finding. Reviewer C (core logic and ABI) planted 48 bugs in `l4core`, 42 caught and the other 6 unobservable; reviewer K (kernel, user side, model and done-when) planted 12. A fix round closed their should-fixes: the model gives some threads a second CSpace, so a lookup in the wrong thread's CSpace is caught; `pingpong`'s 120-word run checks every word both ways; a host test pins an empty poll's `rsi`; `ipcntfn` exercises bind-time delivery and `badge` a refused re-mint; and the design records seL4's release order. A fresh reviewer re-checked the fix round and signed off: each planted bug the reviewers named now fails a test, and `l4core` changed only in doc comments.
+- [x] The M6 red-team pass found nothing: a host fuzzer of system calls, transfers, SaveCaller, CancelBadgedSends, binding and capability operations by six threads (`core/src/ipc/redteam.rs`, 3,000 cases, 100,000 once) checks every invariant and every reply capability after each step, and `test=redteam-ipc` checks saved replies and bound-thread and notification deletion from ring 3.
 
 ## Next
-- [ ] M6 · IPC and notifications:
-  - capability transfer;
-  - notifications and binding;
-  - `CNode_SaveCaller` and `CNode_CancelBadgedSends`;
-  - the IPC state-machine proptest against `model/`, which also covers M5's paths;
-  - 1,000 ping-pong round trips timed with the TSC.
+- [ ] M7 · User-level drivers and console (PLAN.md): IRQHandler and IOPort invocations, interrupt delivery through notifications (`ipc::signal` is the entry M7 calls), a COM1 driver in user space, and the kernel-without-features build and scenario.
 
 ## Open issues
 - **Never run anywhere:** the x2APIC-to-xAPIC handover. Both firmwares hand over in xAPIC mode, so only a host test covers it.
@@ -84,10 +35,6 @@ Current milestone: M5 · Threads, address spaces and the root task, complete: th
 - A partial revoke, one whose work destroys a CNode on its slot's lookup path, ends where preemption falls, as in seL4: the restart fails its lookup and the work left stays undone. Delete finishes a Zombie it leaves in a slot the user can name, and a revoke of an ancestor untyped the rest; under a boot untyped that region is dead (`docs/design.md`, Slot operations). A Delete named through a path that runs through its own slot can be cut short the same way. The harness checks that a revoke cut short left a safe state, then runs the same revoke unpreempted from the same start: the leftover's memory and back-references must equal that run's at one of its preemption points, and its hook calls must be that run's up to there. Later steps go on from the unpreempted run's end.
 - The model harness covers user operations on a Zombie only through hand-written tests. It no longer deletes the Zombies a revoke cut short leaves, so no random sequence does; `l4core`'s `a_revoke_restarted_by_looking_its_slot_up_again_is_cut_short` checks that such a Delete finishes the work.
 - **Is 4 KiB the right reset chunk?** Answered on QEMU; Hyper-V is unmeasured. Build `cargo xtask image --cmdline "test=retype"` and boot it (`tools/hyperv/README.md`, the optional M4 check).
-- **Until M6:**
-  - `CNode_CancelBadgedSends` (`0x12`) and `CNode_SaveCaller` (`0x18`) return `IllegalOperation`;
-  - `TCB_BindNotification` and `TCB_UnbindNotification` do too;
-  - a Notification capability takes no invocation, and a receive on one is a capability fault.
 - **A kernel without features** is only linted, never built into an image or booted; M7 adds that build and its scenario.
 - **The kernel's `SlotAddr` debug check** tests only that a slot lies in object memory (`l4core::objmem`), which is weaker than core's invariant; M7 must add the IRQ node's static range to it.
 - **No differential check against `model/`** of decoded invocation sequences; `l4core::invoke`'s own tests and the red-team harness cover them.
@@ -97,35 +44,29 @@ Current milestone: M5 · Threads, address spaces and the root task, complete: th
 - **`Kernel::finalise` gets no slot:** a paging capability's slot is found through its back-reference and checked to hold exactly that capability, slightly weaker than the design's two-way check. Passing the slot is a small API change for later.
 - **Debug kernels:** `DebugDumpScheduler` walks every TCB with no preemption point. Accepted, since debug kernels make no security claim (ADR 0021).
 - **`test=redteam-tlb`** and `test=tlb` overlap; both stay, since they remove mappings in different orders.
-- **Miri time:** CI's two shards take about 4 and 5 minutes against a 20-minute limit; add a shard before either nears it.
+- **Miri time:** M6 added about 2 minutes to the `ipc:: syscall:: tcb:: sched:: regs:: vspace::` shard; CI's whole run, both shards included, took about 6.5 minutes on 2026-11-22 against a 20-minute limit per job. Add a shard before either nears it. The model's tests and the red team's fuzzer are skipped under Miri.
 - The optional `cargo-fuzz` target over the M2 sequences is not built.
 - Accepted risks, recorded for the M10 red team:
   - Meltdown on a vulnerable host CPU (no skim window; ADR 0004);
   - IPC queue-cancel loops are not preemptible, as in seL4;
   - `vmbus` can name any guest page in a GPADL, and an MSI-capable driver can send any vector (ADR 0020).
 - PLAN.md, exported from the plan doc, still shows pre-M1 proposals where ADRs supersede them: ADRs 0010, 0011, 0016 and 0023. Re-export it when the doc is next edited.
+- **The IPC model's limits:** it never sends an untyped (so `derive` refusing an untyped with children is uncovered there), and it does not model derivation depth or revoke; `l4core`'s host tests and `test=captransfer` cover those. Only some random worlds give threads a second CSpace root; that CNode holds no TCB capability, and neither CNode's own capability (slot 1) is ever deleted.
+- **Released threads' order differs from seL4:** `cancel_all_ipc`, `cancel_all_signals` and `cancel_badged_sends` make released threads runnable in queue order, so the first to wait runs first; seL4 enqueues each at the head of its ready queue (`docs/design.md`, IPC and Notifications, "Compared with seL4").
+- **Bind-time delivery** of a pending signal differs from seL4 and is justified only in `docs/design.md`'s comparison table; it was in `docs/abi.md` from M1, so no ADR.
+- **No "is this slot empty" query:** the ABI has no non-destructive way to ask; `test=captransfer` moves a slot onto itself (`DeleteFirst` if full, `FailedLookup` if empty), relying on the documented error order.
+- **`ipc::signal` calls `ipc::cancel_ipc` directly,** while binding goes through the `Threads::cancel_ipc` hook; through the hook `signal` could drop its `IpcEnv` bound. Small; decide when M7 wires interrupts to `signal`.
+- **Two M6 invariant rows rest on the code's structure only:** the queue-cancel loops have no preemption point, and every IPC call finishes in one kernel entry; M10 briefs 6 and 9 test them.
 
 ## Decisions this milestone
-- **ADR 0025:** user code may read the TSC with `rdtsc` and `rdtscp`. The kernel keeps CR4.TSD clear and sets `IA32_TSC_AUX` to 0.
-- **Boot order is steps 6, 9, 7, 8, 10:**
-  - the untyped are computed before step 8 reclaims `.rootimage`;
-  - no untyped can be used before the root task runs, so this is safe;
-  - the kernel keeps BootInfo's physical address, not a reference.
-- **The root task:**
-  - linked at `0x40_0000`;
-  - its stack and thread stacks are separate segments with unmapped guard pages;
-  - xtask strips it and runs the kernel's own image checks on it, so an image the kernel would refuse fails the build.
-- **Restart after preemption:**
-  - a preempted call leaves its caller `Restart` only if it is still `Running`, so a call that finalised its own caller is never restarted;
-  - the pending interrupt is taken on the way back to ring 3.
-- **The single-step `#DB`:** a ring-0 `#DB` is accepted only at `syscall_entry` and at the `#BP` stub's first instruction; any other panics.
-- **`IpcEnv` extends `Threads`:** ADR 0018's "no method touches priorities" is now checked by host tests, not by the type.
-- **Whole-tick charging, as seL4 (ADR 0013):** a tick that falls due while a thread is dispatched charges it a whole slice, so scenarios do not assume which equal-priority thread prints first.
-- **Exits use `iretq`** when `next_ip` is at or above 2^47, as well as when registers were written.
-- **CI:**
-  - Miri on `l4core` runs in two shards;
-  - the user crates' host tests and lints run in `cargo xtask test` and `cargo xtask clippy`;
-  - a passing scenario's disk image is deleted.
+- **ADR 0026:** a receive phase that resolves its capability pointer but cannot use the slot (empty, wrong type, no Read, or a notification bound to another thread) is a capability fault with `MissingCapability` and 0 bits left.
+- **Notification words and `cancel_badged_sends` are `Threads` hooks,** because `invoke` and `tcb::invocation` are generic over `Threads`, not `IpcEnv`.
+- **`Call` on a notification signals it and gets an empty reply.**
+- **Capability transfer** looks every pointer up again at transfer and moves nothing if one fails; it copies at most one capability per message; unwrapping ignores rights; a transferred untyped fills its source's watermark, as `CNode_Copy` does.
+- **`CNode_CancelBadgedSends`** checks all four rights before the badge-0 case, is not preemptible (as seL4), and releases senders in queue order; `CNode_SaveCaller` with no invoking thread (self-tests only) is `IllegalOperation`.
+- **A `receive_depth` of 0 or above 64 names no slot** (seL4's `lookupTargetSlot`), a clarification in `docs/abi.md`.
+- **The IPC model** is plain data written from the design, not a second implementation of `l4core`'s traits; `l4core` runs over `IpcTestKernel` beside it.
+- **The root task** has six guarded 16 KiB thread stacks; its image spans `0x40_0000` to `0x46_0000`.
 
 ## Hyper-V checks
 - **M0 VHDX** (7c4609f, 2026-10-29): boots with Secure Boot off; hello and `TEST PASS` on COM1 through the named pipe.
@@ -154,24 +95,10 @@ Current milestone: M5 · Threads, address spaces and the root task, complete: th
   - `redteam-movss`: probe 1 `0x3/0x0` (the deferred step reached ring 0 and the kernel returned), probe 2 `0xd/0x402`, probe 3 `0x1/0x0`.
 
 ## Last session
-2026-11-02: M5.
-- **Skeleton:** the lead wrote the TCB's register frame and layout offsets first.
-- **Phase 1**, four builders in parallel worktrees:
-  - threads, registers and the scheduler;
-  - address spaces;
-  - entry, exit and FP;
-  - the user side and the root image.
-- **Phase 2:**
-  - builder I wrote endpoint IPC, fault delivery and the dispatch in `l4core`;
-  - builder E integrated the kernel, and the root task booted in ring 3;
-  - builder R wrote the done-when tests in `user/root`;
-  - builder I then plugged its dispatch in and ran both done-when scenarios five times each.
-- **Docs:** a docs agent wrote the builders' notes into `docs/design.md`, `CLAUDE.md`, `docs/boot.md` and ADR 0018's status.
-- **Review and red team:** two fresh reviewers (kernel and core) and a red teamer found the issues above, and a fix round closed them.
-- **Problems:**
-  - the skeleton's `Exit` made a zeroed TCB leave by `sysretq` (fixed: `Iret` is 0);
-  - Codex caught the temporary dispatch restarting a self-deleted caller (gone with the real dispatch, and host-tested);
-  - the shared disk filled twice, from builders' `target/` directories and kept scenario images;
-  - Miri approached CI's 20-minute limit (now two shards).
-- **Hyper-V:** the owner booted all six M5 check images on 2026-11-22; all passed (above). The first try failed in `Set-L4Vhdx.ps1` because `Get-VM` found no VM named `l4`: an unelevated window, or the VM missing.
-- **Next:** merge PR #6, then M6.
+2026-11-22: M6, in one session after merging M5 (PR #6).
+- **Spec check:** a fresh agent checked the M6 design against seL4 before any code; its 14 clarifications and ADR 0026 went in first.
+- **Phase 1**, four builders in parallel worktrees: notifications and binding (N); capability transfer, `CNode_SaveCaller` and `CNode_CancelBadgedSends` (X); the IPC reference model over M5's paths (M); libsys and the four done-when tests (U).
+- **Phase 2:** the lead merged N and X (six trivial conflicts), U and M; builder M extended the model to M6's rules; a docs agent wrote the builders' notes into `docs/design.md` and `CLAUDE.md`.
+- **Review and red team:** two fresh reviewers (core; kernel, user side and model) signed off with should-fixes only; the red team found nothing and left a fuzzer and a scenario. A fix round closed the should-fixes.
+- **Also this session:** PR #6 could not be rebase-merged because its 12 merge commits replayed with conflicts; with the owner's go-ahead the branch was rebuilt as 28 linear commits with an identical tree, and merged.
+- **Next:** merge PR #7, then M7.
