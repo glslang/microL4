@@ -667,7 +667,9 @@ resolved with all 64 bits in the sender's CSpace. The receiver names one
 receive slot: `receive_cnode` is a `CPtr` (all 64 bits) to a CNode
 capability in the receiver's CSpace, and `receive_index` with
 `receive_depth` bits names a slot from that CNode, as CNode invocations name
-slots ([Capability lookup](#capability-lookup)). The slot must be empty.
+slots ([Capability lookup](#capability-lookup)). A `receive_depth` of 0 or
+above 64 names no slot, as in seL4's `lookupTargetSlot`; like any other
+unusable receive slot, it is no error. The slot must be empty.
 
 Capabilities move only when all hold:
 
