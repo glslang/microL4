@@ -1,7 +1,7 @@
-//! x86_64 support: boot entry, port I/O, COM1, CPUID, control registers and
-//! MSRs, descriptor tables and traps, the kernel's page tables, the
-//! interrupt controllers and the timer, kernel-object memory for the
-//! capability core, and stopping the machine.
+//! x86_64 support: boot entry, port I/O, COM1 (in a `debug` kernel only),
+//! CPUID, control registers and MSRs, descriptor tables and traps, the
+//! kernel's page tables, the interrupt controllers and the timer,
+//! kernel-object memory for the capability core, and stopping the machine.
 
 mod acpi;
 mod apic;
@@ -22,6 +22,7 @@ mod pic;
 #[cfg(feature = "selftest")]
 mod ring3;
 mod rootimage;
+#[cfg(feature = "debug")]
 pub mod serial;
 mod thread;
 mod timer;

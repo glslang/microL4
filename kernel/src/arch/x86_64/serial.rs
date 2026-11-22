@@ -2,6 +2,12 @@
 //!
 //! COM1 is at the same I/O ports on QEMU's q35 and on Hyper-V Generation 2.
 //! Hyper-V connects it to a named pipe on the host.
+//!
+//! Only a kernel built with `debug` has this module, and it is the only
+//! file that names ports `0x3F8` to `0x3FF` (ADR 0021). Without `debug`,
+//! COM1 belongs to the `uart` server, which reaches it through an IOPort
+//! capability; `cargo xtask test` checks that kernel's disassembly for
+//! UART code (`docs/design.md`, "A release kernel without UART code").
 
 use core::fmt;
 
@@ -61,7 +67,6 @@ fn write_byte(b: u8) {
 
 /// Writes one byte to COM1, `\n` as `\r\n`: `DebugPutChar`, whose byte
 /// need not be UTF-8.
-#[cfg(feature = "debug")]
 pub fn put_byte(b: u8) {
     if b == b'\n' {
         write_byte(b'\r');
