@@ -1577,7 +1577,8 @@ mapped write-back).
 Issues a handler for an ISA IRQ, routed through the MADT's interrupt source
 overrides; without one, ISA IRQ `n` is GSI `n`, edge, active high
 (`InterruptInfo.isa_routes[n]` shows the result). Before the final entry it
-writes the pin masked and edge-triggered and checks that Remote IRR is 0.
+masks the pin, clears a stale Remote IRR and checks that it reads 0
+([ADR 0027](adr/0027-stale-remote-irr.md)).
 
 | Register | Name | Meaning |
 | --- | --- | --- |
@@ -1595,13 +1596,13 @@ active low.
 | `TruncatedMessage` | fewer than 3 registers, or no extra capability |
 | `RangeError(0, 15)` | `isa_irq` > 15 |
 | `InvalidArgument(0)` | the IRQ has no route: its GSI is another IRQ's override target, or no I/O APIC serves it |
-| `RevokeFirst` | the GSI already has a handler, no device vector is free, or the pin's Remote IRR stays set (retry later) |
+| `RevokeFirst` | the GSI already has a handler, no device vector is free, or the pin's Remote IRR stays set though the kernel tried to clear it (retry later) |
 | `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 #### `0x61` `IRQControl_GetIOAPIC`
 
 Issues a handler for a GSI with explicit flags; no override is applied. It
-checks Remote IRR first, as `GetISA` does.
+clears and checks Remote IRR first, as `GetISA` does.
 
 | Register | Name | Meaning |
 | --- | --- | --- |
@@ -1618,7 +1619,7 @@ Extra capability 0: destination root CNode. Result: MR0 `irq`.
 | `TruncatedMessage` | fewer than 5 registers, or no extra capability |
 | `InvalidArgument(0)` | no I/O APIC serves `gsi` |
 | `RangeError(0, 1)` | `trigger` or `polarity` > 1 |
-| `RevokeFirst` | the GSI already has a handler, no device vector is free, or the pin's Remote IRR stays set (retry later) |
+| `RevokeFirst` | the GSI already has a handler, no device vector is free, or the pin's Remote IRR stays set though the kernel tried to clear it (retry later) |
 | `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 #### `0x62` `IRQControl_GetMSI` (M9)
