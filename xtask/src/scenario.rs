@@ -15,12 +15,18 @@
 //! timeout: 60              # seconds; optional, at most 60
 //! qemu_args: -cpu qemu64   # optional; appended to the QEMU command line
 //! expect: microL4 kernel   # a substring of one serial line
+//! next: root: microL4      # the very next line must start with this
 //! send: hello\r            # written to COM1's input once the expects above
 //!                          # it have matched
 //! expect: TEST PASS
 //! forbid: KERNEL PANIC     # no serial line may contain this
 //! ```
 //!
+//! A `next:` follows an `expect:` or another `next:`: the serial line right
+//! after the one the step above it matched must begin with its text, so
+//! nothing was printed between them; any other line there fails the
+//! scenario. The release scenarios use it to show the kernel printed
+//! nothing between the loader's last line and the root task's first.
 //! `exit: timeout` means the guest must still be running when the
 //! scenario's `timeout:`, which it then needs, ends the boot: the only end a
 //! release kernel without a user-level exit has. A `send:` value takes the
@@ -80,6 +86,9 @@ pub enum Step {
     Expect(String),
     /// Bytes written to COM1's input once every `expect:` before it matched.
     Send(Vec<u8>),
+    /// Text the serial line right after the previous step's must start
+    /// with: no line may fall between them.
+    Next(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -153,6 +162,15 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
             }
             "expect" if value.is_empty() => return Err(err("empty expect line").into()),
             "expect" => steps.push(Step::Expect(value.to_string())),
+            "next" if value.is_empty() => return Err(err("empty next line").into()),
+            "next" => {
+                if !matches!(steps.last(), Some(Step::Expect(_) | Step::Next(_))) {
+                    return Err(
+                        err("a `next:` needs an `expect:` or `next:` right above it").into(),
+                    );
+                }
+                steps.push(Step::Next(value.to_string()));
+            }
             "send" if value.is_empty() => return Err(err("empty send line").into()),
             "send" => {
                 // Until the guest's uart has started, OVMF reads COM1, and
@@ -182,7 +200,7 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
         .iter()
         .map(|s| match s {
             Step::Send(bytes) => bytes.len(),
-            Step::Expect(_) => 0,
+            Step::Expect(_) | Step::Next(_) => 0,
         })
         .sum();
     if sent > MAX_SEND_BYTES {
@@ -289,15 +307,22 @@ pub fn clean(raw: &[u8]) -> String {
 /// the same line. A send is released as soon as every expectation before
 /// it has matched, and the expectations after it match only from the next
 /// line on: the rest of the line that released it was printed before the
-/// guest could have read the text.
+/// guest could have read the text. A `next:` must match at the start of the
+/// line after its step's; when it does not, the matcher is broken and
+/// matches nothing more.
 pub struct Matcher<'a> {
     steps: &'a [Step],
     next: usize,
+    broken: Option<String>,
 }
 
 impl<'a> Matcher<'a> {
     pub fn new(steps: &'a [Step]) -> Self {
-        Self { steps, next: 0 }
+        Self {
+            steps,
+            next: 0,
+            broken: None,
+        }
     }
 
     /// Feeds one serial line. Returns the text of each send it released,
@@ -305,7 +330,11 @@ impl<'a> Matcher<'a> {
     pub fn feed(&mut self, line: &str) -> Vec<&'a [u8]> {
         let mut rest = line;
         let mut sends = Vec::new();
-        while let Some(step) = self.steps.get(self.next) {
+        // Whether a step matched on this line.
+        let mut matched = false;
+        while self.broken.is_none()
+            && let Some(step) = self.steps.get(self.next)
+        {
             match step {
                 Step::Expect(_) if !sends.is_empty() => break,
                 Step::Expect(e) => {
@@ -313,6 +342,25 @@ impl<'a> Matcher<'a> {
                         break;
                     };
                     rest = &rest[at + e.len()..];
+                    matched = true;
+                }
+                // Its line is the next one. The parser put an `expect:` or
+                // `next:` right above it, so the line before matched that.
+                Step::Next(_) if matched => break,
+                Step::Next(t) => {
+                    let Some(r) = line.strip_prefix(t.as_str()) else {
+                        let above = match &self.steps[self.next - 1] {
+                            Step::Expect(a) | Step::Next(a) => a.as_str(),
+                            Step::Send(_) => "",
+                        };
+                        self.broken = Some(format!(
+                            "printed {line:?} right after the line with {above:?}, \
+                             where a line starting {t:?} must come"
+                        ));
+                        break;
+                    };
+                    rest = r;
+                    matched = true;
                 }
                 Step::Send(text) => sends.push(text.as_slice()),
             }
@@ -321,13 +369,18 @@ impl<'a> Matcher<'a> {
         sends
     }
 
+    /// Why a `next:` failed, if one did.
+    pub fn broken(&self) -> Option<&str> {
+        self.broken.as_deref()
+    }
+
     pub fn done(&self) -> bool {
         self.next == self.steps.len()
     }
 
     pub fn waiting_for(&self) -> Option<&'a str> {
         self.steps[self.next..].iter().find_map(|s| match s {
-            Step::Expect(e) => Some(e.as_str()),
+            Step::Expect(e) | Step::Next(e) => Some(e.as_str()),
             Step::Send(_) => None,
         })
     }
@@ -468,12 +521,15 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
         why.push(format!("printed forbidden {text:?} in {line:?}"));
     }
     why.extend(send_error);
+    why.extend(matcher.broken().map(String::from));
     let secs = sc.timeout.as_secs();
     let waiting = matcher
         .waiting_for()
         .map(|w| format!(" waiting for {w:?}"))
         .unwrap_or_default();
     match (sc.exit.status(), timed_out) {
+        // Its steps stopped there; that is the failure.
+        _ if matcher.broken().is_some() => {}
         (None, true) if matcher.done() => {}
         (None, true) => why.push(format!("ran until the {secs} s timeout{waiting}")),
         (None, false) => why.push(format!(
@@ -536,6 +592,10 @@ expect: TEST PASS   # the kernel's success marker
 
     fn send(s: &[u8]) -> Step {
         Step::Send(s.into())
+    }
+
+    fn next(n: &str) -> Step {
+        Step::Next(n.into())
     }
 
     #[test]
@@ -611,6 +671,52 @@ forbid: KERNEL PANIC     # what a debug kernel would print
                 .kernel,
             Kernel::Selftest
         );
+    }
+
+    #[test]
+    fn parses_next_lines() {
+        let s = parse(
+            "release",
+            "\
+exit: success
+expect: entering kernel
+forbid: microL4 kernel
+next: root: microL4 root task   # nothing between
+next: root: image
+expect: TEST PASS
+",
+        )
+        .unwrap();
+        assert_eq!(
+            s.steps,
+            vec![
+                expect("entering kernel"),
+                next("root: microL4 root task"),
+                next("root: image"),
+                expect("TEST PASS"),
+            ]
+        );
+        for (text, why) in [
+            (
+                "exit: success\nnext: x\n",
+                "2: a `next:` needs an `expect:`",
+            ),
+            (
+                "exit: success\nnext: x\nexpect: y\n",
+                "needs an `expect:` or `next:`",
+            ),
+            (
+                "exit: success\nexpect: x\nsend: y\nnext: z\n",
+                "needs an `expect:` or `next:`",
+            ),
+            (
+                "exit: success\nexpect: x\nnext:   # nothing\n",
+                "empty next",
+            ),
+        ] {
+            let e = parse("t", text).unwrap_err().to_string();
+            assert!(e.contains(why), "{text:?} gave {e:?}, wanted {why:?}");
+        }
     }
 
     #[test]
@@ -775,6 +881,69 @@ forbid: KERNEL PANIC     # what a debug kernel would print
         assert_eq!(m.feed("ready"), [b"bye\r"]);
         assert!(m.done());
         assert_eq!(m.waiting_for(), None);
+    }
+
+    #[test]
+    fn matcher_takes_next_only_from_the_start_of_the_next_line() {
+        let steps = vec![
+            expect("entering kernel"),
+            next("root: microL4"),
+            next("root: image"),
+            expect("ok"),
+        ];
+        let lines = [
+            "loader: entering kernel",
+            "root: microL4 root task",
+            "root: image ok",
+        ];
+        let mut m = Matcher::new(&steps);
+        assert!(m.feed("loader: microL4 loader").is_empty());
+        for l in lines {
+            m.feed(l);
+        }
+        // An `expect:` after it matches on the rest of its line.
+        assert!(m.done(), "{:?}", m.waiting_for());
+        assert_eq!(m.broken(), None);
+        // A line between, a line that has the text but does not start
+        // with it, or the text further along the same line.
+        for (between, after) in [
+            (Some("microL4 kernel"), "root: microL4 root task"),
+            (None, "Xroot: microL4 root task"),
+            (None, " root: microL4 root task"),
+        ] {
+            let mut m = Matcher::new(&steps);
+            m.feed(lines[0]);
+            if let Some(b) = between {
+                m.feed(b);
+            }
+            m.feed(after);
+            let why = m.broken().expect("broken");
+            assert!(
+                why.contains("right after the line with \"entering kernel\"")
+                    && why.contains("starting \"root: microL4\""),
+                "{why}"
+            );
+            // Broken for good: nothing more matches.
+            m.feed("root: microL4 root task");
+            m.feed("root: image ok");
+            assert!(!m.done());
+        }
+        let mut m = Matcher::new(&steps);
+        m.feed("loader: entering kernel root: microL4");
+        assert_eq!(m.broken(), None);
+        assert_eq!(m.waiting_for(), Some("root: microL4"));
+        m.feed("ok");
+        assert!(m.broken().unwrap().starts_with("printed \"ok\""));
+        // A `next:` after a `next:` is the line after that one's.
+        let mut m = Matcher::new(&steps);
+        m.feed(lines[0]);
+        m.feed(lines[1]);
+        m.feed("noise");
+        assert!(
+            m.broken()
+                .unwrap()
+                .contains("after the line with \"root: microL4\"")
+        );
     }
 
     #[test]

@@ -5,12 +5,14 @@
 # panic message's DebugPutChar raises UnknownSyscall, the kernel sends the
 # fault to endpoint F, and watch writes TEST FAIL through Polled on the
 # root task's COM1 IOPort and ends the run through isa-debug-exit with
-# failure. Nothing else reports it: the kernel prints nothing.
+# failure. Nothing else reports it: the kernel prints nothing, which the
+# `next:` shows for the boot (root prints first once console runs).
 kernel: release
 cmdline: test=release_fault
 exit: failure
 expect: loader: microL4 loader
-expect: release_fault: revoking the COM1 IOPort, which deletes uart's copy
+expect: entering kernel
+next: release_fault: revoking the COM1 IOPort, which deletes uart's copy
 expect: TEST FAIL: uart fault 2 (UnknownSyscall), MR0 to MR3
 forbid: console answered after uart lost its IOPort
 forbid: watch did not end the run
