@@ -62,8 +62,15 @@ send: \x142hellp\x7fo\x15hi a\r    # Ctrl-T 2, a typo, DEL, Ctrl-U, the line
 expect: [console] focus 2 (a)
 expect: a: read "hi a"
 expect: console: ok   a read exactly "hi a" and b exactly "to b"; nothing else reached a client
+# Type-ahead (review): a's line waits before its Read, which console
+# answers at once after flushing a's 35-byte prompt; line and prompt both
+# pass MR3, so they share the IPC buffer with console's uart Write.
+expect: console: type ahead next
+send: typed ahead for a, more than 24 bytes\r
+expect: a: read "typed ahead for a, more than 24 bytes"
+expect: console: ok   a's Read was answered at once with the 37-byte line typed ahead, after its prompt was flushed
 expect: console: uart:
-expect: , 22 bytes received,
-expect: console: ok   receive and THRE interrupts both served, all 22 bytes the harness sent received, no overruns
+expect: , 60 bytes received,
+expect: console: ok   receive and THRE interrupts both served, all 60 bytes the harness sent received, no overruns
 expect: TEST PASS
 expect: DEBUG HALT 0 from TCB
