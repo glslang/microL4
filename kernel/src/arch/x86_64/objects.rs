@@ -44,7 +44,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use l4core::bootinfo::{BOOTINFO_SIZE, BootInfo};
 use l4core::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS, SLOT_SIZE, TCB_BITS};
 use l4core::handoff::KERNEL_VIRT_BASE;
-use l4core::ioport::{self, IoPorts, PortBitmap, Width};
+use l4core::ioport::{self, IoPorts, PortAccess, PortBitmap, Width};
 use l4core::ipc::{self, IpcEnv};
 use l4core::irq::{self, Action, IRQS, Interrupts, IrqTable, Routing};
 use l4core::kernel::{Kernel, Preempted};
@@ -521,9 +521,13 @@ impl Interrupts for Objects {
 }
 
 /// The port bitmap, and the port instructions in [`super::io`], for
-/// `l4core::ioport`. `port_in` and `port_out` are never inlined: they are
-/// the IOPort executor, one of the three places a release kernel may call
-/// [`super::io`] from, which the disassembly check finds by their symbols.
+/// `l4core::ioport`. `port_in` and `port_out` are the IOPort executor: they
+/// take a [`PortAccess`], which only `l4core::ioport::invoke_port` builds,
+/// after its checks, so no other kernel code can name a port to them. They
+/// are never inlined, being one of the three places a release kernel may
+/// call [`super::io`] from, and the disassembly check finds them, and
+/// requires `invoke_port::<Objects>` to be their only caller, by their
+/// symbols (`docs/design.md`, "A release kernel without UART code").
 impl IoPorts for Objects {
     fn port_bitmap(&self) -> &PortBitmap {
         // SAFETY: as in `irq_table`.
@@ -536,16 +540,24 @@ impl IoPorts for Objects {
     }
 
     #[inline(never)]
-    fn port_in(&mut self, port: u16, width: Width) -> u32 {
-        // SAFETY: `l4core::ioport` checked that the invoked IOPort
-        // capability's range covers every byte of the access, and no range
-        // ever holds the ports the kernel keeps (PIC and IMCR), so the
-        // access reaches only a device the root task gave its holder; `in`
+    fn port_in(&mut self, access: PortAccess) -> u32 {
+        let port = access.port();
+        // SAFETY: `access` is a `PortAccess`, whose fields and constructor
+        // are private to `l4core::ioport`: only `invoke_port` builds one,
+        // once it has checked that the invoked IOPort capability's range
+        // covers every byte of the access, so no kernel code can reach
+        // this with a port of its own. The capability is the one `Objects`
+        // keeps in the invoked slot: in the release kernel,
+        // `invoke_port::<Objects>` is this function's only caller, which
+        // the disassembly check requires; the selftest kernels' wrapper
+        // around `Objects` reads slots through it. No range ever holds the
+        // ports the kernel keeps (PIC and IMCR), so the access reaches
+        // only a device the root task gave the capability's holder; `in`
         // touches no memory. A device's DMA or a port that resets the
         // machine is the trust the root task places in that holder
         // (`docs/design.md`, "Ports the kernel uses").
         unsafe {
-            match width {
+            match access.width() {
                 Width::Byte => u32::from(io::inb(port)),
                 Width::Word => u32::from(io::inw(port)),
                 Width::Dword => io::inl(port),
@@ -554,10 +566,11 @@ impl IoPorts for Objects {
     }
 
     #[inline(never)]
-    fn port_out(&mut self, port: u16, width: Width, value: u32) {
+    fn port_out(&mut self, access: PortAccess, value: u32) {
+        let port = access.port();
         // SAFETY: as in `port_in`; `out` touches no memory.
         unsafe {
-            match width {
+            match access.width() {
                 Width::Byte => io::outb(port, value as u8),
                 Width::Word => io::outw(port, value as u16),
                 Width::Dword => io::outl(port, value),

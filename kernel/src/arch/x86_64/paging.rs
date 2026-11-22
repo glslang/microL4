@@ -846,12 +846,12 @@ mod vspace_test {
             self.0.port_bitmap_mut()
         }
 
-        fn port_in(&mut self, port: u16, width: l4core::ioport::Width) -> u32 {
-            self.0.port_in(port, width)
+        fn port_in(&mut self, access: l4core::ioport::PortAccess) -> u32 {
+            self.0.port_in(access)
         }
 
-        fn port_out(&mut self, port: u16, width: l4core::ioport::Width, value: u32) {
-            self.0.port_out(port, width, value)
+        fn port_out(&mut self, access: l4core::ioport::PortAccess, value: u32) {
+            self.0.port_out(access, value)
         }
     }
 

@@ -4,9 +4,11 @@
 //! deletion hooks.
 //!
 //! Nothing here executes `in` or `out`: an access is a call of
-//! [`IoPorts::port_in`] or [`IoPorts::port_out`] with the port, width and
-//! value, which the kernel performs in `arch/x86_64/io.rs` and the host
-//! tests record.
+//! [`IoPorts::port_in`] or [`IoPorts::port_out`] with a [`PortAccess`],
+//! the port and width [`invoke_port`] checked, and the value, which the
+//! kernel performs in `arch/x86_64/io.rs` and the host tests record. Only
+//! this module builds a `PortAccess`, so kernel code outside `l4core`
+//! cannot name a port to those two methods.
 //!
 //! - `IOPortControl_Issue` checks the range, the kernel's ports and the
 //!   bitmap, then the destination slot, and makes an IOPort capability for
@@ -174,13 +176,61 @@ pub trait IoPorts {
     /// The bitmap, to change.
     fn port_bitmap_mut(&mut self) -> &mut PortBitmap;
 
-    /// Reads `width` bytes from `port`, zero-extended. The caller checked
-    /// that an IOPort capability covers them.
-    fn port_in(&mut self, port: u16, width: Width) -> u32;
+    /// Reads `access.width()` bytes from `access.port()`, zero-extended.
+    fn port_in(&mut self, access: PortAccess) -> u32;
 
-    /// Writes the low `width` bytes of `value` to `port`. The caller
-    /// checked that an IOPort capability covers them.
-    fn port_out(&mut self, port: u16, width: Width, value: u32);
+    /// Writes the low `access.width()` bytes of `value` to
+    /// `access.port()`.
+    fn port_out(&mut self, access: PortAccess, value: u32);
+}
+
+/// An access to I/O ports that [`invoke_port`] checked: the IOPort
+/// capability it invoked, as its kernel's `load` read the slot, covers
+/// each of the `width()` bytes from `port()`. [`IoPorts::port_in`] and
+/// [`IoPorts::port_out`] take one, so the kernel's port instructions run
+/// only for ports such a capability covers. Its fields are private and
+/// only this module builds one, after those checks, so kernel code that
+/// calls the two methods with a port of its own choosing does not
+/// compile:
+///
+/// ```compile_fail,E0451
+/// use l4core::ioport::{PortAccess, Width};
+/// let com1 = PortAccess { port: 0x3F8, width: Width::Byte };
+/// ```
+///
+/// ```compile_fail,E0624
+/// use l4core::ioport::{PortAccess, Width};
+/// let com1 = PortAccess::checked(0x3F8, Width::Byte);
+/// ```
+///
+/// It is neither `Clone` nor `Copy`, so each check pays for one access.
+/// What the token cannot rule out is a kernel type whose `load` returns a
+/// capability no slot holds, handed to `invoke_port` and forwarding the
+/// token to the kernel's objects: the release kernel's disassembly check
+/// therefore requires `invoke_port` instantiated with the kernel's own
+/// objects to be the only caller of the two methods (`docs/design.md`, "A
+/// release kernel without UART code").
+#[derive(Debug, PartialEq, Eq)]
+pub struct PortAccess {
+    port: u16,
+    width: Width,
+}
+
+impl PortAccess {
+    /// The access `invoke_port` checked; nothing else may call this.
+    fn checked(port: u16, width: Width) -> PortAccess {
+        PortAccess { port, width }
+    }
+
+    /// The first port.
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The bytes from it, as a width.
+    pub const fn width(&self) -> Width {
+        self.width
+    }
 }
 
 /// Decodes and performs the IOPortControl invocation `msg` of the
@@ -215,7 +265,11 @@ pub fn invoke_control<K: Kernel + IoPorts + ?Sized>(
 }
 
 /// Decodes and performs the IOPort invocation `msg` of the capability in
-/// `slot`: In and Out of 8, 16 and 32 bits.
+/// `slot`: In and Out of 8, 16 and 32 bits. The one builder of a
+/// [`PortAccess`]. Never inlined, so that its symbol bounds its calls: the
+/// release kernel's disassembly check requires it, by name, to be the only
+/// caller of the kernel's `port_in` and `port_out`.
+#[inline(never)]
 pub fn invoke_port<K: Threads + IoPorts + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
@@ -244,12 +298,12 @@ pub fn invoke_port<K: Threads + IoPorts + ?Sized>(
     if port < u64::from(first) || port + width.bytes() - 1 > u64::from(last) {
         return Err(SyscallError::IllegalOperation.into());
     }
-    let port = port as u16;
+    let access = PortAccess::checked(port as u16, width);
     if out {
-        k.port_out(port, width, value as u32 & width.mask());
+        k.port_out(access, value as u32 & width.mask());
         Ok(Reply::EMPTY)
     } else {
-        let v = k.port_in(port, width) & width.mask();
+        let v = k.port_in(access) & width.mask();
         Ok(invoke::results(k, &[u64::from(v)]))
     }
 }
