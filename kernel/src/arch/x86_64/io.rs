@@ -33,7 +33,6 @@ pub unsafe fn outb(port: u16, value: u8) {
 ///
 /// As for [`outb`].
 #[inline(never)]
-#[expect(dead_code, reason = "IOPort_Out16 (M7) is its only caller")]
 pub unsafe fn outw(port: u16, value: u16) {
     // SAFETY: the caller vouches for the port; `out` touches no memory.
     unsafe {
@@ -76,7 +75,6 @@ pub unsafe fn inb(port: u16) -> u8 {
 ///
 /// As for [`inb`].
 #[inline(never)]
-#[expect(dead_code, reason = "IOPort_In16 (M7) is its only caller")]
 pub unsafe fn inw(port: u16) -> u16 {
     let value: u16;
     // SAFETY: the caller vouches for the port; `in` touches no memory.
@@ -92,7 +90,6 @@ pub unsafe fn inw(port: u16) -> u16 {
 ///
 /// As for [`inb`].
 #[inline(never)]
-#[expect(dead_code, reason = "IOPort_In32 (M7) is its only caller")]
 pub unsafe fn inl(port: u16) -> u32 {
     let value: u32;
     // SAFETY: the caller vouches for the port; `in` touches no memory.

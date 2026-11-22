@@ -6,8 +6,13 @@
 //! - `0xFE`, the local APIC error: read and clear ESR, log, EOI.
 //! - `0xFF`, the spurious vector: nothing, no EOI.
 //! - `0x20`-`0x2F`, the masked PIC: log; EOI only if the ISR bit is set.
-//! - `0xF0`-`0xFC`, IPIs, and `0x30`-`0xEF`, devices, which no one can
-//!   issue before M7: log, EOI.
+//! - `0xF0`-`0xFC`, IPIs: log, EOI.
+//! - `0x30`-`0xEF`, devices (M7): `l4core::irq::deliver` masks the pin as
+//!   its trigger asks and signals the notification bound to its handler,
+//!   or drops an interrupt whose IRQ is no longer issued; then EOI. The
+//!   caller's scheduler then runs a thread the signal woke if it outranks
+//!   the one interrupted (`docs/design.md`, "Delivery", "Scheduler action
+//!   and decision").
 //!
 //! `l4core::apic::needs_eoi` decides every EOI.
 
@@ -51,7 +56,7 @@ pub fn handle(vector: u8) {
         ),
         Kind::Ipi => kprintln!("irq: unexpected IPI vector {vector:#04x}"),
         Kind::Device { irq } => {
-            kprintln!("irq: device vector {vector:#04x} (IRQ {irq}) before any was issued");
+            l4core::irq::deliver(&mut Objects::begin(), irq);
         }
         Kind::Exception | Kind::Fatal | Kind::CannotOccur => {
             panic!("vector {vector:#04x} is not an interrupt")

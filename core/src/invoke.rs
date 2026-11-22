@@ -1,7 +1,10 @@
 //! Decoding and performing kernel invocations: `Untyped_Retype` and the
 //! CNode methods (`docs/abi.md`, "Untyped invocations", "CNode invocations",
 //! "Error detail words" and "Invocation label index"; `docs/design.md`,
-//! "System-call dispatch").
+//! "System-call dispatch"), and the routing of every other capability type
+//! to its own decoder: TCBs, paging objects, and from M7 IRQControl,
+//! IRQHandler, IOPortControl and IOPort ([`crate::irq`],
+//! [`crate::ioport`]).
 //!
 //! The caller has looked up the invoked capability's slot and each extra
 //! capability, as a thread's `syscall` does. [`invoke`] checks the label and
@@ -48,9 +51,12 @@ use crate::cap::{Cap, CapType, Rights};
 use crate::cnode;
 use crate::cspace;
 use crate::error::{LookupFailure, SyscallError};
+use crate::ioport::{self, IoPorts};
 use crate::ipc::{self, EndpointCap};
+use crate::irq::{self, Interrupts};
 use crate::kernel::{Kernel, Preempted};
 use crate::slot::{SlotAddr, SlotMemory};
+use crate::tcb::{self, Threads};
 use crate::untyped::{self, RetypeArgs, RetypeError};
 use crate::vspace::{self, PagingStore};
 
@@ -102,7 +108,7 @@ pub struct Message<'a> {
 impl Message<'_> {
     /// MR0 to MR`N - 1`, if the message has them and at least `caps` extra
     /// capabilities: each method's one length check, before any lookup.
-    fn args<const N: usize>(&self, caps: usize) -> Result<[u64; N], SyscallError> {
+    pub(crate) fn args<const N: usize>(&self, caps: usize) -> Result<[u64; N], SyscallError> {
         match self.mrs.first_chunk::<N>() {
             Some(words) if self.extra_caps.len() >= caps => Ok(*words),
             _ => Err(SyscallError::TruncatedMessage),
@@ -111,7 +117,7 @@ impl Message<'_> {
 
     /// Extra capability `i`'s capability; [`Message::args`] checked that it
     /// is there.
-    fn cap(&self, i: usize) -> Cap {
+    pub(crate) fn cap(&self, i: usize) -> Cap {
         self.extra_caps[i].cap
     }
 }
@@ -167,10 +173,12 @@ impl From<RetypeError> for InvokeError {
 /// An empty slot or a Zombie is `InvalidCapability` 0. An Untyped decodes
 /// `Untyped_Retype`, a CNode its methods, a TCB its methods
 /// ([`crate::tcb::invoke`]), a Frame or a PDPT, page directory or page
-/// table its map and unmap methods ([`vspace::invoke`]); any other label,
-/// and every other capability type until its milestone, is
-/// `IllegalOperation`.
-pub fn invoke<K: Kernel + PagingStore + crate::tcb::Threads + ?Sized>(
+/// table its map and unmap methods ([`vspace::invoke`]), IRQControl and
+/// IRQHandler theirs ([`irq::invoke_control`], [`irq::invoke_handler`]),
+/// and IOPortControl and IOPort theirs ([`ioport::invoke_control`],
+/// [`ioport::invoke_port`]); any other label, and every other capability
+/// type until its milestone, is `IllegalOperation`.
+pub fn invoke<K: Kernel + PagingStore + Threads + Interrupts + IoPorts + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     msg: &Message<'_>,
@@ -184,8 +192,51 @@ pub fn invoke<K: Kernel + PagingStore + crate::tcb::Threads + ?Sized>(
         CapType::Frame | CapType::PageTable | CapType::PageDirectory | CapType::Pdpt => {
             vspace::invoke(k, slot, msg)
         }
+        CapType::IrqControl => irq::invoke_control(k, slot, msg),
+        CapType::IrqHandler => irq::invoke_handler(k, slot, msg),
+        CapType::IoPortControl => ioport::invoke_control(k, slot, msg),
+        CapType::IoPort => ioport::invoke_port(k, slot, msg),
         _ => Err(SyscallError::IllegalOperation.into()),
     }
+}
+
+/// Writes `words` as the invoking thread's MR0 and up, if it invoked by
+/// `Call`, and returns the reply's length: the words it received. Without
+/// a writable IPC buffer a thread receives MR0 to MR3 only. Nothing is
+/// written for `Send` or `NBSend`, or with no invoking thread.
+pub(crate) fn results<E: Threads + ?Sized>(e: &mut E, words: &[u64]) -> Reply {
+    let mut length = words.len();
+    if let Some(caller) = e.scheduler().current().filter(|_| e.invoked_by_call()) {
+        for (i, &w) in words.iter().enumerate() {
+            if !tcb::set_mr(e, caller, i, w) {
+                length = i;
+                break;
+            }
+        }
+    }
+    Reply { length }
+}
+
+/// The destination slot of an IRQControl or IOPortControl invocation
+/// (`docs/abi.md`, "Interrupts, I/O ports and Hyper-V", Conventions): the
+/// slot `index` and `depth` name from the CNode `root`, which must be
+/// empty. Errors in the conventions' order: `RangeError(1, 64)` for the
+/// depth, then `FailedLookup` (an `InvalidRoot` root included), then
+/// `DeleteFirst`.
+pub(crate) fn destination<M: SlotMemory + ?Sized>(
+    mem: &M,
+    root: Cap,
+    index: u64,
+    depth: u64,
+) -> Result<SlotAddr, SyscallError> {
+    if depth == 0 || depth > 64 {
+        return Err(SyscallError::RangeError { min: 1, max: 64 });
+    }
+    let at = cspace::lookup_slot(mem, root, index, depth, false)?;
+    if !mem.load(at).cap.is_null() {
+        return Err(SyscallError::DeleteFirst);
+    }
+    Ok(at)
 }
 
 /// `Untyped_Retype` (`docs/abi.md`): MR0 `type`, MR1 `size_bits`, MR2
@@ -239,7 +290,7 @@ fn untyped_invocation<K: Kernel + ?Sized>(
 
 /// The CNode methods. The invoked CNode capability is the root of the first
 /// slot argument, MR0 and MR1.
-fn cnode_invocation<K: crate::tcb::Threads + ?Sized>(
+fn cnode_invocation<K: Threads + ?Sized>(
     k: &mut K,
     cnode: Cap,
     msg: &Message<'_>,

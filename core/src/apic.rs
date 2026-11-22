@@ -283,6 +283,34 @@ pub const IOAPIC_ID: u32 = 0x00;
 pub const IOAPIC_VERSION: u32 = 0x01;
 /// A redirection entry's mask bit, in its low word.
 pub const REDIRECTION_MASKED: u32 = 1 << 16;
+/// A redirection entry's trigger mode bit: 1 level, 0 edge.
+pub const REDIRECTION_LEVEL: u32 = 1 << 15;
+/// A redirection entry's Remote IRR bit, read-only: a level interrupt was
+/// sent and no EOI for its vector has come yet.
+pub const REDIRECTION_REMOTE_IRR: u32 = 1 << 14;
+/// A redirection entry's polarity bit: 1 active low, 0 active high.
+pub const REDIRECTION_ACTIVE_LOW: u32 = 1 << 13;
+/// A redirection entry's vector, bits 0-7. Delivery mode (bits 8-10) and
+/// destination mode (bit 11) are 0, fixed and physical, in every entry the
+/// kernel writes.
+pub const REDIRECTION_VECTOR: u32 = 0xFF;
+/// The I/O APIC's EOI register, at offset `0x40` of its MMIO block, from
+/// version [`IOAPIC_EOI_VERSION`]: writing a vector clears Remote IRR in
+/// every level entry with that vector (ADR 0027).
+pub const IOAPIC_EOI: u32 = 0x40;
+/// The first I/O APIC version with the EOI register (QEMU's `0x20`);
+/// Hyper-V's `0x11` has none.
+pub const IOAPIC_EOI_VERSION: u8 = 0x20;
+/// The bytes of an I/O APIC's register block: register select and window
+/// below [`IOAPIC_EOI_VERSION`], `0x44` with the EOI register. All of it
+/// must lie in the I/O APIC's page of the device window.
+pub const fn ioapic_block(version: u8) -> u32 {
+    if version >= IOAPIC_EOI_VERSION {
+        IOAPIC_EOI + 4
+    } else {
+        IOWIN + 4
+    }
+}
 /// The most pins an I/O APIC can have: the 8-bit register select reaches
 /// redirection entries 0 to 119 only (registers `0x10`-`0xFF`).
 pub const MAX_PINS: u16 = 120;
@@ -302,6 +330,29 @@ pub const fn redirection_high(pin: u16) -> u32 {
 /// field kept, so the pin keeps its vector until M7 issues it.
 pub const fn redirection_masked(old: u32) -> u32 {
     old | REDIRECTION_MASKED
+}
+
+/// The low word of an issued pin's entry: `vector`, fixed delivery,
+/// physical destination, the trigger and polarity given, unmasked.
+pub const fn redirection_entry(vector: u8, level: bool, active_low: bool) -> u32 {
+    let trigger = if level { REDIRECTION_LEVEL } else { 0 };
+    let polarity = if active_low {
+        REDIRECTION_ACTIVE_LOW
+    } else {
+        0
+    };
+    vector as u32 | trigger | polarity
+}
+
+/// The high word of an issued pin's entry: physical destination
+/// `apic_id`, in bits 24-31.
+pub const fn redirection_destination(apic_id: u8) -> u32 {
+    (apic_id as u32) << 24
+}
+
+/// Whether a redirection entry's low word has Remote IRR set.
+pub const fn remote_irr(low: u32) -> bool {
+    low & REDIRECTION_REMOTE_IRR != 0
 }
 
 /// The I/O APIC version register.

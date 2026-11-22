@@ -4,8 +4,9 @@
 //! builds for the host and runs under `cargo test` and Miri. It holds the boot
 //! handoff ABI, the ELF parser and the command-line parser (M0), the
 //! capability core (M2): capabilities and slots, the derivation list, capability
-//! addressing, the slot operations and untyped retype; and from M3 the CPU
-//! feature check and the kernel device window.
+//! addressing, the slot operations and untyped retype; from M3 the CPU
+//! feature check and the kernel device window; and from M7 interrupts
+//! ([`irq`]) and I/O ports ([`ioport`]).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -36,7 +37,9 @@ pub mod handoff;
 pub mod hpet;
 pub mod hyperv;
 pub mod invoke;
+pub mod ioport;
 pub mod ipc;
+pub mod irq;
 pub mod kernel;
 pub mod objmem;
 pub mod regs;
