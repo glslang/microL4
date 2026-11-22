@@ -3332,7 +3332,8 @@ the notification capability they hold.
 The capability's badge plays no part: a badged capability waits on the same
 word as an unbadged one. If `N` is bound, only its bound thread may wait on
 it; any other thread takes a capability fault in the receive phase, the same
-fault as for a capability without Read (seL4 `handleRecv`). A
+fault as for a capability without Read (MissingCapability with 0 bits left,
+seL4 `handleRecv`; [ADR 0026](adr/0026-receive-phase-cap-faults.md)). A
 bound thread that waits on another notification gets nothing from its own
 (seL4 `receiveSignal` does not look at the binding).
 

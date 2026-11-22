@@ -343,7 +343,8 @@ from MR1, in capability faults where [CapFault](#capfault-1) puts them.
 | `GuardMismatch` | the CNode's guard is longer than the bits left, or differs from them |
 
 Bits left is the number of `CPtr` bits not yet resolved where the lookup
-stopped; it is 0 after a slot argument resolved exactly.
+stopped; it is 0 after a slot argument resolved exactly, and in a receive
+phase's capability fault on a slot it reached ([CapFault](#capfault-1)).
 
 ### Error detail words
 
@@ -1212,6 +1213,13 @@ becomes `Inactive` and no message is sent.
 | 1 | `addr`: the CPtr that failed |
 | 2 | `in_recv_phase`: 1 if the failure was in a receive phase, else 0 |
 | 3 to 6 | the lookup-failure description, one to four words ([Lookup failure description](#lookup-failure-description)): type 1 `InvalidRoot`, 2 `MissingCapability`, 3 `DepthMismatch` or 4 `GuardMismatch`; then bits left; then, for `DepthMismatch`, bits found, or for `GuardMismatch`, the guard and its size (seL4 `setMRs_lookup_failure`) |
+
+A receive phase whose `CPtr` resolves to a slot it cannot use (empty, not
+an endpoint or notification, an endpoint or notification without Read, or
+a notification bound to another thread) reports `MissingCapability` with 0
+bits left, whatever bits the lookup left unresolved: `in_recv_phase` 1 and
+length 5 (seL4 `handleRecv`, `src/api/syscall.c`;
+[ADR 0026](adr/0026-receive-phase-cap-faults.md)).
 
 #### UnknownSyscall (2)
 
