@@ -12,15 +12,19 @@
 # another line would be missing from its own: console keeps each client's
 # unfinished line until its newline. The 300-byte b2 line arrives in three
 # 100-byte writes with a's whole line between them; b's burst of twelve
-# 200-byte lines reaches uart in back-to-back writes, some of which uart may
-# hold on hardware; QEMU's transmitter empties at once, so it holds none (Stats
-# shows 0 Writes held). Then each client
-# writes a prompt and reads; the harness focuses b with Ctrl-T 3 and types
-# its line, then focuses a and types a line with a typo, DEL and Ctrl-U.
-# Root checks each client read exactly its line, and uart's Stats: receive
-# and THRE interrupts served, exactly the 22 bytes sent, no overruns. The
-# echoed input lines are not expected: whether a prompt shows depends on
-# whether the client's Read came before its input (host tests pin echo).
+# 200-byte lines is more than uart's 2048-byte transmit queue holds, the
+# case where uart holds a Write of console's until the queue drains (QEMU's
+# UART drains so fast that Stats shows 0 Writes held; the host tests cover
+# held Writes). Then each client writes a prompt and reads; the harness
+# focuses b with Ctrl-T 3 and types its line, then focuses a and types a
+# line with a typo, DEL and Ctrl-U. Root checks each client read exactly
+# its line; after the type-ahead part below, that one more Read by each
+# client, client 1's made for root by its thread r, waits in console, so
+# nothing else the harness typed reached a client; and uart's Stats:
+# receive and THRE interrupts served, exactly the 60 bytes sent, no
+# overruns. The echoed input lines are not expected: whether a prompt
+# shows depends on whether the client's Read came before its input (host
+# tests pin echo).
 cmdline: test=console
 exit: success
 expect: microL4 kernel
@@ -63,7 +67,7 @@ expect: b: read "to b"
 send: \x142hellp\x7fo\x15hi a\r    # Ctrl-T 2, a typo, DEL, Ctrl-U, the line
 expect: [console] focus 2 (a)
 expect: a: read "hi a"
-expect: console: ok   a read exactly "hi a" and b exactly "to b"; nothing else reached a client
+expect: console: ok   a read exactly "hi a" and b exactly "to b"
 # Type-ahead (review): a's line waits before its Read, which console
 # answers at once after flushing a's 35-byte prompt; line and prompt both
 # pass MR3, so they share the IPC buffer with console's uart Write.
@@ -71,6 +75,7 @@ expect: console: type ahead next
 send: typed ahead for a, more than 24 bytes\r
 expect: a: read "typed ahead for a, more than 24 bytes"
 expect: console: ok   a's Read was answered at once with the 37-byte line typed ahead, after its prompt was flushed
+expect: console: ok   nothing else reached a client: r (for root, client 1), a and b each Read once more, and console saved all three Reads
 expect: console: uart:
 expect: , 60 bytes received,
 expect: console: ok   receive and THRE interrupts both served, all 60 bytes the harness sent received, no overruns

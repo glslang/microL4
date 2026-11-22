@@ -6,14 +6,19 @@
 //! The root task prints its summary through `DebugPutChar`, starts
 //! `watch`, `uart` and `console` (`servers.rs`), attaches as client 1,
 //! points its own output at console and starts clients `a` (badge 2) and
-//! `b` (badge 3), each in the root task's VSpace with a CSpace of its own
-//! and an IPC buffer in KiB 1 or 2 of the root task's buffer frame. A
-//! client asks for its next step with a `Call` on endpoint D that reports
-//! on its last one (label `0x130`); its fault endpoint is the same
-//! capability, so the root task tells a fault from a report by the label.
-//! The root task answers one client at a time and keeps the other's reply
-//! capability saved, so every write boundary is fixed, and it blocks only
-//! on D or in calls to console and uart, never in a call to a client.
+//! `b` (badge 3), and `r`, which reads as client 1 for it, each in the
+//! root task's VSpace with a CSpace of its own and an IPC buffer in KiB 1,
+//! 2 or 3 of the root task's buffer frame. A client asks for its next step
+//! with a `Call` on endpoint D that reports on its last one (label
+//! `0x130`); its fault endpoint is the same capability, so the root task
+//! tells a fault from a report by the label. The root task answers one
+//! client at a time and keeps the others' reply capabilities saved, so
+//! every write boundary is fixed, and it blocks only on D or in calls to
+//! console and uart, never in a call to a client.
+//!
+//! At the end each client, root included through `r`, Reads once more,
+//! and console must save all three Reads: nothing else the harness typed
+//! reached a client.
 
 use core::fmt::Write;
 
@@ -23,10 +28,10 @@ use libsys::invoke::{cnode_mint, cnode_save_caller, tcb_resume, tcb_set_sched_pa
 use libsys::proto::MAX_BYTES;
 use libsys::{
     BootInfo, CPtr, CallError, Ipc, Message, MessageInfo, ObjectAlloc, ObjectType, Rights, Slot,
-    call, println, recv, send,
+    call, nb_recv, println, recv, send,
 };
 use root::check::console::{
-    self as check, A, Action, B, B2_LEN, BURST_LINES, CONSOLE_INPUT_BYTES, INPUT_STEPS,
+    self as check, A, Action, B, B2_LEN, BURST_LINES, CONSOLE_INPUT_BYTES, DRAIN_STEP, INPUT_STEPS,
     INTERLEAVED_STEPS, REPORT, ROOT, Report, SCRIPT, STARTED, TYPEAHEAD_INPUT_BYTES,
     TYPEAHEAD_LINE, TYPEAHEAD_STEP,
 };
@@ -65,15 +70,16 @@ pub fn run(bi: &BootInfo) -> ! {
         .unwrap_or_else(|| fail!("console: no free slots"));
     // The saved reply capability of client `badge`.
     let saved_slot = |badge: u64| saved + badge;
-    for (badge, stack, kib) in [(A, STACKS[1], 1), (B, STACKS[2], 2)] {
+    // r is client 1, as root is: its console capability has root's badge.
+    for (badge, stack, kib) in [(A, STACKS[1], 1), (B, STACKS[2], 2), (ROOT, STACKS[3], 3)] {
         start_client(bi, ipc, &mut objects, s.console_ep, d, badge, stack, kib);
     }
     println!(
-        "console: clients a (badge {A}) and b (badge {B}), priority {CLIENT_PRIORITY}, each in a CSpace of its own, report on endpoint D (slot {d})"
+        "console: clients a (badge {A}) and b (badge {B}), priority {CLIENT_PRIORITY}, and r, which reads as client {ROOT} for root, each in a CSpace of its own, report on endpoint D (slot {d})"
     );
 
     // Each client's first report: it has attached.
-    for _ in 0..2 {
+    for _ in 0..3 {
         let (client, r) = report(ipc, d);
         if r.step != STARTED || r.status != 0 {
             fail!(
@@ -135,9 +141,7 @@ pub fn run(bi: &BootInfo) -> ! {
         (lines[1].0, &lines[1].1[..lines[1].2]),
     ];
     check::reads(&got).unwrap_or_else(|e| fail!("console: {e}"));
-    println!(
-        "console: ok   a read exactly \"hi a\" and b exactly \"to b\"; nothing else reached a client"
-    );
+    println!("console: ok   a read exactly \"hi a\" and b exactly \"to b\"");
 
     // Type-ahead: once uart has received the line (and so signalled NC),
     // a Sync makes console take that signal first, so the line waits for
@@ -176,9 +180,70 @@ pub fn run(bi: &BootInfo) -> ! {
             core::str::from_utf8(r.line()).unwrap_or("(not UTF-8)")
         );
     }
+    save(saved_slot(A));
     println!(
         "console: ok   a's Read was answered at once with the {}-byte line typed ahead, after its prompt was flushed",
         TYPEAHEAD_LINE.len()
+    );
+
+    // Nothing else reached a client. Console has taken every byte the
+    // harness sent: the type-ahead line ended the input. Now r (for
+    // client 1), a and b each Read once more, and console must save each
+    // Read, as no line waits for any of them. Each client first reports
+    // that it has its drain step, so a step that never reached it hangs
+    // the test rather than passing it, and Reads only once root has every
+    // client's report and answers them. Once every thread above the root
+    // task's lowest priority has blocked, each client has made its Read;
+    // once root's Sync, queued behind any Read console has not taken yet,
+    // is answered, console has taken all three; and once every thread has
+    // blocked again, a client whose Read was answered waits on D with its
+    // report.
+    let drain = &SCRIPT[DRAIN_STEP..];
+    for (i, step) in drain.iter().enumerate() {
+        send(saved_slot(step.client), &step_message(DRAIN_STEP + i));
+    }
+    let mut ready = [false; SCRIPT.len() - DRAIN_STEP];
+    for _ in drain {
+        let (client, r) = report(ipc, d);
+        let i = drain.iter().position(|s| s.client == client);
+        match i {
+            Some(i)
+                if !ready[i]
+                    && r.step == (DRAIN_STEP + i) as u64
+                    && r.status == 0
+                    && r.len == 0 =>
+            {
+                ready[i] = true;
+            }
+            _ => fail!(
+                "console: client {} reported step {:#x}, status {:#x}, waiting for the drain steps",
+                check::name(client),
+                r.step,
+                r.status
+            ),
+        }
+        save(saved_slot(client));
+    }
+    for (i, step) in drain.iter().enumerate() {
+        send(saved_slot(step.client), &step_message(DRAIN_STEP + i));
+    }
+    spawn::let_others_run(ipc);
+    me.sync()
+        .unwrap_or_else(|e| fail!("console: root's Sync: {e}"));
+    spawn::let_others_run(ipc);
+    let r = nb_recv(d);
+    if r.badge != 0 && r.msg.info.label() != REPORT {
+        fail!(
+            "console: client {} (badge {}) fault {}, MR0 to MR3 {:#x?}",
+            check::name(r.badge),
+            r.badge,
+            r.msg.info.label(),
+            r.msg.mr
+        );
+    }
+    check::drained(r.badge).unwrap_or_else(|e| fail!("console: {e}"));
+    println!(
+        "console: ok   nothing else reached a client: r (for root, client 1), a and b each Read once more, and console saved all three Reads, with no line waiting"
     );
 
     let stats = uart
@@ -333,6 +398,16 @@ extern "C" fn client(badge: u64, buffer: u64, _: u64, _: u64) -> ! {
                 con.write(&l[piece * third..(piece + 1) * third])
             }
             Action::Burst => (1..=BURST_LINES).try_for_each(|n| con.write(&check::burst_line(n))),
+            Action::Drain => {
+                // Root's answer to this report lets it Read.
+                let n = Report::encode(i as u64, 0, &[], &mut words);
+                call(CLIENT_D, &ipc.compose(REPORT, &words[..n], &[]));
+                let mut got = [0u8; 255];
+                con.read_line(&mut got).map(|n| {
+                    line[..n].copy_from_slice(&got[..n]);
+                    len = n;
+                })
+            }
             Action::Input(prompt) => con.write(prompt.as_bytes()).and_then(|()| {
                 let mut got = [0u8; 255];
                 let n = con.read_line(&mut got)?;

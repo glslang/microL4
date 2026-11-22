@@ -41,6 +41,10 @@ pub enum Action {
     Burst,
     /// Write the prompt, then Read a line and report it.
     Input(&'static str),
+    /// Report that the step arrived, then, once root answers, Read a line
+    /// and report it: a Read console must save, as nothing is left typed
+    /// for the client, so the client never reports again.
+    Drain,
 }
 
 /// One step: a client and what it does.
@@ -56,8 +60,10 @@ const fn step(client: u64, action: Action) -> Step {
 
 /// The script. Root runs the steps before [`INPUT_STEPS`] one at a time,
 /// so every write boundary is fixed; then it starts both input steps and
-/// waits for both reports.
-pub const SCRIPT: [Step; 15] = [
+/// waits for both reports, then the type-ahead step, then the three
+/// drain steps, which it starts together and which no client may report
+/// on.
+pub const SCRIPT: [Step; 18] = [
     // Interleaved lines.
     step(A, Action::Write(b"a1 alpha ")),
     step(B, Action::Write(b"b1 bravo ")),
@@ -77,6 +83,11 @@ pub const SCRIPT: [Step; 15] = [
     step(B, Action::Input("b> ")),
     // Type-ahead: a Read answered at once from a waiting line.
     step(A, Action::Input(TYPEAHEAD_PROMPT)),
+    // Drain: client 1's Read, made by the root task's reader thread r,
+    // and a's and b's.
+    step(ROOT, Action::Drain),
+    step(A, Action::Drain),
+    step(B, Action::Drain),
 ];
 
 /// The interleaved lines the transcript shows, but the 300-byte one, in
@@ -107,6 +118,10 @@ pub const TYPEAHEAD_LINE: &str = "typed ahead for a, more than 24 bytes";
 pub const TYPEAHEAD_INPUT_BYTES: u64 = TYPEAHEAD_LINE.len() as u64 + 1;
 /// The last step of the interleaved lines.
 pub const INTERLEAVED_STEPS: usize = 10;
+/// The first drain step: from here to the script's end, one Read for each
+/// client, root's own included, once every byte the harness sent has
+/// reached console.
+pub const DRAIN_STEP: usize = 15;
 
 /// The `b2` line: `b2 `, digits, ` end` and its newline, 300 bytes.
 pub const B2_LEN: usize = 300;
@@ -202,6 +217,9 @@ pub enum Failure {
     UnexpectedRead { client: u64 },
     /// A client that must read reported no line.
     MissingRead { client: u64 },
+    /// A drain step's Read was answered: something more reached the
+    /// client.
+    Undrained { client: u64 },
     /// uart's totals.
     Stats(&'static str),
     /// The probe's fault `i` is not an UnknownSyscall for its number.
@@ -218,6 +236,11 @@ impl fmt::Display for Failure {
                 write!(f, "client {} read a line it was not sent", name(client))
             }
             Failure::MissingRead { client } => write!(f, "client {} read no line", name(client)),
+            Failure::Undrained { client } => write!(
+                f,
+                "client {}'s last Read was answered: it reached the client though nothing more was typed for it",
+                name(client)
+            ),
             Failure::Stats(what) => write!(f, "uart's Stats: {what}"),
             Failure::Probe { i } => write!(
                 f,
@@ -228,8 +251,9 @@ impl fmt::Display for Failure {
     }
 }
 
-/// Checks the lines the clients read: each of [`READS`] exactly once, and
-/// nothing else reached any client.
+/// Checks the lines the clients read in the input part: each of
+/// [`READS`] exactly once, and no other line in those Reads. That nothing
+/// else reached a client is [`drained`]'s check.
 pub fn reads(got: &[(u64, &[u8])]) -> Result<(), Failure> {
     for &(client, line) in got {
         match READS.iter().find(|r| r.0 == client) {
@@ -246,6 +270,17 @@ pub fn reads(got: &[(u64, &[u8])]) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+/// Checks the drain: `reported` is the badge of a client whose report
+/// root found waiting on D once every drain step's Read had reached
+/// console and every thread above root's lowest priority had blocked, or
+/// 0 for none. Every drain Read must wait in console, so none.
+pub fn drained(reported: u64) -> Result<(), Failure> {
+    match reported {
+        0 => Ok(()),
+        client => Err(Failure::Undrained { client }),
+    }
 }
 
 /// Checks uart's totals: signals and THRE bursts above 0, exactly the
@@ -343,8 +378,23 @@ mod tests {
         assert_eq!(INTERLEAVED_STEPS + 2, INPUT_STEPS);
         assert_eq!(SCRIPT[INPUT_STEPS].action, Action::Input("a> "));
         assert_eq!(TYPEAHEAD_STEP, INPUT_STEPS + 2);
-        assert_eq!(SCRIPT.len(), TYPEAHEAD_STEP + 1);
         assert_eq!(SCRIPT[TYPEAHEAD_STEP].client, A);
+        // One drain Read for every client, root included, last.
+        assert_eq!(DRAIN_STEP, TYPEAHEAD_STEP + 1);
+        let mut drained: std::vec::Vec<u64> =
+            SCRIPT[DRAIN_STEP..].iter().map(|s| s.client).collect();
+        drained.sort();
+        assert_eq!(drained, [ROOT, A, B]);
+        assert!(
+            SCRIPT[DRAIN_STEP..]
+                .iter()
+                .all(|s| s.action == Action::Drain)
+        );
+        assert!(
+            SCRIPT[..DRAIN_STEP]
+                .iter()
+                .all(|s| s.action != Action::Drain && s.client != ROOT)
+        );
         // Past MR3 both ways: the line in the Read's reply, and the
         // prompt in console's uart Write that flushes it.
         assert!(TYPEAHEAD_LINE.len() > proto::MAX_REGISTER_BYTES);
@@ -393,6 +443,18 @@ mod tests {
         assert_eq!(
             reads(&[(A, b"hi a"), (B, b"to b"), (A, b"hi a")]),
             Err(Failure::UnexpectedRead { client: A })
+        );
+    }
+
+    #[test]
+    fn a_drain_read_answered_is_something_more() {
+        assert_eq!(drained(0), Ok(()));
+        for c in [ROOT, A, B] {
+            assert_eq!(drained(c), Err(Failure::Undrained { client: c }));
+        }
+        assert_eq!(
+            std::format!("{}", Failure::Undrained { client: ROOT }),
+            "client root's last Read was answered: it reached the client though nothing more was typed for it"
         );
     }
 
