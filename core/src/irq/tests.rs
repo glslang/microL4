@@ -1587,3 +1587,33 @@ fn check_finds_broken_tables() {
     );
     let _ = TcbRef::new(0);
 }
+
+/// `docs/design.md`, "Interrupts", Invariants: an IRQ node slot never names
+/// a deleted notification, because its capability is in the derivation
+/// list. A revoke of the bound capability's original deletes it with the
+/// other descendants; the next interrupt is lost, and the original is then
+/// the notification's last capability.
+#[test]
+fn revoking_a_bound_notifications_original_empties_the_irq_node_slot() {
+    let mut w = bound(QEMU);
+    assert_eq!(node(&w, 0), ntfn_cap(0, RW, B0));
+    let r = invoke(
+        &mut w,
+        A,
+        S_ROOT,
+        cnode_label::CNODE_REVOKE,
+        &[S_N0, 64],
+        &[],
+    );
+    assert_eq!(r, ok(&[]));
+    assert!(w.cap(rs(S_N0_BADGED)).is_null());
+    assert!(
+        node(&w, 0).is_null(),
+        "the IRQ node's copy went with the revoke"
+    );
+    pulse(&mut w, 4);
+    assert_eq!(interrupt(&mut w), Some((0x30, Delivery::Lost)));
+    // Deleting the last capability to N0 now finalises it.
+    delete(&mut w, S_N0);
+    assert_eq!(nt(&w, 0), Notification::IDLE);
+}
