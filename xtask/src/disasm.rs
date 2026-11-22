@@ -543,4 +543,64 @@ ffffffff80009095:      \tret
         assert_eq!(immediate("edx"), None);
         assert_eq!(immediate("qword ptr [rsp + 0x3f8]"), None);
     }
+
+    /// The M7 red team's UART writer
+    /// (`docs/redteam/m7-disasm-computed-port.md`): a release kernel with
+    /// this function, called at boot, passed `cargo xtask test release` and
+    /// wrote its text on COM1. Its port is a base read back from memory
+    /// plus an offset, as a driver that keeps its base in a struct computes
+    /// it, so no COM1 immediate reaches `dx` or `edi`. llvm-objdump 23's
+    /// listing of it (a few alignment `nop`s and the overflow panic path
+    /// left out), with io.rs's `inb` and `outb` at that build's addresses.
+    const COMPUTED_PORT_SYMBOLS: &str = "\
+ffffffff8000ac10 l     F .text\t0000000000000006 .hidden kernel::arch::x86_64::io::outb
+ffffffff8000abe0 l     F .text\t0000000000000004 .hidden kernel::arch::x86_64::io::inb
+ffffffff8000cf10 l     F .text\t000000000000007f .hidden kernel::arch::x86_64::redteam_uart (.llvm.14046764917069186953)
+";
+    const COMPUTED_PORT_LISTING: &str = "\
+ffffffff8000abe0 <kernel::arch::x86_64::io::inb>:
+ffffffff8000abe0:      \tmov\tedx, edi
+ffffffff8000abe2:      \tin\tal, dx
+ffffffff8000abe3:      \tret
+ffffffff8000ac10 <kernel::arch::x86_64::io::outb>:
+ffffffff8000ac10:      \tmov\tedx, edi
+ffffffff8000ac12:      \tmov\teax, esi
+ffffffff8000ac14:      \tout\tdx, al
+ffffffff8000ac15:      \tret
+ffffffff8000cf10 <kernel::arch::x86_64::redteam_uart (.llvm.14046764917069186953)>:
+ffffffff8000cf17:      \tmov\tword ptr [rsp + 0x6], 0x3f8
+ffffffff8000cf1e:      \tlea\trax, [rsp + 0x6]
+ffffffff8000cf23:      \tmovzx\tebx, word ptr [rsp + 0x6]
+ffffffff8000cf28:      \tcmp\tbx, -0x6
+ffffffff8000cf2c:      \tja\t0xffffffff8000cf83 <kernel::arch::x86_64::redteam_uart (.llvm.14046764917069186953)+0x73>
+ffffffff8000cf2e:      \tlea\tebp, [rbx + 0x5]
+ffffffff8000cf31:      \tmov\teax, 0x1
+ffffffff8000cf36:      \txor\tr14d, r14d
+ffffffff8000cf40:      \tmovzx\tr15d, byte ptr [r14 - 0x7ffc8b80]
+ffffffff8000cf48:      \tmov\tr14, rax
+ffffffff8000cf50:      \tmov\tedi, ebp
+ffffffff8000cf52:      \tcall\t0xffffffff8000abe0 <kernel::arch::x86_64::io::inb>
+ffffffff8000cf57:      \ttest\tal, 0x20
+ffffffff8000cf59:      \tje\t0xffffffff8000cf50 <kernel::arch::x86_64::redteam_uart (.llvm.14046764917069186953)+0x40>
+ffffffff8000cf5b:      \tmovzx\tesi, r15b
+ffffffff8000cf5f:      \tmov\tedi, ebx
+ffffffff8000cf61:      \tcall\t0xffffffff8000ac10 <kernel::arch::x86_64::io::outb>
+ffffffff8000cf82:      \tret
+";
+
+    /// What the check finds in it today: nothing.
+    #[test]
+    fn a_computed_com1_port_passes_the_check() {
+        let s = scan(COMPUTED_PORT_SYMBOLS, COMPUTED_PORT_LISTING);
+        assert_eq!((s.io_functions, s.io_ins, s.io_outs), (2, 1, 1));
+        assert!(s.findings.is_empty(), "{:?}", s.findings);
+    }
+
+    /// The guarantee: a release kernel with UART code fails the check.
+    #[test]
+    #[ignore = "M7 red-team finding, docs/redteam/m7-disasm-computed-port.md: the check misses a computed port"]
+    fn a_computed_com1_port_fails_the_check() {
+        let s = scan(COMPUTED_PORT_SYMBOLS, COMPUTED_PORT_LISTING);
+        assert!(!s.findings.is_empty());
+    }
 }
