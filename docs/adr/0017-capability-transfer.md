@@ -2,6 +2,11 @@
 
 Status: accepted, M1 (2026-10-29)
 
+M6 (2026-11-22): `Reply` and the reply phase of `ReplyRecv` have no
+send-time lookup, as in seL4's `handleReply`; their pointers are looked up
+only at delivery, where a failure moves nothing and raises no fault
+([Capability transfer](../design.md#capability-transfer)).
+
 ## Context
 
 PLAN.md's IPC row allows "one transferred capability per message". The shared
