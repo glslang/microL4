@@ -551,6 +551,17 @@ pub fn self_delete(bi: &BootInfo) -> ! {
         if RT_WENT_ON.load(Ordering::Relaxed) != 0 {
             fail!("round {round}: the thread ran past the call that deleted it");
         }
+        // A timer tick can preempt round 1's revoke after it has deleted
+        // the thread's VSpace or IPC buffer but not yet its TCB. The
+        // thread is then restarted but cannot issue the revoke again (it
+        // faults on its way back to ring 3), so the revoke stays cut short
+        // (docs/design.md, "Slot operations"). It has not run on (checked
+        // above); the root task finishes the revoke, and the slot must
+        // then be empty.
+        if round == 1 && tcb_suspend(tcb).is_ok() {
+            cnode_revoke(Slot::root_cnode(ut))
+                .unwrap_or_else(|e| fail!("round 1: finishing the revoke cut short: {e}"));
+        }
         // Its TCB is gone, by its own call: the slot is empty.
         if tcb_suspend(tcb).is_ok() {
             fail!("round {round}: slot {tcb} still holds a TCB");

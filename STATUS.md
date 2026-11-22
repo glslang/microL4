@@ -101,4 +101,5 @@ Current milestone: M6 · IPC and notifications, complete: the done-when scenario
 - **Phase 2:** the lead merged N and X (six trivial conflicts), U and M; builder M extended the model to M6's rules; a docs agent wrote the builders' notes into `docs/design.md` and `CLAUDE.md`.
 - **Review and red team:** two fresh reviewers (core; kernel, user side and model) signed off with should-fixes only; the red team found nothing and left a fuzzer and a scenario. A fix round closed the should-fixes.
 - **Also this session:** PR #6 could not be rebase-merged because its 12 merge commits replayed with conflicts; with the owner's go-ahead the branch was rebuilt as 28 linear commits with an identical tree, and merged.
+- **CI:** `redteam-selfdelete` (an M5 red-team scenario) failed once, when a timer tick preempted its round-1 revoke after the revoke had deleted the thread's VSpace but not its TCB: the restarted thread cannot issue the revoke again, so it stays cut short. The design allows this (now the third restart exception in `docs/design.md`, "Slot operations"); the test's root task now finishes the revoke itself.
 - **Next:** merge PR #7, then M7.
