@@ -58,6 +58,7 @@ mod isolation;
 mod pingpong;
 mod redteam;
 mod release;
+mod release_fault;
 mod servers;
 mod spawn;
 mod threads;
@@ -82,9 +83,9 @@ pub(crate) use fail;
 
 fn main(bi: &'static BootInfo) -> ! {
     let test = cmdline::value(bi.cmdline(), "test");
-    // A kernel without `debug` has no DebugPutChar: test=release prints
-    // only once console runs.
-    if test != Some("release") {
+    // A kernel without `debug` has no DebugPutChar: test=release and
+    // test=release_fault print only once console runs.
+    if !matches!(test, Some("release" | "release_fault")) {
         summary(bi);
     }
     match test {
@@ -109,6 +110,7 @@ fn main(bi: &'static BootInfo) -> ! {
         Some("irq") => irq::run(bi),
         Some("console") => console::run(bi),
         Some("release") => release::run(bi),
+        Some("release_fault") => release_fault::run(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
     }
