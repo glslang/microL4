@@ -1,0 +1,43 @@
+# M6's done-when: "IPC plus notification on one server"
+# (user/root/src/ipcntfn.rs; docs/design.md, "Notifications" and
+# "Binding"). The server S, at priority 100, is bound to notification N and
+# receives on endpoint E with Recv, and with ReplyRecv after a call; it
+# tells a signal from a message by badge: endpoint capabilities carry
+# badges 0x1 to 0x3, notification capabilities single bits from bit 32 up.
+# The root task, at 255, checks TCB_BindNotification's refusals (no
+# capability, one without Read, binding twice, a second thread) and
+# TCB_UnbindNotification's on an unbound TCB, binds S, and runs a script,
+# letting each step run to its end by dropping below S: a signal wakes S
+# out of its endpoint receive with rsi 0; two signals while S is runnable
+# merge and come ahead of a message queued meanwhile; a signal then a call
+# come in that order; a signal S sends N itself while handling a call
+# comes back from its ReplyRecv's receive phase at once; S waits on N
+# directly and a signal ends the wait. S must record exactly that. In the
+# free part two clients make 100 calls each and two signallers send 100
+# signals each, all at priority 100, yielding between; S answers every
+# call and each client checks every answer, and a shared sequence number
+# shows each signaller's bit reached S after its last signal. Unbound, S
+# does not wake for a signal, which waits in N for the root task's polls,
+# and later signals merge there for a wait.
+cmdline: test=ipcntfn
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=ipcntfn"
+expect: root: microL4 root task
+expect: root: cmdline "test=ipcntfn"
+expect: ipcntfn: server S (TCB slot
+expect: priority 100) receives on endpoint slot
+expect: endpoint capabilities carry badges 0x1 to 0x3, notification capabilities single bits from bit 32 up
+expect: ipcntfn: ok   TCB_BindNotification: TruncatedMessage without a capability, IllegalOperation for one without Read; TCB_UnbindNotification of an unbound TCB: IllegalOperation; S bound to N; binding S again, or another thread to N: IllegalOperation
+expect: ipcntfn: ok   1: a signal woke S out of its endpoint receive: rdi 0x10000000000, rsi 0
+expect: ipcntfn: ok   2: two signals while S was not receiving merged into 0x60000000000, which its next endpoint receive returned ahead of the message queued on E meanwhile
+expect: ipcntfn: ok   3: a signal, then a call queued behind it: S received the signal first, then the call, and answered it
+expect: ipcntfn: ok   4: S signalled N while it handled a call; its ReplyRecv answered, then the receive phase returned the signal 0x80000000000 at once
+expect: ipcntfn: ok   5: S answered a call, then waited on N directly; a signal ended the wait with 0x20000000000
+expect: ipcntfn: free part: clients C1 and C2 make 100 calls each and signallers G1 and G2 send 100 signals each, all at priority 100, yielding between
+expect: ipcntfn: ok   every call answered right: S received 100 calls from C1 and 100 from C2, and
+expect: signal deliveries for 200 signals, carrying 0x300000000 between them,
+expect: each signaller's bit reached S after its last signal
+expect: ipcntfn: ok   unbound, S did not wake for a signal, which waited in N: a poll returned 0x40000000000, the next 0; two more signals merged into 0x300000000 for a wait
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

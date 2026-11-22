@@ -1,0 +1,41 @@
+# M6's done-when: the badge scenario (user/root/src/badge.rs;
+# docs/design.md, "Badges" and "Deletion and cancellation"). The root task
+# serves endpoint E. It mints B1 and B2 from E with badges 0xb1 and 0xb2
+# and every right, and gives four clients at priority 100 copies with
+# Write and GrantReply: A1 and A2 copies of B1, B a copy of B2, U an
+# unbadged copy of E. Each client makes five calls and records what each
+# returned; the server checks each message's badge against its sender and
+# answers with it. Phases 0 to 2 run freely; the server keeps each
+# phase-2 caller waiting with CNode_SaveCaller, and a second
+# CNode_SaveCaller fails (DeleteFirst into a full slot before
+# IllegalOperation for the empty caller slot). It answers U, A1 and B
+# through their saved reply capabilities, dropping below them each time so
+# each queues its phase-3 call, while A2 still waits for its reply.
+# CNode_CancelBadgedSends on a client's copy, without all four rights, is
+# IllegalOperation; on E itself, unbadged, it moves nobody; on B1 it
+# releases A1, whose restarted call queues again behind U and B, and
+# leaves A2 waiting; answered, A2 queues last: the server must receive U,
+# B, A1, A2. With the queue A1, U, A2, B, the server revokes B1, deleting
+# A1's and A2's copies, and cancels B1's sends: their restarted calls find
+# empty slots and return InvalidCapability, and U and B stay queued, in
+# order. The queued phases are received with NBRecv, so a missing sender
+# fails the test instead of hanging it.
+cmdline: test=badge
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=badge"
+expect: root: microL4 root task
+expect: root: cmdline "test=badge"
+expect: badge: server: the root task on endpoint slot
+expect: minted from it with badges 0xb1 and 0xb2 and every right
+expect: badge: clients at priority 100: A1 and A2 call through copies of B1
+expect: badge: ok   phases 0 to 2: 12 calls, each with its sender's badge (A1 0xb1, A2 0xb1, B 0xb2, U 0x0); each phase-2 caller waits, its reply capability saved with CNode_SaveCaller
+expect: badge: ok   CNode_SaveCaller with the caller slot empty: DeleteFirst into a full slot, IllegalOperation into an empty one
+expect: badge: phase 3: U, A1 and B queued on the endpoint in that order; A2 waits for its reply
+expect: badge: ok   CNode_CancelBadgedSends on A1's copy, without all four rights: IllegalOperation
+expect: badge: ok   CNode_CancelBadgedSends on the unbadged endpoint moved nobody; on B1 it released A1, which restarted its call and queued again behind U and B, and left A2, waiting for its reply, alone; received U, B, A1, A2
+expect: badge: phase 4: A1, U, A2 and B queued in that order
+expect: badge: ok   CNode_Revoke of B1 deleted A1's and A2's copies; CNode_CancelBadgedSends on B1 then released them, and their restarted calls returned InvalidCapability, MR0 0; U and B stayed queued and were received in order: U, B
+expect: badge: ok   every client's every call returned what the design gives it, each answer the badge the server saw
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

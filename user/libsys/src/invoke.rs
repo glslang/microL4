@@ -1,23 +1,25 @@
 //! Kernel invocations: `Call`s on Untyped, CNode and TCB capabilities with
 //! their labels (`docs/abi.md`, "Untyped invocations", "CNode invocations"
-//! and "TCB invocations").
+//! and "TCB invocations"), `CNode_SaveCaller` and the notification binding
+//! included.
 //!
-//! [`invoke`] lays a message out as the kernel reads it: MR0 to MR3 in
-//! registers, MR4 and up and the extra capability pointers in the calling
-//! thread's IPC buffer. Only a thread with a buffer can send those, so the
-//! wrappers that may need one take the caller's [`Ipc`]; the others take
-//! none and work in a thread without a buffer. A reply with a non-zero
-//! label is an [`Error`].
+//! [`invoke`] lays a message out as the kernel reads it
+//! ([`crate::transfer::compose`]): MR0 to MR3 in registers, MR4 and up and
+//! the extra capability pointers in the calling thread's IPC buffer. Only a
+//! thread with a buffer can send those, so the wrappers that may need one
+//! take the caller's [`Ipc`]; the others take none and work in a thread
+//! without a buffer. A reply with a non-zero label is an [`Error`].
 
 use l4core::bootinfo::CAP_INIT_CNODE;
 use l4core::cap::{ObjectType, Rights};
 use l4core::invoke::label as cnode_label;
-use l4core::ipc::{MSG_MAX_EXTRA_CAPS, MSG_MAX_LENGTH, MSG_REG_COUNT, MessageInfo, word};
+use l4core::ipc::{MSG_REG_COUNT, MessageInfo};
 use l4core::regs::{USER_REGS, UserReg};
 use l4core::tcb::label as tcb_label;
 
 use crate::error::{Error, MAX_DETAIL_WORDS};
-use crate::syscall::{CPtr, Ipc, Message, call};
+use crate::syscall::{CPtr, Ipc, call};
+use crate::transfer::compose;
 
 /// `TCB_ReadRegisters` flag: suspend the target first.
 pub const READ_SUSPEND_SOURCE: u64 = 1 << 0;
@@ -62,29 +64,7 @@ pub fn invoke(
     args: &[u64],
     caps: &[CPtr],
 ) -> Result<Reply, Error> {
-    assert!(
-        args.len() <= MSG_MAX_LENGTH,
-        "{} message registers",
-        args.len()
-    );
-    assert!(
-        caps.len() <= MSG_MAX_EXTRA_CAPS,
-        "{} extra caps",
-        caps.len()
-    );
-    let buffer = || ipc.expect("this invocation needs the caller's IPC buffer");
-    let mut mr = [0; MSG_REG_COUNT];
-    for (i, &a) in args.iter().enumerate() {
-        match mr.get_mut(i) {
-            Some(r) => *r = a,
-            None => buffer().set_mr(i, a),
-        }
-    }
-    for (i, &c) in caps.iter().enumerate() {
-        buffer().set_word(word::CAPS_OR_BADGES + i, c);
-    }
-    let info = MessageInfo::new(label, 0, caps.len() as u64, args.len() as u64);
-    let reply = call(cap, &Message::new(info, mr));
+    let reply = call(cap, &compose(ipc, label, args, caps));
     if reply.info.label() == 0 {
         return Ok(Reply {
             info: reply.info,
@@ -175,6 +155,41 @@ pub fn cnode_revoke(slot: Slot) -> Result<(), Error> {
 pub fn cnode_delete(slot: Slot) -> Result<(), Error> {
     let args = [slot.index, slot.depth];
     invoke(None, slot.root, cnode_label::CNODE_DELETE, &args, &[])?;
+    Ok(())
+}
+
+/// `CNode_CancelBadgedSends`: every thread queued to send on the endpoint
+/// of the capability in `slot` with that capability's badge leaves the
+/// queue, in queue order, and restarts its system call (or, for a queued
+/// fault, its faulting instruction), which looks its `CPtr` up again; the
+/// other senders keep their places, and threads whose message was already
+/// received, such as callers waiting for a reply, are not affected. The
+/// capability must be an Endpoint capability with Write, Read, Grant and
+/// GrantReply, otherwise `IllegalOperation`; an unbadged one does nothing.
+/// To retire a badge, revoke its badged original first, so the restarted
+/// senders find their copies gone (`docs/design.md`, "Badges, revoke and
+/// `CNode_CancelBadgedSends`"). `slot.root` is the invoked CNode.
+pub fn cnode_cancel_badged_sends(slot: Slot) -> Result<(), Error> {
+    let args = [slot.index, slot.depth];
+    invoke(
+        None,
+        slot.root,
+        cnode_label::CNODE_CANCEL_BADGED_SENDS,
+        &args,
+        &[],
+    )?;
+    Ok(())
+}
+
+/// `CNode_SaveCaller`: moves the reply capability in this thread's caller
+/// slot to `dest`, so that receiving on an endpoint again does not delete
+/// it; `dest.root` is the invoked CNode. `Send`, `NBSend` or `Call` on the
+/// saved capability then replies, once ([`crate::send`]). Errors, in this
+/// order: `DeleteFirst` if `dest` is not empty, `IllegalOperation` if the
+/// caller slot is.
+pub fn cnode_save_caller(dest: Slot) -> Result<(), Error> {
+    let args = [dest.index, dest.depth];
+    invoke(None, dest.root, cnode_label::CNODE_SAVE_CALLER, &args, &[])?;
     Ok(())
 }
 
@@ -366,6 +381,29 @@ pub fn tcb_suspend(tcb: CPtr) -> Result<(), Error> {
 /// `TCB_Resume`: an `Inactive` or blocked thread restarts at its `rip`.
 pub fn tcb_resume(tcb: CPtr) -> Result<(), Error> {
     invoke(None, tcb, tcb_label::RESUME, &[], &[])?;
+    Ok(())
+}
+
+/// `TCB_BindNotification`: binds the thread to the notification `ntfn`
+/// names, a notification capability with Read whose badge plays no part.
+/// The bound thread then also gets the notification's signals from an
+/// endpoint receive: a pending one instead of a message, and one that
+/// arrives while it waits on the endpoint at once, with the notification
+/// word in `rdi` and `rsi` 0 ([`crate::Event::classify`] tells them from
+/// messages). `IllegalOperation` if the thread is already bound, `ntfn` is
+/// not a notification capability with Read, or the notification is bound
+/// or has waiters. The capability travels in the caller's IPC buffer.
+pub fn tcb_bind_notification(ipc: Ipc, tcb: CPtr, ntfn: CPtr) -> Result<(), Error> {
+    invoke(Some(ipc), tcb, tcb_label::BIND_NOTIFICATION, &[], &[ntfn])?;
+    Ok(())
+}
+
+/// `TCB_UnbindNotification`: unbinds the thread's notification, and
+/// changes nothing else: a pending signal stays pending in the
+/// notification, and a thread blocked in an endpoint receive stays there.
+/// `IllegalOperation` if the thread is not bound.
+pub fn tcb_unbind_notification(tcb: CPtr) -> Result<(), Error> {
+    invoke(None, tcb, tcb_label::UNBIND_NOTIFICATION, &[], &[])?;
     Ok(())
 }
 
