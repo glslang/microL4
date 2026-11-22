@@ -18,9 +18,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Install QEMU, OVMF, image tools and Rust targets
+      # setup.sh also adds rustup's llvm-tools, whose llvm-objdump the
+      # release kernel's disassembly check in `cargo xtask test` uses.
+      - name: Install QEMU, OVMF, image tools, Rust targets and llvm-tools
         run: tools/setup.sh
-      - name: Host tests and QEMU scenarios
+      - name: Host tests, the release kernel's disassembly check and QEMU scenarios
         run: cargo xtask test
       - name: Upload scenario logs
         if: failure()

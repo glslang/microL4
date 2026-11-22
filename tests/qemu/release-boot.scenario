@@ -1,0 +1,20 @@
+# The kernel built without features (no `debug`, no `selftest`) boots and
+# says nothing (docs/design.md, "A release kernel without UART code"): the
+# loader prints as always, then COM1 stays silent. With no `test=` the
+# kernel starts the root task, whose first DebugPutChar is an UnknownSyscall
+# fault there; root has no fault handler, so it stops, silently, and the
+# kernel idles. Nothing can end the run before the `uart` server and an
+# IOPort capability for isa-debug-exit, so the scenario passes if the guest
+# is still running, quiet, at the timeout: a release-kernel panic would have
+# exited with failure, and a triple fault would have ended QEMU. The
+# `release` scenario checks the same kernel through uart and console.
+kernel: release
+exit: timeout
+timeout: 15
+expect: microL4 loader
+expect: memory regions; entering kernel
+# What a kernel with `debug` prints.
+forbid: microL4 kernel
+forbid: bootinfo:
+forbid: DEBUG HALT
+forbid: KERNEL PANIC

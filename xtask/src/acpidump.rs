@@ -18,6 +18,7 @@ use std::{fs, thread};
 use l4core::acpi::dump::{DumpMemory, MARKER};
 use l4core::acpi::{self, Platform};
 
+use crate::compile::Kernel;
 use crate::{Result, compile, image, qemu, rel, scenario, xtask_dir};
 
 /// The command line the dump boot uses.
@@ -100,9 +101,9 @@ fn file_name(path: &Path) -> String {
 /// Boots QEMU with the dump command line and returns COM1 up to the dump's
 /// `end` line, and a description of the machine.
 fn boot(profile: compile::Profile, qemu_args: &[String]) -> Result<(String, String)> {
-    let art = compile::build(profile)?;
+    let art = compile::build(profile, &[Kernel::Selftest])?;
     let dir = xtask_dir().join("acpidump");
-    let disk = image::build_disk(&dir, &art, Some(CMDLINE))?;
+    let disk = image::build_disk(&dir, &art, Kernel::Selftest, Some(CMDLINE))?;
     let version = qemu::version()?;
     let mut child = qemu::base_command(&disk)?
         .args(["-display", "none", "-serial", "stdio", "-monitor", "none"])

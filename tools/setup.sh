@@ -52,5 +52,13 @@ fi
 
 # Lints run in every session; failing to add them is not fatal.
 rustup component add clippy rustfmt >/dev/null 2>&1 || echo "setup: could not add clippy/rustfmt"
+# llvm-objdump for `cargo xtask test`'s disassembly of the release kernel
+# (docs/design.md, "A release kernel without UART code"). Without it xtask
+# falls back to an llvm-objdump on PATH, or fails saying how to add it.
+if timeout 180 rustup component add llvm-tools >/dev/null 2>&1; then
+  echo "setup: llvm-tools installed"
+else
+  echo "setup: could not add llvm-tools; the disassembly check needs llvm-objdump"
+fi
 
 echo "setup: done ($(rustc --version), $(qemu-system-x86_64 --version | head -1))"

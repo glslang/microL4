@@ -4,6 +4,7 @@
 
 mod acpidump;
 mod compile;
+mod disasm;
 mod image;
 mod qemu;
 mod rootimage;
@@ -14,18 +15,21 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use compile::Kernel;
+
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const USAGE: &str = "\
 usage: cargo xtask <command> [options]
 
 commands:
-  build             build the user crates, the kernel with the root task
+  build             build the user crates, both kernels with the root task
                     embedded, and the loader
   image             build target/xtask/image/disk.img and disk.vhdx
   run               boot the image under OVMF, COM1 on stdio (Ctrl-A X quits)
-  test [names...]   host tests, kernel source checks, then every QEMU
-                    scenario in tests/qemu/ (or only the named ones)
+  test [names...]   host tests, kernel source checks, the release kernel's
+                    disassembly check, then every QEMU scenario in
+                    tests/qemu/ (or only the named ones)
   clippy            clippy with -D warnings on every crate and target
   gdb               boot under QEMU paused, with GDB attached
   acpidump [-- <qemu args>]
@@ -39,6 +43,8 @@ options:
   --release         use the release profile
   --cmdline <text>  kernel command line for image, run and gdb
                     (image defaults to test=hello, run and gdb to none)
+  --kernel <name>   the kernel image, run and gdb boot: selftest (the
+                    default), or release, built without features
   --out <file>      where acpidump writes the dump
   --from-log <file> the COM1 log acpidump reads instead of booting QEMU
 ";
@@ -47,6 +53,7 @@ struct Options {
     command: String,
     release: bool,
     cmdline: Option<String>,
+    kernel: Kernel,
     out: Option<PathBuf>,
     from_log: Option<PathBuf>,
     rest: Vec<String>,
@@ -58,6 +65,7 @@ fn parse_args() -> Result<Options> {
         command: args.next().unwrap_or_else(|| "help".into()),
         release: false,
         cmdline: None,
+        kernel: Kernel::Selftest,
         out: None,
         from_log: None,
         rest: Vec::new(),
@@ -66,6 +74,11 @@ fn parse_args() -> Result<Options> {
         match a.as_str() {
             "--release" => opts.release = true,
             "--cmdline" => opts.cmdline = Some(args.next().ok_or("--cmdline needs a value")?),
+            "--kernel" => {
+                let name = args.next().ok_or("--kernel needs a name")?;
+                opts.kernel = Kernel::parse(&name)
+                    .ok_or_else(|| format!("--kernel {name:?}: not selftest or release"))?;
+            }
             "--out" => opts.out = Some(args.next().ok_or("--out needs a file")?.into()),
             "--from-log" => {
                 opts.from_log = Some(args.next().ok_or("--from-log needs a file")?.into())
@@ -94,12 +107,13 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
     } else {
         compile::Profile::Dev
     };
+    let kernel = opts.kernel;
     match opts.command.as_str() {
         "build" => {
-            let art = compile::build(profile)?;
+            let art = compile::build(profile, &[Kernel::Selftest, Kernel::Release])?;
             let p = &art.packed;
             println!(
-                "root: {}\nroot image: {}, {} bytes, entry {:#x}, image {:#x}-{:#x}, {} frames\nkernel: {}\nloader: {}",
+                "root: {}\nroot image: {}, {} bytes, entry {:#x}, image {:#x}-{:#x}, {} frames\nkernel: {}\nrelease kernel: {}\nloader: {}",
                 rel(&art.root),
                 rel(&art.root_image),
                 p.bytes,
@@ -107,31 +121,38 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
                 p.image.0,
                 p.image.1,
                 p.frames,
-                rel(&art.kernel),
+                rel(art.kernel(Kernel::Selftest)?),
+                rel(art.kernel(Kernel::Release)?),
                 rel(&art.loader)
             );
         }
         "image" => {
-            let art = compile::build(profile)?;
+            let art = compile::build(profile, &[kernel])?;
             let dir = xtask_dir().join("image");
             let cmdline = opts.cmdline.as_deref().unwrap_or("test=hello");
-            let disk = image::build_disk(&dir, &art, Some(cmdline))?;
+            let disk = image::build_disk(&dir, &art, kernel, Some(cmdline))?;
             let vhdx = image::to_vhdx(&disk)?;
             println!(
-                "disk: {}\nvhdx: {}\ncmdline: {cmdline:?}",
+                "disk: {}\nvhdx: {}\ncmdline: {cmdline:?}\nkernel: {kernel:?}",
                 rel(&disk),
                 rel(&vhdx)
             );
         }
         "run" => {
-            let art = compile::build(profile)?;
-            let disk = image::build_disk(&xtask_dir().join("run"), &art, opts.cmdline.as_deref())?;
+            let art = compile::build(profile, &[kernel])?;
+            let disk = image::build_disk(
+                &xtask_dir().join("run"),
+                &art,
+                kernel,
+                opts.cmdline.as_deref(),
+            )?;
             return qemu::run_interactive(&disk, &opts.rest);
         }
         "gdb" => {
-            let art = compile::build(profile)?;
-            let disk = image::build_disk(&xtask_dir().join("gdb"), &art, opts.cmdline.as_deref())?;
-            return qemu::run_gdb(&disk, &art.kernel, &xtask_dir().join("gdb"));
+            let art = compile::build(profile, &[kernel])?;
+            let dir = xtask_dir().join("gdb");
+            let disk = image::build_disk(&dir, &art, kernel, opts.cmdline.as_deref())?;
+            return qemu::run_gdb(&disk, art.kernel(kernel)?, &dir);
         }
         "test" => return test(profile, &opts.rest),
         "acpidump" => {
@@ -167,7 +188,8 @@ fn test(profile: compile::Profile, only: &[String]) -> Result<ExitCode> {
         }
         scenarios.retain(|s| only.contains(&s.name));
     }
-    let art = compile::build(profile)?;
+    let art = compile::build(profile, &[Kernel::Selftest, Kernel::Release])?;
+    println!("{}", disasm::check(art.kernel(Kernel::Release)?)?);
     println!("{}", qemu::version()?);
     let results = scenario::run_all(&scenarios, &art, &xtask_dir().join("scenarios"));
     let failed: Vec<&str> = results
