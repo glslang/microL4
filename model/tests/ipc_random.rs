@@ -14,7 +14,12 @@
 //! preemption points to use; `World::apply` then checks the invariants at
 //! every preemption point and restarts the call until it completes.
 //!
-//! 20,000 cases of up to 60 steps by default, about 12 seconds natively;
+//! In about two worlds of three, some threads have the second CNode as their
+//! CSpace root, so a `CPtr` names other capabilities for them than for the
+//! rest: every slot a thread names is chosen from its own CSpace, and
+//! transfers between the two CSpaces show which one each lookup uses.
+//!
+//! 20,000 cases of up to 60 steps by default, about 14 seconds natively;
 //! `PROPTEST_CASES` overrides the count. Failures persist in
 //! `ipc_random.regressions` next to this file, which git ignores: a minimal
 //! reproduction worth keeping becomes a named test in `ipc_scenarios.rs`.
@@ -24,12 +29,14 @@
 use l4core::cap::Rights;
 use l4model::ipc::{Dir, Info, MCap, NState, State, label, sysno, word};
 use l4model::ipc_harness::{
-    Action, BAD_CPTR, Config, Entry, NTFNS, ROOT_SLOTS, THREADS, World, slot,
+    Action, BAD_CPTR, Config, Entry, NTFNS, ROOT_SLOTS, THREADS, World, second, slot,
 };
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-/// Which thread acts: one the scheduler may run now.
+/// Which thread acts: one the scheduler may run now. Every slot the
+/// operation names is one of the actor's CSpace root, the root CNode or
+/// the second, or, for a rewrite, of the rewritten thread's.
 #[derive(Clone, Copy, Debug)]
 enum Who {
     Current,
@@ -48,9 +55,9 @@ enum Target {
     Ntfn(u8),
     /// A saved reply capability.
     Reply(u8),
-    /// Any root slot: wrong types, empty slots and missing rights.
+    /// Any slot: wrong types, empty slots and missing rights.
     Slot(u8),
-    /// A `CPtr` that breaks the root's guard.
+    /// A `CPtr` that breaks the guard.
     Bad(u64),
 }
 
@@ -65,13 +72,16 @@ enum Extra {
 }
 
 /// What the receiver's `receive_cnode`, `receive_index` and
-/// `receive_depth` name.
+/// `receive_depth` name, in its CSpace.
 #[derive(Clone, Copy, Debug)]
 enum RecvSlot {
     /// Left as they are.
     Keep,
     /// An empty slot.
     Free(u8),
+    /// An empty slot of another CNode, through a capability to it that the
+    /// receiver holds; an empty slot of its own if it holds none.
+    Other(u8),
     /// A full slot.
     Full(u8),
     /// A `receive_cnode` that is no CNode capability.
@@ -110,7 +120,7 @@ enum DelSlot {
     Received(u8),
     /// The last capability to an endpoint or notification.
     Final(u8),
-    /// Any root slot but the root CNode's own and the frames'.
+    /// Any slot but the CNode's own capability's and the root's frames'.
     Any(u8),
     /// An index that does not resolve.
     Bad(u64),
@@ -276,10 +286,24 @@ fn who(w: &World, who: Who) -> Option<usize> {
     }
 }
 
-/// The root slots whose capability passes `f`.
-fn slots_where(w: &World, f: impl Fn(&MCap) -> bool) -> Vec<u64> {
+/// The CNode whose slots thread `t`'s `CPtr`s below 64 name: its CSpace
+/// root, the root CNode or the second, which have the same shape.
+fn cspace(w: &World, t: usize) -> usize {
+    match w.m.threads[t].cspace {
+        MCap::CNode { cnode, .. } => cnode,
+        _ => 0,
+    }
+}
+
+/// The first slot of CNode `c` past the start state's.
+fn free_from(c: usize) -> u64 {
+    [slot::FREE, second::FREE][c]
+}
+
+/// The slots of CNode `c` whose capability passes `f`.
+fn slots_where(w: &World, c: usize, f: impl Fn(&MCap) -> bool) -> Vec<u64> {
     (0..SLOTS)
-        .filter(|&s| f(&w.m.cap((0, s as usize))))
+        .filter(|&s| f(&w.m.cap((c, s as usize))))
         .collect()
 }
 
@@ -329,31 +353,33 @@ fn receivable(w: &World, t: usize, cap: &MCap) -> (bool, bool) {
     }
 }
 
-/// The `CPtr` for `target`; `fit` says whether a capability suits the call
-/// and whether a partner waits behind it.
-fn cptr(w: &World, target: Target, fit: impl Fn(&MCap) -> (bool, bool)) -> u64 {
+/// The `CPtr` for `target` in CNode `cs`; `fit` says whether a capability
+/// suits the call and whether a partner waits behind it.
+fn cptr(w: &World, cs: usize, target: Target, fit: impl Fn(&MCap) -> (bool, bool)) -> u64 {
     let n = |x: u8| x as u64;
     match target {
         Target::Partner(x) => {
-            let ok = slots_where(w, |c| fit(c).0);
-            let busy = slots_where(w, |c| fit(c) == (true, true));
+            let ok = slots_where(w, cs, |c| fit(c).0);
+            let busy = slots_where(w, cs, |c| fit(c) == (true, true));
             pick(&busy, n(x))
                 .or_else(|| pick(&ok, n(x)))
                 .unwrap_or(n(x) % SLOTS)
         }
         Target::Endpoint(x) => pick(
-            &slots_where(w, |c| matches!(c, MCap::Endpoint { .. })),
+            &slots_where(w, cs, |c| matches!(c, MCap::Endpoint { .. })),
             n(x),
         )
         .unwrap_or(0),
         Target::Ntfn(x) => pick(
-            &slots_where(w, |c| matches!(c, MCap::Notification { .. })),
+            &slots_where(w, cs, |c| matches!(c, MCap::Notification { .. })),
             n(x),
         )
         .unwrap_or(0),
-        Target::Reply(x) => {
-            pick(&slots_where(w, |c| matches!(c, MCap::Reply { .. })), n(x)).unwrap_or(n(x) % SLOTS)
-        }
+        Target::Reply(x) => pick(
+            &slots_where(w, cs, |c| matches!(c, MCap::Reply { .. })),
+            n(x),
+        )
+        .unwrap_or(n(x) % SLOTS),
         Target::Slot(x) => n(x) % SLOTS,
         Target::Bad(x) => bad(x),
     }
@@ -371,31 +397,35 @@ fn endpoint_of(w: &World, t: usize, rdi: u64) -> Option<usize> {
     }
 }
 
-/// Whether `c` is the only capability to its endpoint or notification.
+/// Whether `c` is the only capability to its endpoint or notification, in
+/// every CNode.
 fn final_ipc_cap(w: &World, c: &MCap) -> bool {
     let same = |x: &MCap| match (*c, *x) {
         (MCap::Endpoint { ep: a, .. }, MCap::Endpoint { ep: b, .. }) => a == b,
         (MCap::Notification { ntfn: a, .. }, MCap::Notification { ntfn: b, .. }) => a == b,
         _ => false,
     };
-    matches!(c, MCap::Endpoint { .. } | MCap::Notification { .. })
-        && slots_where(w, |x| same(x)).len() == 1
+    let copies: usize = (0..w.m.cnodes.len())
+        .map(|cs| slots_where(w, cs, |x| same(x)).len())
+        .sum();
+    matches!(c, MCap::Endpoint { .. } | MCap::Notification { .. }) && copies == 1
 }
 
-/// The pointer for `x`, for a message through endpoint `ep`.
-fn extra_cptr(w: &World, x: Extra, ep: Option<usize>) -> u64 {
+/// The pointer for `x` in CNode `cs`, for a message through endpoint `ep`.
+fn extra_cptr(w: &World, cs: usize, x: Extra, ep: Option<usize>) -> u64 {
     match x {
         Extra::Same(n) => {
             let same = slots_where(
                 w,
+                cs,
                 |c| matches!(*c, MCap::Endpoint { ep: e, .. } if Some(e) == ep),
             );
-            let any = slots_where(w, |c| matches!(c, MCap::Endpoint { .. }));
+            let any = slots_where(w, cs, |c| matches!(c, MCap::Endpoint { .. }));
             pick(&same, n as u64)
                 .or_else(|| pick(&any, n as u64))
                 .unwrap_or(0)
         }
-        Extra::Any(n) => match w.m.cap((0, (n as u64 % SLOTS) as usize)) {
+        Extra::Any(n) => match w.m.cap((cs, (n as u64 % SLOTS) as usize)) {
             MCap::Untyped => slot::EMPTY,
             _ => n as u64 % SLOTS,
         },
@@ -403,30 +433,44 @@ fn extra_cptr(w: &World, x: Extra, ep: Option<usize>) -> u64 {
     }
 }
 
-/// The `caps_or_badges` words for `extras`.
-fn extra_words(w: &World, extras: &[Extra], ep: Option<usize>) -> Vec<(usize, u64)> {
+/// The `caps_or_badges` words for `extras`, in CNode `cs`.
+fn extra_words(w: &World, cs: usize, extras: &[Extra], ep: Option<usize>) -> Vec<(usize, u64)> {
     extras
         .iter()
         .enumerate()
-        .map(|(i, &x)| (word::CAPS_OR_BADGES + i, extra_cptr(w, x, ep)))
+        .map(|(i, &x)| (word::CAPS_OR_BADGES + i, extra_cptr(w, cs, x, ep)))
         .collect()
 }
 
-/// The receive-slot words for `r`, or none to keep them.
-fn recv_words(w: &World, r: RecvSlot) -> Vec<(usize, u64)> {
-    let free = slots_where(w, |c| *c == MCap::Null);
-    let full = slots_where(w, |c| *c != MCap::Null);
-    let first_free = |n: u8| pick(&free, n as u64).unwrap_or(slot::FREE);
+/// The receive-slot words for `r`, in CNode `cs`, or none to keep them.
+fn recv_words(w: &World, cs: usize, r: RecvSlot) -> Vec<(usize, u64)> {
+    let free = slots_where(w, cs, |c| *c == MCap::Null);
+    let full = slots_where(w, cs, |c| *c != MCap::Null);
+    let first_free = |n: u8| pick(&free, n as u64).unwrap_or(free_from(cs));
+    // The capabilities `cs` holds to another CNode, and that CNode.
+    let others: Vec<(u64, usize)> = (0..SLOTS)
+        .filter_map(|s| match w.m.cap((cs, s as usize)) {
+            MCap::CNode { cnode, .. } if cnode != cs => Some((s, cnode)),
+            _ => None,
+        })
+        .collect();
     let (cnode, index, depth) = match r {
         RecvSlot::Keep => return Vec::new(),
         RecvSlot::Free(n) => (slot::ROOT, first_free(n), 64),
+        RecvSlot::Other(n) => match pick(&others, n as u64) {
+            Some((at, other)) => {
+                let free = slots_where(w, other, |c| *c == MCap::Null);
+                let index = pick(&free, n as u64).unwrap_or(free_from(other));
+                (at, index, 64)
+            }
+            None => (slot::ROOT, first_free(n), 64),
+        },
         RecvSlot::Full(n) => (slot::ROOT, pick(&full, n as u64).unwrap_or(1), 64),
         RecvSlot::NoCNode(n) => (n as u64 % SLOTS, first_free(n), 64),
         RecvSlot::Depth(n, d) => (slot::ROOT, first_free(n), d),
         RecvSlot::Bad(x) => (slot::ROOT, x | 1 << 40, 64),
     };
-    // A `receive_cnode` that names the root CNode's own slot through a
-    // copy is as good: received CNode capabilities are copies of it.
+    // `CPtr` 1 names the receiver's own CSpace root in either CNode.
     vec![
         (word::RECEIVE_CNODE, cnode),
         (word::RECEIVE_INDEX, index),
@@ -484,9 +528,10 @@ fn invocation(label: u64, len: u8) -> u64 {
 /// A message to `rdi` from `t`, with its buffer words.
 fn message(w: &World, t: usize, rdi: u64, msg: &Msg, recv: RecvSlot) -> (u64, Vec<(usize, u64)>) {
     let ep = endpoint_of(w, t, rdi);
+    let cs = cspace(w, t);
     let mut words = msg_words(msg);
-    words.extend(extra_words(w, &msg.extras[..msg.extra as usize], ep));
-    words.extend(recv_words(w, recv));
+    words.extend(extra_words(w, cs, &msg.extras[..msg.extra as usize], ep));
+    words.extend(recv_words(w, cs, recv));
     // A message to a kernel object is an invocation: keep its label out of
     // the rows objects perform, which the other operations reach with
     // arguments of their own.
@@ -538,8 +583,9 @@ fn resolve(w: &World, op: &Op) -> Action {
                 State::BlockedOnSend { ep, .. } => Some(ep),
                 _ => None,
             };
-            let mut words = extra_words(w, extras, ep);
-            words.extend(recv_words(w, recv));
+            let cs = cspace(w, t);
+            let mut words = extra_words(w, cs, extras, ep);
+            words.extend(recv_words(w, cs, recv));
             return Action::WriteBuffer { t, words };
         }
         Op::Send { who, .. }
@@ -569,6 +615,8 @@ fn resolve(w: &World, op: &Op) -> Action {
             None => Action::Tick,
         };
     };
+    // Every `CPtr` the actor sets resolves in its CSpace.
+    let cs = cspace(w, t);
     match *op {
         Op::Send {
             kind,
@@ -577,7 +625,7 @@ fn resolve(w: &World, op: &Op) -> Action {
             recv,
             ..
         } => {
-            let rdi = cptr(w, target, |c| sendable(w, c, kind));
+            let rdi = cptr(w, cs, target, |c| sendable(w, c, kind));
             let (rsi, words) = message(w, t, rdi, msg, recv);
             sys(t, kind.number(), rdi, rsi, Some(msg.mrs), words)
         }
@@ -589,9 +637,9 @@ fn resolve(w: &World, op: &Op) -> Action {
             recv,
             ..
         } => {
-            let rdi = cptr(w, target, |c| receivable(w, t, c));
+            let rdi = cptr(w, cs, target, |c| receivable(w, t, c));
             let number = if nb { sysno::NB_RECV } else { sysno::RECV };
-            sys(t, number, rdi, rsi, Some(mrs), recv_words(w, recv))
+            sys(t, number, rdi, rsi, Some(mrs), recv_words(w, cs, recv))
         }
         Op::Reply { ref msg, .. } => {
             let (rsi, words) = message(w, t, slot::EMPTY, msg, RecvSlot::Keep);
@@ -603,7 +651,7 @@ fn resolve(w: &World, op: &Op) -> Action {
             recv,
             ..
         } => {
-            let rdi = cptr(w, target, |c| receivable(w, t, c));
+            let rdi = cptr(w, cs, target, |c| receivable(w, t, c));
             let (rsi, words) = message(w, t, slot::EMPTY, msg, recv);
             sys(t, sysno::REPLY_RECV, rdi, rsi, Some(msg.mrs), words)
         }
@@ -655,7 +703,7 @@ fn resolve(w: &World, op: &Op) -> Action {
                 _ => target as usize % THREADS,
             };
             let rdi = slot::TCB + y as u64;
-            let n = cptr(w, ntfn, |c| match *c {
+            let n = cptr(w, cs, ntfn, |c| match *c {
                 MCap::Notification { ntfn, .. } => (true, w.m.ntfns[ntfn].state == NState::Active),
                 _ => (false, false),
             });
@@ -682,7 +730,7 @@ fn resolve(w: &World, op: &Op) -> Action {
             ..
         } => {
             let of = |f: &dyn Fn(&MCap) -> bool, n: u8| {
-                pick(&slots_where(w, f), n as u64).unwrap_or(slot::EMPTY)
+                pick(&slots_where(w, cs, f), n as u64).unwrap_or(slot::EMPTY)
             };
             let index = match s {
                 DelSlot::Endpoint(n) => of(&|c| matches!(c, MCap::Endpoint { .. }), n),
@@ -691,9 +739,9 @@ fn resolve(w: &World, op: &Op) -> Action {
                 DelSlot::Tcb(n) => of(&|c| matches!(c, MCap::Tcb(_)), n),
                 DelSlot::Reply(n) => of(&|c| matches!(c, MCap::Reply { .. }), n),
                 DelSlot::Received(n) => {
-                    let v: Vec<u64> = slots_where(w, |c| *c != MCap::Null)
+                    let v: Vec<u64> = slots_where(w, cs, |c| *c != MCap::Null)
                         .into_iter()
-                        .filter(|&s| s >= slot::FREE)
+                        .filter(|&s| s >= free_from(cs))
                         .collect();
                     pick(&v, n as u64).unwrap_or(slot::EMPTY)
                 }
@@ -716,17 +764,21 @@ fn resolve(w: &World, op: &Op) -> Action {
         Op::SaveCaller {
             kind, slot: s, len, ..
         } => {
-            // The destination as a receive slot names it, through the root.
-            let words = recv_words(w, s);
-            let (index, depth) = match &words[..] {
-                [_, (_, index), (_, depth)] => (*index, *depth),
-                _ => (slot::FREE, 64),
+            // The destination as a receive slot names it, through the
+            // actor's CSpace root, or another CNode for `Other`.
+            let words = recv_words(w, cs, s);
+            let (cnode, index, depth) = match &words[..] {
+                [(_, cnode), (_, index), (_, depth)] if matches!(s, RecvSlot::Other(_)) => {
+                    (*cnode, *index, *depth)
+                }
+                [_, (_, index), (_, depth)] => (slot::ROOT, *index, *depth),
+                _ => (slot::ROOT, free_from(cs), 64),
             };
             let rsi = invocation(label::CNODE_SAVE_CALLER, len);
             sys(
                 t,
                 kind.number(),
-                slot::ROOT,
+                cnode,
                 rsi,
                 Some([index, depth, 0, 0]),
                 Vec::new(),
@@ -741,7 +793,7 @@ fn resolve(w: &World, op: &Op) -> Action {
         } => {
             let index = match s {
                 CancelSlot::Busy(n) => {
-                    let busy = slots_where(w, |c| {
+                    let busy = slots_where(w, cs, |c| {
                         match *c {
                         MCap::Endpoint { ep, badge, .. } => w.m.endpoints[ep].queue.iter().any(|&q| {
                             matches!(w.m.threads[q].state, State::BlockedOnSend { badge: b, .. } if b == badge)
@@ -752,14 +804,14 @@ fn resolve(w: &World, op: &Op) -> Action {
                     let all: Vec<u64> = busy
                         .iter()
                         .copied()
-                        .filter(|&s| matches!(w.m.cap((0, s as usize)), MCap::Endpoint { rights, .. } if rights == Rights::ALL))
+                        .filter(|&s| matches!(w.m.cap((cs, s as usize)), MCap::Endpoint { rights, .. } if rights == Rights::ALL))
                         .collect();
                     pick(&all, n as u64)
                         .or_else(|| pick(&busy, n as u64))
                         .unwrap_or(slot::EP0_BADGED)
                 }
                 CancelSlot::Endpoint(n) => pick(
-                    &slots_where(w, |c| matches!(c, MCap::Endpoint { .. })),
+                    &slots_where(w, cs, |c| matches!(c, MCap::Endpoint { .. })),
                     n as u64,
                 )
                 .unwrap_or(slot::EMPTY),
@@ -836,6 +888,7 @@ fn recv_slot_s() -> impl Strategy<Value = RecvSlot> {
     prop_oneof![
         3 => Just(RecvSlot::Keep),
         6 => any::<u8>().prop_map(RecvSlot::Free),
+        1 => any::<u8>().prop_map(RecvSlot::Other),
         1 => any::<u8>().prop_map(RecvSlot::Full),
         1 => any::<u8>().prop_map(RecvSlot::NoCNode),
         1 => (any::<u8>(), prop::sample::select(&[0u64, 5, 58, 65][..]))
@@ -965,8 +1018,10 @@ const FAULT_EPS: [u64; 12] = [
     BAD_CPTR,
 ];
 
+/// A world's configuration: priorities, fault endpoints, and which threads,
+/// if any, have the second CNode as their CSpace root.
 fn config() -> impl Strategy<Value = Config> {
-    prop_oneof![
+    let base = prop_oneof![
         1 => Just(Config::default()),
         3 => (
             prop_oneof![
@@ -975,8 +1030,16 @@ fn config() -> impl Strategy<Value = Config> {
             ],
             prop::array::uniform6(prop::sample::select(&FAULT_EPS[..])),
         )
-            .prop_map(|(prios, fault_eps)| Config { prios, fault_eps }),
-    ]
+            .prop_map(|(prios, fault_eps)| Config { prios, fault_eps, ..Config::default() }),
+    ];
+    let second = prop_oneof![
+        1 => Just([false; THREADS]),
+        2 => prop::array::uniform6(prop::bool::weighted(0.4)),
+    ];
+    (base, second).prop_map(|(cfg, second_cspace)| Config {
+        second_cspace,
+        ..cfg
+    })
 }
 
 fn cases() -> u32 {

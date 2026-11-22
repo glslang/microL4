@@ -14,7 +14,7 @@
 //! - every endpoint's state and queue, in order, and every notification's
 //!   state, word, binding and queue;
 //! - the current thread and every ready queue, in order;
-//! - every slot of the root CNode;
+//! - every slot of both CNodes;
 //! - what the system call returned;
 //! - `ipc::check`, `ipc::check_notifications`, `sched::check_exit` and the
 //!   model's own `check`, and that the kernel wrote IPC buffers only where
@@ -30,20 +30,26 @@
 //!
 //! | Address | What |
 //! | --- | --- |
-//! | `0x1000` | the root CNode, 64 slots, a 58-bit guard of 0, so `CPtr` `n` below 64 names slot `n`; every thread's CSpace |
+//! | `0x1000` | the root CNode, 64 slots, a 58-bit guard of 0, so `CPtr` `n` below 64 names slot `n`; the CSpace of every thread but those of the second CNode |
 //! | `0x1800` | endpoints 0 to 3, 32 bytes each |
 //! | `0x1900` | notifications 0 to 2, 64 bytes each |
 //! | `0x2000` | threads 0 to 5, 2 KiB each |
 //! | `0x5000` | a frame with Read and Write: the IPC buffers of threads 0 to 3, 1 KiB each |
 //! | `0x6000` | a frame with Read only: thread 4's buffer, readable but not writable; thread 5 has none |
 //! | `0x7000` | a 4 KiB untyped, an object IPC never uses |
+//! | `0x8000` | the second CNode, shaped as the root, if a thread has it as its CSpace |
 //!
 //! [`slot`] lists the root CNode's capabilities: the four endpoints' and
 //! three notifications' originals and copies of them with various rights
 //! and badges, a capability to each TCB, the two frames and the untyped;
 //! slots 36 to 63 are free, for received capabilities and saved reply
 //! capabilities. Each thread's priority and fault endpoint come from the
-//! [`Config`].
+//! [`Config`], and so does which threads have the second CNode as their
+//! CSpace root ([`second`]): a CNode that holds copies of only some of the
+//! root's capabilities, most in other slots than the root's, so that a
+//! `CPtr` names another capability, or none, in each CSpace. The second
+//! CNode exists only in a world where a thread uses it, so that the copies
+//! it holds change no other world.
 
 use std::collections::BTreeMap;
 
@@ -63,14 +69,14 @@ use l4core::tcb::{self, EpRef, NtfnRef, TcbRef, Tcbs, ThreadState};
 use l4core::testing::{IpcTestKernel, ThreadEvent};
 
 use crate::ipc::{
-    BUFFER_WORDS, Buffer, CNode, Dir, EXIT_IRET, EXIT_SYSRET, Endpoint, Info, MCap, Model, NState,
-    Ntfn, SchedAction, State, Thread, Tid, label, sysno, word,
+    BUFFER_WORDS, Buffer, CNode, CNodeId, CSlot, Dir, EXIT_IRET, EXIT_SYSRET, Endpoint, Info, MCap,
+    Model, NState, Ntfn, SchedAction, State, Thread, Tid, label, sysno, word,
 };
 
 pub const THREADS: usize = 6;
 pub const EPS: usize = 4;
 pub const NTFNS: usize = 3;
-pub const MEM_END: u64 = 0x8000;
+pub const MEM_END: u64 = 0x8800;
 pub const ROOT: u64 = 0x1000;
 pub const ROOT_RADIX: u32 = 6;
 pub const ROOT_GUARD_SIZE: u32 = 58;
@@ -81,6 +87,8 @@ pub const TCB_BASE: u64 = 0x2000;
 pub const FRAME_RW: u64 = 0x5000;
 pub const FRAME_RO: u64 = 0x6000;
 pub const UNTYPED: u64 = 0x7000;
+/// The second CNode: radix and guard as the root's.
+pub const SECOND: u64 = 0x8000;
 /// The user address of thread `i`'s buffer is this plus its offset in the
 /// frame.
 pub const BUFFER_VADDR: u64 = 0x10_0000;
@@ -103,8 +111,8 @@ const R_G: Rights = Rights(Rights::READ.0 | Rights::GRANT.0);
 pub mod slot {
     /// Stays empty.
     pub const EMPTY: u64 = 0;
-    /// The root CNode's own capability, a derivation root; each TCB's
-    /// CSpace slot holds a copy.
+    /// The root CNode's own capability, a derivation root; the CSpace slot
+    /// of each TCB whose CSpace is the root holds a copy.
     pub const ROOT: u64 = 1;
     /// Endpoint `i`'s original, all rights, unbadged: slots 2 to 5.
     pub const EP: u64 = 2;
@@ -140,6 +148,55 @@ pub mod slot {
     pub const FREE: u64 = 36;
 }
 
+/// The second CNode's slots, for the threads [`Config::second_cspace`]
+/// names. Slot 0 stays empty; slot 1 holds the second CNode's own
+/// capability, its derivation root, as the root's slot 1 does, so a CNode
+/// invocation through `CPtr` 1 acts on the invoker's own CSpace; [`COPIES`]
+/// lists the rest. It holds no TCB, frame or untyped capability.
+///
+/// [`COPIES`]: second::COPIES
+pub mod second {
+    use super::slot as root;
+
+    /// Its own capability, the second CNode's derivation root.
+    pub const OWN: u64 = 1;
+    pub const EP1: u64 = 2;
+    pub const EP0: u64 = 3;
+    pub const EP2: u64 = 4;
+    pub const EP3: u64 = 5;
+    pub const EP1_BADGED: u64 = 6;
+    pub const EP0_BADGED: u64 = 7;
+    pub const EP0_W: u64 = 8;
+    pub const EP0_RG: u64 = 9;
+    pub const EP3_F1: u64 = 10;
+    pub const EP1_WG_BADGED: u64 = 11;
+    pub const N1_BADGED: u64 = 12;
+    pub const NTFN0: u64 = 13;
+    pub const N0_W_BADGED: u64 = 14;
+    /// A copy of the root CNode's capability: the way to the root's slots.
+    pub const ROOT_CNODE: u64 = 15;
+    /// Slots 16 to 63 are free.
+    pub const FREE: u64 = 16;
+
+    /// Each slot and the root slot whose capability it holds a copy of.
+    pub const COPIES: [(u64, u64); 14] = [
+        (EP1, root::EP + 1),
+        (EP0, root::EP),
+        (EP2, root::EP + 2),
+        (EP3, root::EP + 3),
+        (EP1_BADGED, root::EP1_BADGED),
+        (EP0_BADGED, root::EP0_BADGED),
+        (EP0_W, root::EP0_W),
+        (EP0_RG, root::EP0_RG),
+        (EP3_F1, root::EP3_F1),
+        (EP1_WG_BADGED, root::EP1_WG_BADGED),
+        (N1_BADGED, root::N1_BADGED),
+        (NTFN0, root::NTFN),
+        (N0_W_BADGED, root::N0_W_BADGED),
+        (ROOT_CNODE, root::ROOT),
+    ];
+}
+
 /// The copies of endpoint capabilities in the root CNode: slot, endpoint,
 /// rights, badge. A badged copy is an original, as Mint makes it.
 pub const EP_COPIES: [(u64, usize, Rights, u64); 10] = [
@@ -173,6 +230,15 @@ pub struct Config {
     pub prios: [u8; THREADS],
     /// Each thread's fault endpoint `CPtr`.
     pub fault_eps: [u64; THREADS],
+    /// The threads whose CSpace root is the second CNode, not the root.
+    pub second_cspace: [bool; THREADS],
+}
+
+impl Config {
+    /// Whether the world has the second CNode.
+    pub fn has_second(&self) -> bool {
+        self.second_cspace.contains(&true)
+    }
 }
 
 impl Default for Config {
@@ -180,7 +246,7 @@ impl Default for Config {
     /// (Write and GrantReply, badges `0xF0` and `0xF1`), thread 2 to
     /// endpoint 0's original, thread 5 to endpoint 1 (Write and Grant,
     /// badge `0x55`); thread 3's fault endpoint is an empty slot and
-    /// thread 4's does not resolve.
+    /// thread 4's does not resolve. Every thread's CSpace is the root.
     fn default() -> Config {
         Config {
             prios: [100; THREADS],
@@ -192,6 +258,7 @@ impl Default for Config {
                 BAD_CPTR,
                 slot::EP1_WG_BADGED,
             ],
+            second_cspace: [false; THREADS],
         }
     }
 }
@@ -409,6 +476,21 @@ pub fn rs(i: u64) -> SlotAddr {
     SlotAddr::new(ROOT).unwrap().offset(i)
 }
 
+/// Second CNode slot `i`.
+pub fn ss(i: u64) -> SlotAddr {
+    SlotAddr::new(SECOND).unwrap().offset(i)
+}
+
+/// The kernel's address of model CNode `c`: 0 is the root, 1 the second.
+pub fn cnode_addr(c: CNodeId) -> u64 {
+    [ROOT, SECOND][c]
+}
+
+/// The kernel's slot for a model slot.
+pub fn slot_addr((c, i): CSlot) -> SlotAddr {
+    SlotAddr::new(cnode_addr(c)).unwrap().offset(i as u64)
+}
+
 fn ep_cap(i: usize, rights: Rights, badge: u64) -> Cap {
     Cap::new(
         CapType::Endpoint,
@@ -445,6 +527,10 @@ fn root_cap() -> Cap {
     Cap::cnode(ROOT, ROOT_RADIX, ROOT_GUARD_SIZE, 0)
 }
 
+fn second_cap() -> Cap {
+    Cap::cnode(SECOND, ROOT_RADIX, ROOT_GUARD_SIZE, 0)
+}
+
 /// The capability the kernel holds for a model capability.
 pub fn kcap(c: MCap) -> Cap {
     match c {
@@ -455,7 +541,11 @@ pub fn kcap(c: MCap) -> Cap {
             badge,
             rights,
         } => ntfn_cap(ntfn, rights, badge),
-        MCap::CNode { .. } => root_cap(),
+        MCap::CNode {
+            cnode,
+            guard_size,
+            guard,
+        } => Cap::cnode(cnode_addr(cnode), ROOT_RADIX, guard_size, guard),
         MCap::Tcb(t) => tcb_cap(t),
         MCap::Frame(f, _) => frame_cap(f),
         MCap::Untyped => Cap::untyped(UNTYPED, 12, false, 0),
@@ -632,12 +722,22 @@ impl World {
             rs(slot::UNTYPED),
             Cap::untyped(UNTYPED, 12, false, 0),
         );
+        if cfg.has_second() {
+            cdt::insert_root(&mut k, ss(second::OWN), second_cap());
+            for (s, from) in second::COPIES {
+                let cap = k.load(rs(from)).cap;
+                cdt::insert_derived(&mut k, rs(from), ss(s), cap, false).unwrap();
+            }
+        }
         let first = World::first(cfg);
         for i in 0..THREADS {
             let t = tcb(i);
             tcb::init(&mut k, t);
-            cdt::insert_derived(&mut k, rs(slot::ROOT), t.slot(TCB_SLOT_CSPACE), root, false)
-                .unwrap();
+            let (from, cspace) = match cfg.second_cspace[i] {
+                false => (rs(slot::ROOT), root),
+                true => (ss(second::OWN), second_cap()),
+            };
+            cdt::insert_derived(&mut k, from, t.slot(TCB_SLOT_CSPACE), cspace, false).unwrap();
             if let Some((paddr, b)) = buffer_of(i) {
                 let f = (b == Buffer::Read) as usize;
                 cdt::insert_derived(
@@ -717,6 +817,26 @@ impl World {
         slots[slot::FRAME_RW as usize] = MCap::Frame(0, RW);
         slots[slot::FRAME_RO as usize] = MCap::Frame(1, Rights::READ);
         slots[slot::UNTYPED as usize] = MCap::Untyped;
+        let own = MCap::CNode {
+            cnode: 1,
+            guard_size: ROOT_GUARD_SIZE,
+            guard: 0,
+        };
+        let mut cnodes = vec![CNode {
+            radix: ROOT_RADIX,
+            slots,
+        }];
+        if cfg.has_second() {
+            let mut slots = vec![MCap::Null; ROOT_SLOTS];
+            slots[second::OWN as usize] = own;
+            for (s, from) in second::COPIES {
+                slots[s as usize] = cnodes[0].slots[from as usize];
+            }
+            cnodes.push(CNode {
+                radix: ROOT_RADIX,
+                slots,
+            });
+        }
         let threads = (0..THREADS)
             .map(|i| {
                 let (frame, buffer) = match buffer_of(i) {
@@ -732,7 +852,7 @@ impl World {
                     slice: 1,
                     fault: None,
                     fault_ep: cfg.fault_eps[i],
-                    cspace: root,
+                    cspace: if cfg.second_cspace[i] { own } else { root },
                     buffer_frame: frame,
                     buffer,
                     words: [0; BUFFER_WORDS],
@@ -764,10 +884,7 @@ impl World {
                 };
                 NTFNS
             ],
-            cnodes: vec![CNode {
-                radix: ROOT_RADIX,
-                slots,
-            }],
+            cnodes,
             queues,
             action: SchedAction::ResumeCurrent,
             current: Some(first),
@@ -826,8 +943,9 @@ impl World {
         let ctx = |e: String| format!("step {step} {action:?}: {e}");
         self.allowed(action).map_err(ctx)?;
         let key = self.tally.is_some().then(|| self.tally_key(action));
+        let named = self.named_slot(action);
         let expected = koutcome(self.model_apply(action));
-        let got = self.kernel_apply(action, schedule).map_err(ctx)?;
+        let got = self.kernel_apply(action, schedule, named).map_err(ctx)?;
         ensure(got == expected, || {
             format!("the kernel returned {got:?}, the model {expected:?}")
         })
@@ -851,6 +969,22 @@ impl World {
             *t.entry(format!("{key}{after}{out}")).or_default() += 1;
         }
         Ok(got)
+    }
+
+    /// The slot a CNode invocation by `action` would name, MR0 and MR1 from
+    /// the CNode at `rdi`, as the model resolves it before the step: where
+    /// a thread that deletes its own TCB leaves the Zombie.
+    fn named_slot(&self, action: &Action) -> Option<CSlot> {
+        let Action::Syscall { t, entry, .. } = *action else {
+            return None;
+        };
+        let mut regs = self.m.threads[t].regs;
+        enter_syscall(&mut regs, entry.as_ref());
+        let cnode = self.m.cap(self.m.lookup_cap(t, regs.rdi).ok()?);
+        let depth = u32::try_from(regs.r8)
+            .ok()
+            .filter(|d| (1..=64).contains(d))?;
+        self.m.lookup_slot(cnode, regs.r10, depth).ok()
     }
 
     /// The model's side: atomic, then the scheduler.
@@ -924,8 +1058,14 @@ impl World {
     }
 
     /// The kernel's side: the entry, restarted until it completes, then the
-    /// scheduler and the chosen thread's activation.
-    fn kernel_apply(&mut self, action: &Action, schedule: &[u8]) -> Result<Outcome, String> {
+    /// scheduler and the chosen thread's activation. `named` is the slot
+    /// a CNode invocation names, if the action is one.
+    fn kernel_apply(
+        &mut self,
+        action: &Action,
+        schedule: &[u8],
+        named: Option<CSlot>,
+    ) -> Result<Outcome, String> {
         let out = match *action {
             Action::Syscall {
                 t,
@@ -942,7 +1082,7 @@ impl World {
                         self.k.mem.write(base + 8 * i as u64, v);
                     }
                 }
-                self.kernel_syscall(t, schedule)?
+                self.kernel_syscall(t, schedule, named)?
             }
             Action::Exception {
                 t,
@@ -986,7 +1126,12 @@ impl World {
 
     /// `handle_syscall` for thread `t`, restarted after each preemption
     /// until it completes.
-    fn kernel_syscall(&mut self, t: Tid, schedule: &[u8]) -> Result<Outcome, String> {
+    fn kernel_syscall(
+        &mut self,
+        t: Tid,
+        schedule: &[u8],
+        named: Option<CSlot>,
+    ) -> Result<Outcome, String> {
         let tr = tcb(t);
         let mut attempts = 0;
         self.k.preempt_in = schedule.first().map(|&n| n as u64);
@@ -1016,7 +1161,7 @@ impl World {
                     self.k.state(tr)
                 )
             })?;
-            let at = rs(self.k.regs(tr).r10);
+            let at = slot_addr(named.ok_or("a self-deletion that names no slot")?);
             loop {
                 match cnode::delete(&mut self.k, at) {
                     Ok(()) => break,
@@ -1215,11 +1360,14 @@ impl World {
         ensure(kq == mq, || {
             format!("ready queues: kernel {kq:?}, model {mq:?}")
         })?;
-        for (s, &c) in m.cnodes[0].slots.iter().enumerate() {
-            let (kc, mc) = (self.k.load(rs(s as u64)).cap, kcap(c));
-            ensure(kc == mc, || {
-                format!("root slot {s}: kernel {kc:?}, model {c:?}")
-            })?;
+        for (n, cnode) in m.cnodes.iter().enumerate() {
+            for (s, &c) in cnode.slots.iter().enumerate() {
+                let (kc, mc) = (self.k.load(slot_addr((n, s))).cap, kcap(c));
+                let which = ["root", "second CNode"][n];
+                ensure(kc == mc, || {
+                    format!("{which} slot {s}: kernel {kc:?}, model {c:?}")
+                })?;
+            }
         }
         for e in &self.k.thread_events {
             if let ThreadEvent::WriteBufferWord { paddr, .. } = *e {
