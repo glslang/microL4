@@ -70,6 +70,9 @@ impl Exit {
     }
 }
 
+/// The most input one scenario may send, in bytes after unescaping.
+const MAX_SEND_BYTES: usize = 4096;
+
 /// One `expect:` or `send:`, in file order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -170,6 +173,23 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
     }
     if exit == Exit::Timeout && timeout.is_none() {
         return Err(format!("{name}.scenario: `exit: timeout` needs a `timeout:`").into());
+    }
+    // The runner writes sends to QEMU's stdin with a blocking write on the
+    // thread that also enforces the timeout. Keeping every scenario's input
+    // far below a pipe's buffer (64 KiB on Linux) means that write never
+    // waits on a guest that has stopped reading.
+    let sent: usize = steps
+        .iter()
+        .map(|s| match s {
+            Step::Send(bytes) => bytes.len(),
+            Step::Expect(_) => 0,
+        })
+        .sum();
+    if sent > MAX_SEND_BYTES {
+        return Err(format!(
+            "{name}.scenario: its `send:` lines total {sent} bytes, more than {MAX_SEND_BYTES}"
+        )
+        .into());
     }
     Ok(Scenario {
         name: name.to_string(),
@@ -645,6 +665,10 @@ forbid: KERNEL PANIC     # what a debug kernel would print
             ("exit: success\nexpect: x\ntimeout: soon\n", "whole seconds"),
             ("exit: success\nexpect:\n", "empty expect"),
             ("exit: success\nexpect: x\nretries: 3\n", "unknown key"),
+            (
+                &format!("exit: success\nexpect: x\nsend: {}\n", "a".repeat(4097)),
+                "more than 4096",
+            ),
             ("exit: success\nno colon here\n", "key: value"),
             (
                 "exit: success\nsend: x\nexpect: x\n",
