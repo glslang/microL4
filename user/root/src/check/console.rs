@@ -57,7 +57,7 @@ const fn step(client: u64, action: Action) -> Step {
 /// The script. Root runs the steps before [`INPUT_STEPS`] one at a time,
 /// so every write boundary is fixed; then it starts both input steps and
 /// waits for both reports.
-pub const SCRIPT: [Step; 14] = [
+pub const SCRIPT: [Step; 15] = [
     // Interleaved lines.
     step(A, Action::Write(b"a1 alpha ")),
     step(B, Action::Write(b"b1 bravo ")),
@@ -75,6 +75,8 @@ pub const SCRIPT: [Step; 14] = [
     // Input.
     step(A, Action::Input("a> ")),
     step(B, Action::Input("b> ")),
+    // Type-ahead: a Read answered at once from a waiting line.
+    step(A, Action::Input(TYPEAHEAD_PROMPT)),
 ];
 
 /// The interleaved lines the transcript shows, but the 300-byte one, in
@@ -92,6 +94,17 @@ pub const INTERLEAVED_LINES: [&str; 7] = [
 
 /// The first step of the input part.
 pub const INPUT_STEPS: usize = 12;
+/// The type-ahead step: root runs it only once [`TYPEAHEAD_LINE`] waits
+/// in `a`'s waiting lines, so `a`'s Read is answered at once, after
+/// console has flushed `a`'s unfinished output (its prompt). Both are
+/// longer than 24 bytes, so the reply's words and the flush's both reach
+/// the IPC buffer, which console uses for its uart Writes too.
+pub const TYPEAHEAD_STEP: usize = 14;
+/// The prompt and the line of the type-ahead step.
+pub const TYPEAHEAD_PROMPT: &str = "a, a prompt of more than 24 bytes> ";
+pub const TYPEAHEAD_LINE: &str = "typed ahead for a, more than 24 bytes";
+/// The bytes the harness sends for it, the CR included.
+pub const TYPEAHEAD_INPUT_BYTES: u64 = TYPEAHEAD_LINE.len() as u64 + 1;
 /// The last step of the interleaved lines.
 pub const INTERLEAVED_STEPS: usize = 10;
 
@@ -329,8 +342,15 @@ mod tests {
         assert_eq!(SCRIPT[INTERLEAVED_STEPS + 1].action, Action::Burst);
         assert_eq!(INTERLEAVED_STEPS + 2, INPUT_STEPS);
         assert_eq!(SCRIPT[INPUT_STEPS].action, Action::Input("a> "));
-        assert_eq!(SCRIPT.len(), INPUT_STEPS + 2);
+        assert_eq!(TYPEAHEAD_STEP, INPUT_STEPS + 2);
+        assert_eq!(SCRIPT.len(), TYPEAHEAD_STEP + 1);
+        assert_eq!(SCRIPT[TYPEAHEAD_STEP].client, A);
+        // Past MR3 both ways: the line in the Read's reply, and the
+        // prompt in console's uart Write that flushes it.
+        assert!(TYPEAHEAD_LINE.len() > proto::MAX_REGISTER_BYTES);
+        assert!(TYPEAHEAD_PROMPT.len() > proto::MAX_REGISTER_BYTES);
         assert_eq!(CONSOLE_INPUT_BYTES, 22);
+        assert_eq!(TYPEAHEAD_INPUT_BYTES, 38);
         assert_eq!(RELEASE_INPUT_BYTES, 14);
     }
 

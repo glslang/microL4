@@ -27,7 +27,8 @@ use libsys::{
 };
 use root::check::console::{
     self as check, A, Action, B, B2_LEN, BURST_LINES, CONSOLE_INPUT_BYTES, INPUT_STEPS,
-    INTERLEAVED_STEPS, REPORT, ROOT, Report, SCRIPT, STARTED,
+    INTERLEAVED_STEPS, REPORT, ROOT, Report, SCRIPT, STARTED, TYPEAHEAD_INPUT_BYTES,
+    TYPEAHEAD_LINE, TYPEAHEAD_STEP,
 };
 
 use crate::fail;
@@ -106,14 +107,19 @@ pub fn run(bi: &BootInfo) -> ! {
 
     // Input: both clients write a prompt and read; their lines arrive in
     // any order.
-    for (i, step) in SCRIPT.iter().enumerate().skip(INPUT_STEPS) {
+    for (i, step) in SCRIPT
+        .iter()
+        .enumerate()
+        .take(TYPEAHEAD_STEP)
+        .skip(INPUT_STEPS)
+    {
         send(saved_slot(step.client), &step_message(i));
     }
     println!("console: input next");
     let mut lines = [(0, [0u8; 255], 0usize); 2];
     for slot in lines.iter_mut() {
         let (client, r) = report(ipc, d);
-        if r.status != 0 || !(INPUT_STEPS..SCRIPT.len()).contains(&(r.step as usize)) {
+        if r.status != 0 || !(INPUT_STEPS..TYPEAHEAD_STEP).contains(&(r.step as usize)) {
             fail!(
                 "console: client {} reported step {:#x}, status {:#x}, during the input",
                 check::name(client),
@@ -122,6 +128,7 @@ pub fn run(bi: &BootInfo) -> ! {
             );
         }
         *slot = (client, r.line, r.len);
+        save(saved_slot(client));
     }
     let got = [
         (lines[0].0, &lines[0].1[..lines[0].2]),
@@ -132,13 +139,55 @@ pub fn run(bi: &BootInfo) -> ! {
         "console: ok   a read exactly \"hi a\" and b exactly \"to b\"; nothing else reached a client"
     );
 
-    let stats = libsys::uart::Client::new(s.uart_stats, Some(ipc))
+    // Type-ahead: once uart has received the line (and so signalled NC),
+    // a Sync makes console take that signal first, so the line waits for
+    // a when a's Read arrives, with a prompt of more than 24 bytes held.
+    let uart = libsys::uart::Client::new(s.uart_stats, Some(ipc));
+    let total = CONSOLE_INPUT_BYTES + TYPEAHEAD_INPUT_BYTES;
+    println!("console: type ahead next");
+    let mut polls = 0u64;
+    loop {
+        let st = uart
+            .stats()
+            .unwrap_or_else(|e| fail!("console: uart's Stats: {e}"));
+        if st.received >= total {
+            break;
+        }
+        polls += 1;
+        if polls > 10_000_000 {
+            fail!("console: uart received {} of {total} bytes", st.received);
+        }
+    }
+    me.sync()
+        .unwrap_or_else(|e| fail!("console: root's Sync: {e}"));
+    send(saved_slot(A), &step_message(TYPEAHEAD_STEP));
+    let (client, r) = report(ipc, d);
+    if client != A || r.step != TYPEAHEAD_STEP as u64 || r.status != 0 {
+        fail!(
+            "console: type-ahead: client {} reported step {:#x}, status {:#x}",
+            check::name(client),
+            r.step,
+            r.status
+        );
+    }
+    if r.line() != TYPEAHEAD_LINE.as_bytes() {
+        fail!(
+            "console: type-ahead: a read {:?}, not {TYPEAHEAD_LINE:?}",
+            core::str::from_utf8(r.line()).unwrap_or("(not UTF-8)")
+        );
+    }
+    println!(
+        "console: ok   a's Read was answered at once with the {}-byte line typed ahead, after its prompt was flushed",
+        TYPEAHEAD_LINE.len()
+    );
+
+    let stats = uart
         .stats()
         .unwrap_or_else(|e| fail!("console: uart's Stats: {e}"));
     println!("console: uart: {stats}");
-    check::stats(&stats, CONSOLE_INPUT_BYTES).unwrap_or_else(|e| fail!("console: {e}"));
+    check::stats(&stats, total).unwrap_or_else(|e| fail!("console: {e}"));
     println!(
-        "console: ok   receive and THRE interrupts both served, all {CONSOLE_INPUT_BYTES} bytes the harness sent received, no overruns"
+        "console: ok   receive and THRE interrupts both served, all {total} bytes the harness sent received, no overruns"
     );
     println!("TEST PASS");
     libsys::exit(0)
