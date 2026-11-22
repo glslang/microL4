@@ -694,7 +694,7 @@ mod vspace_test {
 
     use super::super::{ExitCode, Objects, exit, phys_to_virt};
     use l4core::sched::{Scheduler, Scheduling};
-    use l4core::tcb::{NtfnRef, TcbRef, Tcbs, Threads};
+    use l4core::tcb::{EpRef, NtfnRef, TcbRef, Tcbs, Threads};
 
     use super::{ADDR_4K, ENTRIES, kernel_pml4, read_cr3, set_vm_root};
     use crate::boot::RootSpace;
@@ -784,6 +784,10 @@ mod vspace_test {
     impl Threads for Wired {
         fn cancel_ipc(&mut self, t: TcbRef) {
             self.0.cancel_ipc(t)
+        }
+
+        fn cancel_badged_sends(&mut self, ep: EpRef, badge: u64) {
+            self.0.cancel_badged_sends(ep, badge)
         }
 
         fn invoked_by_call(&self) -> bool {

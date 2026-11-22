@@ -315,6 +315,12 @@ impl Threads for Objects {
         ipc::cancel_ipc(self, t);
     }
 
+    /// IPC's `cancel_badged_sends`, for `CNode_CancelBadgedSends`: the
+    /// senders queued on `ep` with `badge` restart.
+    fn cancel_badged_sends(&mut self, ep: EpRef, badge: u64) {
+        ipc::cancel_badged_sends(self, ep, badge);
+    }
+
     /// The current thread's `rdx` is `Call`'s number: every system call
     /// preserves `rdx`, so it says how the invocation being performed came;
     /// false with no current thread (a self-test's invocation).

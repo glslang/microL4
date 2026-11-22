@@ -22,6 +22,7 @@ use crate::cdt;
 use crate::cnode;
 use crate::cspace;
 use crate::error::{LookupFailure, SyscallError};
+use crate::kernel::Kernel;
 use crate::regs::{self, Exit, Fault, FaultOutcome, Regs};
 use crate::sched;
 use crate::slot::SlotAddr;
@@ -30,6 +31,7 @@ use crate::tcb::{self, EpRef, TcbRef, ThreadState};
 use super::endpoint::{self as queue, EndpointCap, EpState, IpcEnv};
 use super::message::{MSG_MAX_LENGTH, MSG_REG_COUNT, MessageInfo, word};
 use super::notification::{self, NotificationCap};
+use super::transfer::{Moved, transfer_caps};
 
 /// The most message registers a fault reply sets: `UnknownSyscall`'s MR0
 /// to MR17 (`docs/abi.md`, "Fault replies").
@@ -82,7 +84,7 @@ pub fn send<E: IpcEnv + ?Sized>(
             else {
                 panic!("a thread in a Recv queue is not receiving");
             };
-            transfer(e, t, r, cap.badge);
+            transfer(e, t, r, cap.badge, cap.can_grant(), Some(ep));
             sched::set_thread_state(e, r, ThreadState::Running);
             sched::make_runnable(e, r);
             if call {
@@ -145,7 +147,7 @@ pub fn receive<E: IpcEnv + ?Sized>(e: &mut E, r: TcbRef, cap: &EndpointCap, bloc
             else {
                 panic!("a thread in a Send queue is not sending");
             };
-            transfer(e, s, r, badge);
+            transfer(e, s, r, badge, can_grant, Some(ep));
             if is_call {
                 debug_assert!(can_grant || can_grant_reply);
                 setup_caller_cap(e, s, r, cap.can_grant());
@@ -163,10 +165,11 @@ pub fn receive<E: IpcEnv + ?Sized>(e: &mut E, r: TcbRef, cap: &EndpointCap, bloc
 ///
 /// An empty slot does nothing, so a restarted `ReplyRecv` is harmless.
 /// Otherwise the reply capability, to a caller `C`, is deleted first; then
-/// either `C` gets `r`'s message (badge 0) and becomes `Running`, or, if
-/// `C` is waiting for the reply to a fault, the fault-reply rule reads
+/// either `C` gets `r`'s message (badge 0, and capabilities only if the
+/// reply capability has Grant, never unwrapped) and becomes `Running`, or,
+/// if `C` is waiting for the reply to a fault, the fault-reply rule reads
 /// `r`'s message, `C` becomes `Restart` or `Inactive`, and its fault is
-/// cleared. A reply never blocks.
+/// cleared; a fault reply moves no capability. A reply never blocks.
 pub fn reply<E: IpcEnv + ?Sized>(e: &mut E, r: TcbRef, slot: SlotAddr) {
     let cap = e.load(slot).cap;
     if cap.cap_type() != CapType::Reply || cap.is_reply_master() {
@@ -175,13 +178,13 @@ pub fn reply<E: IpcEnv + ?Sized>(e: &mut E, r: TcbRef, slot: SlotAddr) {
         return;
     }
     let c = TcbRef::new(cap.object()).expect("a reply capability names a TCB");
-    // The capability's Grant decides whether capabilities move with the
-    // reply (M6); a reply moves none in M5.
+    // Its Grant decides whether capabilities move with the reply.
+    let grant = cap.rights().contains(Rights::GRANT);
     delete_one(e, slot);
     debug_assert_eq!(e.state(c), ThreadState::BlockedOnReply);
     match e.fault(c) {
         None => {
-            transfer(e, r, c, 0);
+            transfer(e, r, c, 0, grant, None);
             sched::set_thread_state(e, c, ThreadState::Running);
             sched::make_runnable(e, c);
         }
@@ -250,35 +253,81 @@ fn delete_one<E: IpcEnv + ?Sized>(e: &mut E, slot: SlotAddr) {
     debug_assert!(done.is_ok(), "deleting a reply capability never preempts");
 }
 
+/// `CNode_SaveCaller` once its destination slot is looked up
+/// (`docs/abi.md`, "CNode_SaveCaller"): moves the reply capability in
+/// `t`'s caller slot, with its place below its caller's master, to the
+/// empty slot `dst`, so a later receive by `t` leaves it alone and
+/// [`cancel_ipc`] of the caller still finds it. `t` is the invoking thread,
+/// `None` for an invocation no thread made, which has nothing to save.
+///
+/// Errors, in this order: `DeleteFirst` if `dst` is not empty;
+/// `IllegalOperation` if the caller slot is empty, where seL4 succeeds
+/// doing nothing. A failed call changes nothing.
+pub fn save_caller<K: Kernel + ?Sized>(
+    k: &mut K,
+    t: Option<TcbRef>,
+    dst: SlotAddr,
+) -> Result<(), SyscallError> {
+    if !k.load(dst).cap.is_null() {
+        return Err(SyscallError::DeleteFirst);
+    }
+    let Some(t) = t else {
+        return Err(SyscallError::IllegalOperation);
+    };
+    let caller = t.slot(TCB_SLOT_CALLER);
+    let cap = k.load(caller).cap;
+    if cap.is_null() {
+        return Err(SyscallError::IllegalOperation);
+    }
+    // A caller slot holds nothing but a one-shot reply capability.
+    debug_assert!(cap.cap_type() == CapType::Reply && !cap.is_reply_master());
+    cdt::move_slot(k, cap, caller, dst);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Message transfer
 // ---------------------------------------------------------------------------
 
-/// `transfer(S, R, badge, g, E)` of `docs/design.md` without capability
-/// transfer, which M6 adds: copies one message from `s` to `r`.
+/// `transfer(S, R, badge, g, E)` of `docs/design.md`: copies one message
+/// from `s` to `r`. `grant` is `g`, the Grant of the capability `s` sent
+/// with (for a queued sender, as it recorded it; for a reply, the reply
+/// capability's), and `ep` is `E`, the endpoint the message goes through,
+/// `None` for a reply.
 ///
 /// - If `s` has a fault, the fault encoder makes the message; the kernel
-///   supplies its words, so only `r`'s buffer matters.
+///   supplies its words, so only `r`'s buffer matters, and no capability
+///   moves.
 /// - Otherwise the message is `s`'s `MessageInfo` (from `rsi`, a length
 ///   above 120 counting as 120) and message registers: MR0 to MR3 always,
 ///   MR4 and up only if `s` has a readable IPC buffer and `r` a writable
-///   one.
+///   one. Its capabilities move as `docs/design.md`, "Capability
+///   transfer", says: looked up again in `s`'s CSpace, unwrapped if they
+///   name `ep`, otherwise at most one copied into `r`'s receive slot.
 ///
-/// `r` gets the badge in `rdi`, the label and the delivered length in
-/// `rsi` (`extra_caps` and `caps_unwrapped` 0), and the delivered message
-/// registers; its others keep their values.
-pub fn transfer<E: IpcEnv + ?Sized>(e: &mut E, s: TcbRef, r: TcbRef, badge: u64) {
+/// `r` gets the badge in `rdi`; the label, the delivered length,
+/// `extra_caps` and `caps_unwrapped` in `rsi`; and the delivered message
+/// registers. Its others keep their values.
+pub fn transfer<E: IpcEnv + ?Sized>(
+    e: &mut E,
+    s: TcbRef,
+    r: TcbRef,
+    badge: u64,
+    grant: bool,
+    ep: Option<EpRef>,
+) {
     let sregs = e.regs(s);
     match e.fault(s) {
         Some(fault) => {
             let msg = regs::fault_message(&fault, &sregs);
-            deliver(e, r, badge, msg.label, msg.mrs());
+            deliver(e, r, badge, msg.label, msg.mrs(), Moved::NONE);
         }
         None => {
             let info = MessageInfo::from_word(sregs.rsi);
             let mut words = [0; MSG_MAX_LENGTH];
             let n = read_message(e, s, &sregs, &mut words[..info.sent_length() as usize]);
-            deliver(e, r, badge, info.label(), &words[..n]);
+            let caps = transfer_caps(e, s, r, info, grant, ep);
+            deliver(e, r, badge, info.label(), &words[..n], caps);
         }
     }
 }
@@ -302,15 +351,17 @@ pub fn read_message<E: IpcEnv + ?Sized>(e: &E, t: TcbRef, regs: &Regs, out: &mut
     n
 }
 
-/// Gives `r` a message: `badge` in `rdi`, `label` and the delivered length
-/// in `rsi`, and `words` as MR0 and up, cut to 4 words unless `r` has a
-/// writable IPC buffer. Returns the delivered length.
+/// Gives `r` a message: `badge` in `rdi`; `label`, the delivered length
+/// and what `caps` says moved in `rsi`; and `words` as MR0 and up, cut to
+/// 4 words unless `r` has a writable IPC buffer. Returns the delivered
+/// length.
 fn deliver<E: IpcEnv + ?Sized>(
     e: &mut E,
     r: TcbRef,
     badge: u64,
     label: u64,
     words: &[u64],
+    caps: Moved,
 ) -> usize {
     let writable = words.len() <= MSG_REG_COUNT || tcb::buffer_word(e, r, 0, true).is_some();
     let n = if writable { words.len() } else { MSG_REG_COUNT };
@@ -319,7 +370,7 @@ fn deliver<E: IpcEnv + ?Sized>(
         regs.set_message_register(i, *w);
     }
     regs.rdi = badge;
-    regs.rsi = MessageInfo::new(label, 0, 0, n as u64).word();
+    regs.rsi = MessageInfo::new(label, caps.caps_unwrapped, caps.extra_caps, n as u64).word();
     e.set_regs(r, &regs);
     for (i, w) in words.iter().enumerate().take(n).skip(MSG_REG_COUNT) {
         let at = tcb::buffer_word(e, r, word::MSG + i, true).expect("a writable buffer");
@@ -343,7 +394,7 @@ pub fn reply_success<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef, length: usize) {
 /// MR0 and up, cut to 4 without a writable IPC buffer.
 pub fn reply_error<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef, err: SyscallError) {
     let (words, n) = err.detail();
-    deliver(e, t, 0, err.code(), &words[..n]);
+    deliver(e, t, 0, err.code(), &words[..n], Moved::NONE);
 }
 
 // ---------------------------------------------------------------------------

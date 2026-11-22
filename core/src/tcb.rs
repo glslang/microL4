@@ -549,10 +549,10 @@ pub trait Tcbs {
     }
 }
 
-/// What the TCB invocations and thread operations need besides slots,
-/// hooks and TCB fields: the scheduler ([`Scheduling`]), five hooks the
-/// kernel and IPC supply, and the notification words binding uses. The
-/// kernel implements it on `arch::Objects`.
+/// What the TCB invocations, the CNode methods and thread operations need
+/// besides slots, hooks and TCB fields: the scheduler ([`Scheduling`]), six
+/// hooks the kernel and IPC supply, and the notification words binding uses.
+/// The kernel implements it on `arch::Objects`.
 pub trait Threads: Kernel + Scheduling {
     /// IPC's `cancel_ipc` (`docs/design.md`, "Deletion and cancellation"):
     /// if `t` is blocked in IPC, takes it off its endpoint or notification
@@ -561,6 +561,14 @@ pub trait Threads: Kernel + Scheduling {
     /// Leaves a thread that is not blocked in its state, and touches no
     /// ready queue.
     fn cancel_ipc(&mut self, t: TcbRef);
+
+    /// IPC's `cancel_badged_sends` (`docs/design.md`, "Deletion and
+    /// cancellation"), for `CNode_CancelBadgedSends`: every thread queued
+    /// to send on `ep` with badge `badge` leaves the queue, in queue order,
+    /// with its fault cleared, and becomes `Restart`, made runnable; the
+    /// other senders keep their places. Nothing for badge 0 or an endpoint
+    /// not in state `Send`.
+    fn cancel_badged_sends(&mut self, ep: EpRef, badge: u64);
 
     /// Whether the invocation being performed came by `Call`. Only a `Call`
     /// gets the kernel's reply; `Send` and `NBSend` drop it and leave the

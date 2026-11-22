@@ -155,6 +155,7 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadEvent {
     CancelIpc(TcbRef),
+    CancelBadgedSends { ep: EpRef, badge: u64 },
     SetCurrentFsBase(u64),
     WriteBufferWord { paddr: u64, value: u64 },
 }
@@ -300,6 +301,12 @@ impl Threads for TestKernel {
         self.set_fault(t, None);
     }
 
+    /// Records the call: there are no endpoint queues to cancel.
+    fn cancel_badged_sends(&mut self, ep: EpRef, badge: u64) {
+        self.thread_events
+            .push(ThreadEvent::CancelBadgedSends { ep, badge });
+    }
+
     fn invoked_by_call(&self) -> bool {
         self.by_call
     }
@@ -350,7 +357,9 @@ fn endpoint_field(ep: EpRef, offset: u64) -> u64 {
 /// A [`TestKernel`] whose hooks do what the kernel's do for threads and
 /// IPC, for tests of [`crate::ipc`] and [`crate::syscall`]:
 ///
-/// - [`Threads::cancel_ipc`] is [`crate::ipc::cancel_ipc`];
+/// - [`Threads::cancel_ipc`] is [`crate::ipc::cancel_ipc`], and
+///   [`Threads::cancel_badged_sends`] [`crate::ipc::cancel_badged_sends`],
+///   each after recording the call as [`TestKernel`] does;
 /// - [`Kernel::finalise`] unbinds and suspends a TCB when its last
 ///   capability goes ([`crate::tcb::finalise`]) and releases an endpoint's
 ///   or a notification's queue ([`crate::ipc::finalise`]), after recording
@@ -449,6 +458,13 @@ impl Threads for IpcTestKernel {
     fn cancel_ipc(&mut self, t: TcbRef) {
         self.0.thread_events.push(ThreadEvent::CancelIpc(t));
         crate::ipc::cancel_ipc(self, t);
+    }
+
+    fn cancel_badged_sends(&mut self, ep: EpRef, badge: u64) {
+        self.0
+            .thread_events
+            .push(ThreadEvent::CancelBadgedSends { ep, badge });
+        crate::ipc::cancel_badged_sends(self, ep, badge);
     }
 
     fn invoked_by_call(&self) -> bool {

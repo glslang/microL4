@@ -23,7 +23,7 @@ use crate::invoke::{self, ExtraCap, InvokeError, Message, Reply};
 use crate::kernel::{Kernel, Preempted};
 use crate::sched::{Scheduler, Scheduling};
 use crate::slot::{Slot, SlotAddr, SlotMemory};
-use crate::tcb::{NtfnRef, TcbRef, Tcbs, Threads};
+use crate::tcb::{EpRef, NtfnRef, TcbRef, Tcbs, Threads};
 use crate::testing::{Event, FakeMemory};
 
 /// Fake physical memory: the CNodes' slots in one small [`FakeMemory`],
@@ -413,6 +413,10 @@ impl Scheduling for Space {
 impl Threads for Space {
     fn cancel_ipc(&mut self, _: TcbRef) {
         unreachable!("no thread in a paging test")
+    }
+
+    fn cancel_badged_sends(&mut self, _: EpRef, _: u64) {
+        unreachable!("no endpoint in a paging test")
     }
 
     fn invoked_by_call(&self) -> bool {

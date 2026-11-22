@@ -24,9 +24,12 @@
 //! - An empty or Zombie invoked slot is `InvalidCapability` 0 whatever the
 //!   label, as in seL4: the label means nothing without a type.
 //! - The label comes before the message length (`IllegalOperation` before
-//!   `TruncatedMessage`), as in seL4. Labels marked for a later milestone
-//!   (`CNode_CancelBadgedSends`, `CNode_SaveCaller`) are `IllegalOperation`
-//!   at once, like the reserved ones, without a length check or a lookup.
+//!   `TruncatedMessage`), as in seL4. Reserved labels are
+//!   `IllegalOperation` at once, without a length check or a lookup.
+//! - `CNode_SaveCaller` and `CNode_CancelBadgedSends` are not preemptible,
+//!   as in seL4: one moves one capability, and the other's loop over the
+//!   endpoint's queue is bounded by the TCBs that exist (`docs/design.md`,
+//!   "Deletion and cancellation").
 //! - `Untyped_Retype` with `node_depth` 0 and a `root` that is not a CNode
 //!   is `FailedLookup` 0, `InvalidRoot`, the row `docs/abi.md` lists first,
 //!   whatever the depth. seL4 skips the root check at depth 0 and reports
@@ -41,10 +44,11 @@
 //!   cannot be copied, a bad data word and the depth limit), which cause wins
 //!   cannot be seen.
 
-use crate::cap::{Cap, CapType};
+use crate::cap::{Cap, CapType, Rights};
 use crate::cnode;
 use crate::cspace;
 use crate::error::{LookupFailure, SyscallError};
+use crate::ipc::{self, EndpointCap};
 use crate::kernel::{Kernel, Preempted};
 use crate::slot::{SlotAddr, SlotMemory};
 use crate::untyped::{self, RetypeArgs, RetypeError};
@@ -57,14 +61,12 @@ pub mod label {
     pub const UNTYPED_RETYPE: u64 = 0x01;
     pub const CNODE_REVOKE: u64 = 0x10;
     pub const CNODE_DELETE: u64 = 0x11;
-    /// M6; `IllegalOperation` until then.
     pub const CNODE_CANCEL_BADGED_SENDS: u64 = 0x12;
     pub const CNODE_COPY: u64 = 0x13;
     pub const CNODE_MINT: u64 = 0x14;
     pub const CNODE_MOVE: u64 = 0x15;
     pub const CNODE_MUTATE: u64 = 0x16;
     pub const CNODE_ROTATE: u64 = 0x17;
-    /// M6; `IllegalOperation` until then.
     pub const CNODE_SAVE_CALLER: u64 = 0x18;
 }
 
@@ -237,7 +239,7 @@ fn untyped_invocation<K: Kernel + ?Sized>(
 
 /// The CNode methods. The invoked CNode capability is the root of the first
 /// slot argument, MR0 and MR1.
-fn cnode_invocation<K: Kernel + ?Sized>(
+fn cnode_invocation<K: crate::tcb::Threads + ?Sized>(
     k: &mut K,
     cnode: Cap,
     msg: &Message<'_>,
@@ -252,6 +254,18 @@ fn cnode_invocation<K: Kernel + ?Sized>(
             let [index, depth] = msg.args(0)?;
             let at = cspace::lookup_slot(k, cnode, index, depth, false)?;
             cnode::delete(k, at)?;
+        }
+        label::CNODE_CANCEL_BADGED_SENDS => {
+            // seL4 `hasCancelSendRights`, then `invokeCNodeCancelBadgedSends`:
+            // the rights are checked before the badge-0 case.
+            let [index, depth] = msg.args(0)?;
+            let at = cspace::lookup_slot(k, cnode, index, depth, false)?;
+            let ep = EndpointCap::from_cap(&k.load(at).cap)
+                .filter(|ep| ep.rights.contains(Rights::ALL))
+                .ok_or(SyscallError::IllegalOperation)?;
+            if ep.badge != 0 {
+                k.cancel_badged_sends(ep.ep, ep.badge);
+            }
         }
         label::CNODE_COPY => {
             let [dest_index, dest_depth, src_index, src_depth, rights] = msg.args(1)?;
@@ -313,8 +327,14 @@ fn cnode_invocation<K: Kernel + ?Sized>(
             let pivot = cspace::lookup_slot(k, msg.cap(0), pivot_index, pivot_depth, true)?;
             cnode::rotate(k, dst, dest_data, pivot, pivot_data, src)?;
         }
-        // Other labels, `CNode_CancelBadgedSends` and `CNode_SaveCaller`
-        // until M6 included.
+        label::CNODE_SAVE_CALLER => {
+            // The invoking thread is the current one, as for seL4's
+            // `ksCurThread`.
+            let [index, depth] = msg.args(0)?;
+            let dst = cspace::lookup_slot(k, cnode, index, depth, false)?;
+            let caller = k.scheduler().current();
+            ipc::save_caller(k, caller, dst)?;
+        }
         _ => return Err(SyscallError::IllegalOperation.into()),
     }
     Ok(Reply::EMPTY)
@@ -339,6 +359,8 @@ fn slots_for_copy<M: SlotMemory + ?Sized>(
     Ok((src, dst))
 }
 
+#[cfg(test)]
+mod ipc_tests;
 #[cfg(test)]
 mod redteam;
 #[cfg(test)]
