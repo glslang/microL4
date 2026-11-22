@@ -2215,13 +2215,13 @@ Endpoints and notifications have no labels: their `label` is user data.
 | `0x01` | `Untyped_Retype` | `0x40` | `PDPT_Map` |
 | `0x10` | `CNode_Revoke` | `0x41` | `PDPT_Unmap` |
 | `0x11` | `CNode_Delete` | `0x42` | `PageDirectory_Map` |
-| `0x12` | `CNode_CancelBadgedSends` (M6) | `0x43` | `PageDirectory_Unmap` |
+| `0x12` | `CNode_CancelBadgedSends` | `0x43` | `PageDirectory_Unmap` |
 | `0x13` | `CNode_Copy` | `0x44` | `PageTable_Map` |
 | `0x14` | `CNode_Mint` | `0x45` | `PageTable_Unmap` |
 | `0x15` | `CNode_Move` | `0x50` | `Frame_Map` |
 | `0x16` | `CNode_Mutate` | `0x51` | `Frame_Unmap` |
 | `0x17` | `CNode_Rotate` | `0x52` | `Frame_Remap` |
-| `0x18` | `CNode_SaveCaller` (M6) | `0x53` | `Frame_GetAddress` (M9) |
+| `0x18` | `CNode_SaveCaller` | `0x53` | `Frame_GetAddress` (M9) |
 | `0x20` | `TCB_ReadRegisters` | `0x60` | `IRQControl_GetISA` |
 | `0x21` | `TCB_WriteRegisters` | `0x61` | `IRQControl_GetIOAPIC` |
 | `0x22` | `TCB_CopyRegisters` | `0x62` | `IRQControl_GetMSI` (M9) |
@@ -2233,8 +2233,8 @@ Endpoints and notifications have no labels: their `label` is user data.
 | `0x28` | `TCB_SetSpace` | `0x71` to `0x73` | `IOPort_In8`, `IOPort_In16`, `IOPort_In32` |
 | `0x29` | `TCB_Suspend` | `0x74` to `0x76` | `IOPort_Out8`, `IOPort_Out16`, `IOPort_Out32` |
 | `0x2A` | `TCB_Resume` | `0x80` | `Hypervisor_PostMessage` (M9) |
-| `0x2B` | `TCB_BindNotification` (M6) | `0x81` | `Hypervisor_SignalEvent` (M9) |
-| `0x2C` | `TCB_UnbindNotification` (M6) | `0x82` | `Hypervisor_Eom` (M9) |
+| `0x2B` | `TCB_BindNotification` | `0x81` | `Hypervisor_SignalEvent` (M9) |
+| `0x2C` | `TCB_UnbindNotification` | `0x82` | `Hypervisor_Eom` (M9) |
 | `0x2D` | `TCB_SetTLSBase` | `0x83` | `Hypervisor_VpIndex` (M9) |
 
 Reserved: `0x02` to `0x0F` (Untyped), `0x19` to `0x1F` (CNode), `0x2E` to
