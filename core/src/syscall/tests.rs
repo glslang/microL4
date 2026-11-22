@@ -173,8 +173,10 @@ fn an_empty_slot_is_invalid_for_call_and_nothing_for_send() {
 }
 
 #[test]
-fn a_receive_on_anything_but_a_readable_endpoint_is_a_cap_fault() {
-    let ntfn = Cap::new(CapType::Notification, 0x1900, 6, RW, false, 0);
+fn a_receive_on_anything_but_a_readable_endpoint_or_notification_is_a_cap_fault() {
+    // A notification without Read; one bound to another thread is in
+    // `crate::ipc::notification`'s tests.
+    let ntfn = ntfn_cap(0, Rights::WRITE, 0);
     let zombie = Cap::zombie(CNODE2, 9, 3, false);
     let mut all = Vec::new();
     for (cap, rdi) in [
@@ -276,17 +278,17 @@ fn error_replies_carry_their_detail_words_as_far_as_the_buffer_allows() {
     assert_eq!(w.regs(A).rsi, info(7, 0), "TruncatedMessage");
     w.call(A, S_UNTYPED, 0x50, 0, [0; 4]);
     assert_eq!(w.regs(A).rsi, info(3, 0), "IllegalOperation");
-    // A Zombie is an invalid capability, and so, until M6, a notification
-    // takes no invocation.
+    // A Zombie is an invalid capability, and so is a notification
+    // capability without Write for a signal by Call; Send drops it.
     crate::cdt::insert_root(&mut w.k, rs(S_FREE), Cap::zombie(CNODE2, 9, 3, false));
     w.call(A, S_FREE, 0, 0, [9; 4]);
     assert_eq!((w.regs(A).rsi, w.mrs(A)[0]), (info(2, 1), 0));
-    let ntfn = Cap::new(CapType::Notification, 0x1900, 6, RW, false, 0);
-    crate::cdt::insert_root(&mut w.k, rs(S_FREE + 1), ntfn);
-    w.call(A, S_FREE + 1, 0, 0, [0; 4]);
-    assert_eq!(w.regs(A).rsi, info(3, 0));
-    w.syscall(A, 3, S_FREE + 1, info(0, 0), None);
-    assert_eq!(w.regs(A).rsi, info(0, 0));
+    crate::cdt::insert_root(&mut w.k, rs(S_FREE + 1), ntfn_cap(0, Rights::READ, 0));
+    w.call(A, S_FREE + 1, 0x5, 0, [9; 4]);
+    assert_eq!((w.regs(A).rsi, w.mrs(A)[0]), (info(2, 1), 0));
+    w.syscall(A, 3, S_FREE + 1, info(0x5, 0), None);
+    assert_eq!(w.regs(A).rsi, info(0x5, 0));
+    assert_eq!(ipc::notification(&w.k, ntfn(0)), ipc::Notification::IDLE);
 }
 
 #[test]

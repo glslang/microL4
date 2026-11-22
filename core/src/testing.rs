@@ -6,12 +6,12 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::cap::{Cap, CapType, ENDPOINT_BITS};
+use crate::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS};
 use crate::ipc::IpcEnv;
 use crate::kernel::{Kernel, Preempted};
 use crate::sched::{Scheduler, Scheduling};
 use crate::slot::{Slot, SlotAddr, SlotMemory};
-use crate::tcb::{EpRef, REGS_OFFSET, TcbRef, Tcbs, ThreadState, Threads, XSAVE_OFFSET};
+use crate::tcb::{EpRef, NtfnRef, REGS_OFFSET, TcbRef, Tcbs, ThreadState, Threads, XSAVE_OFFSET};
 
 /// A range of fake physical memory: `len` bytes from `base`, as words.
 /// Every access outside it, or not 8-byte aligned, panics, so a stray slot
@@ -318,6 +318,24 @@ impl Threads for TestKernel {
             .push(ThreadEvent::WriteBufferWord { paddr, value });
         self.mem.write(paddr, value);
     }
+
+    fn notification_word(&self, n: NtfnRef, offset: u64) -> u64 {
+        self.mem.read(notification_field(n, offset))
+    }
+
+    fn set_notification_word(&mut self, n: NtfnRef, offset: u64, value: u64) {
+        self.mem.write(notification_field(n, offset), value)
+    }
+}
+
+/// Notification words in fake memory, at the notification's physical
+/// address.
+fn notification_field(n: NtfnRef, offset: u64) -> u64 {
+    assert!(
+        offset < 1 << NOTIFICATION_BITS && offset.is_multiple_of(8),
+        "notification field offset {offset:#x}"
+    );
+    n.get() + offset
 }
 
 /// Endpoint words in fake memory, at the endpoint's physical address.
@@ -333,10 +351,10 @@ fn endpoint_field(ep: EpRef, offset: u64) -> u64 {
 /// IPC, for tests of [`crate::ipc`] and [`crate::syscall`]:
 ///
 /// - [`Threads::cancel_ipc`] is [`crate::ipc::cancel_ipc`];
-/// - [`Kernel::finalise`] suspends a TCB when its last capability goes
-///   ([`crate::tcb::suspend`]) and releases an endpoint's queue
-///   ([`crate::ipc::finalise`]), after recording the call as
-///   [`TestKernel`] does;
+/// - [`Kernel::finalise`] unbinds and suspends a TCB when its last
+///   capability goes ([`crate::tcb::finalise`]) and releases an endpoint's
+///   or a notification's queue ([`crate::ipc::finalise`]), after recording
+///   the call as [`TestKernel`] does;
 /// - [`Threads::invoked_by_call`] is [`crate::syscall::invoked_by_call`];
 /// - [`IpcEnv`] reads and writes fake memory.
 ///
@@ -380,7 +398,7 @@ impl Kernel for IpcTestKernel {
     fn finalise(&mut self, cap: Cap, last: bool) -> Option<Cap> {
         let cleanup = self.0.finalise(cap, last);
         if let (Some(t), true) = (TcbRef::from_cap(&cap), last) {
-            crate::tcb::suspend(self, t);
+            crate::tcb::finalise(self, t);
         }
         crate::ipc::finalise(self, cap, last);
         cleanup
@@ -447,6 +465,14 @@ impl Threads for IpcTestKernel {
 
     fn write_buffer_word(&mut self, paddr: u64, value: u64) {
         self.0.write_buffer_word(paddr, value)
+    }
+
+    fn notification_word(&self, n: NtfnRef, offset: u64) -> u64 {
+        self.0.notification_word(n, offset)
+    }
+
+    fn set_notification_word(&mut self, n: NtfnRef, offset: u64, value: u64) {
+        self.0.set_notification_word(n, offset, value)
     }
 }
 

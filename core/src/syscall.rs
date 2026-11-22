@@ -14,13 +14,17 @@
 //!   CSpace root, then, if the caller has a readable IPC buffer, the
 //!   `extra_caps` pointers in `caps_or_badges`. A failed lookup is a
 //!   capability fault, except for `NBSend`, which does nothing. Then the
-//!   capability's type decides: an endpoint sends ([`ipc::send`]), a reply
-//!   capability replies ([`ipc::reply`]), and anything else is a kernel
-//!   invocation through [`invoke::invoke`], with the message read from
-//!   MR0 to MR3 and the buffer. Only a `Call` gets the kernel's reply or
-//!   error, and only while the caller is still `Running`.
+//!   capability's type decides: an endpoint sends ([`ipc::send`]), a
+//!   notification with Write is signalled ([`ipc::signal`]; a `Call` then
+//!   gets an empty reply), a reply capability replies ([`ipc::reply`]),
+//!   and anything else is a kernel invocation through [`invoke::invoke`],
+//!   with the message read from MR0 to MR3 and the buffer. Only a `Call`
+//!   gets the kernel's reply or error, and only while the caller is still
+//!   `Running`.
 //! - `Recv` and `NBRecv` look up `rdi` and receive on an endpoint with
-//!   Read; anything else is a capability fault in the receive phase.
+//!   Read, or wait on or poll a notification with Read that is unbound or
+//!   bound to the caller ([`ipc::wait`]); anything else is a capability
+//!   fault in the receive phase.
 //! - `Reply` uses the caller slot; `ReplyRecv` replies first, then looks up
 //!   `rdi` and receives, so a receive-phase fault never holds the reply back.
 //! - `Yield` goes to the scheduler; the debug system calls go back to the
@@ -32,10 +36,7 @@
 //!
 //! # Until M6
 //!
-//! Endpoints move no capabilities, and a Notification capability is
-//! treated as a kernel object without invocations: `Call` returns
-//! `IllegalOperation`, `Send` and `NBSend` drop it, and receiving on it is a
-//! capability fault.
+//! Endpoints move no capabilities.
 
 use crate::abi::Syscall;
 use crate::cap::{Cap, TCB_SLOT_CALLER, TCB_SLOT_CSPACE};
@@ -44,7 +45,7 @@ use crate::error::{LookupFailure, SyscallError};
 use crate::invoke::{self, ExtraCap, InvokeError, Message};
 use crate::ipc::{
     self, DoubleFault, EndpointCap, IpcEnv, MSG_MAX_EXTRA_CAPS, MSG_MAX_LENGTH, MSG_REG_COUNT,
-    MessageInfo, word,
+    MessageInfo, NotificationCap, word,
 };
 use crate::regs::{Fault, Regs};
 use crate::sched::{self, Scheduling};
@@ -236,6 +237,21 @@ fn invocation<E: IpcEnv + PagingStore + ?Sized>(
         }
         return Outcome::Done;
     }
+    // A signal: the message registers are ignored and the extra
+    // capabilities, looked up above, are not transferred.
+    if let Some(n) = NotificationCap::from_cap(&cap) {
+        if !n.can_signal() {
+            if call {
+                ipc::reply_error(e, t, SyscallError::InvalidCapability(0));
+            }
+        } else {
+            ipc::signal(e, n.ntfn, n.badge);
+            if call {
+                ipc::reply_success(e, t, 0);
+            }
+        }
+        return Outcome::Done;
+    }
     if cap.cap_type() == crate::cap::CapType::Reply {
         ipc::reply(e, t, slot);
         if call {
@@ -284,13 +300,20 @@ fn receive<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef, blocking: bool) -> Outcome 
         Ok(slot) => slot,
         Err(failure) => return cap_fault(e, true, cptr, true, failure),
     };
+    if let Some(n) = NotificationCap::from_cap(&e.load(slot).cap)
+        && n.can_wait()
+        && ipc::may_wait(e, n.ntfn, t)
+    {
+        ipc::wait(e, t, n.ntfn, blocking);
+        return Outcome::Done;
+    }
     match EndpointCap::from_cap(&e.load(slot).cap) {
         Some(ep) if ep.can_receive() => {
             ipc::receive(e, t, &ep, blocking);
             Outcome::Done
         }
-        // No Read, an empty slot, or not an endpoint: notifications until
-        // M6 included.
+        // No Read, an empty slot, neither an endpoint nor a notification,
+        // or a notification bound to another thread (ADR 0026).
         _ => cap_fault(
             e,
             true,

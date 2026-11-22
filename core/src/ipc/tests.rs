@@ -17,7 +17,7 @@ use crate::regs::{Exit, Fault, Regs};
 use crate::sched;
 use crate::slot::{SlotAddr, SlotMemory};
 use crate::syscall::{self, Outcome};
-use crate::tcb::{self, EpRef, TcbRef, Tcbs, ThreadState};
+use crate::tcb::{self, EpRef, NtfnRef, TcbRef, Tcbs, ThreadState};
 use crate::testing::IpcTestKernel;
 
 // ---------------------------------------------------------------------------
@@ -33,6 +33,10 @@ pub(crate) const CNODE2: u64 = 0x1400;
 /// Endpoint `i` is at `EP_BASE + 32 i`.
 pub(crate) const EP_BASE: u64 = 0x1800;
 pub(crate) const EPS: usize = 4;
+/// Notification `i` is at `NTFN_BASE + 64 i`. The world holds no
+/// capability to one; tests that use them add their own.
+pub(crate) const NTFN_BASE: u64 = 0x1900;
+pub(crate) const NTFNS: usize = 4;
 /// Thread `i` is at `TCB_BASE + 2 KiB i`.
 pub(crate) const TCB_BASE: u64 = 0x2000;
 pub(crate) const THREADS: usize = 6;
@@ -111,6 +115,21 @@ pub(crate) fn tcb(i: usize) -> TcbRef {
 
 pub(crate) fn ep(i: usize) -> EpRef {
     EpRef::new(EP_BASE + 32 * i as u64).unwrap()
+}
+
+pub(crate) fn ntfn(i: usize) -> NtfnRef {
+    NtfnRef::new(NTFN_BASE + 64 * i as u64).unwrap()
+}
+
+pub(crate) fn ntfn_cap(i: usize, rights: Rights, badge: u64) -> Cap {
+    Cap::new(
+        CapType::Notification,
+        ntfn(i).get(),
+        crate::cap::NOTIFICATION_BITS,
+        rights,
+        false,
+        badge,
+    )
 }
 
 pub(crate) fn ep_cap(i: usize, rights: Rights, badge: u64) -> Cap {
@@ -224,10 +243,17 @@ impl World {
         (0..EPS).map(ep).collect()
     }
 
-    /// The scheduler's and IPC's invariants, and no priority changed.
+    /// Every notification.
+    pub fn ntfns() -> Vec<NtfnRef> {
+        (0..NTFNS).map(ntfn).collect()
+    }
+
+    /// The scheduler's, IPC's and the notifications' invariants, and no
+    /// priority changed.
     pub fn check(&self) {
         sched::check_exit(&self.k, THREADS).unwrap();
         check(&self.k, &self.threads, &World::eps()).unwrap();
+        check_notifications(&self.k, &self.threads, &World::ntfns()).unwrap();
         for &(t, p) in &self.prios {
             if self.threads.contains(&t) {
                 assert_eq!(self.k.priority(t), p, "IPC changed a priority");

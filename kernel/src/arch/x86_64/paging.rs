@@ -694,7 +694,7 @@ mod vspace_test {
 
     use super::super::{ExitCode, Objects, exit, phys_to_virt};
     use l4core::sched::{Scheduler, Scheduling};
-    use l4core::tcb::{TcbRef, Tcbs, Threads};
+    use l4core::tcb::{NtfnRef, TcbRef, Tcbs, Threads};
 
     use super::{ADDR_4K, ENTRIES, kernel_pml4, read_cr3, set_vm_root};
     use crate::boot::RootSpace;
@@ -800,6 +800,14 @@ mod vspace_test {
 
         fn write_buffer_word(&mut self, paddr: u64, value: u64) {
             self.0.write_buffer_word(paddr, value)
+        }
+
+        fn notification_word(&self, n: NtfnRef, offset: u64) -> u64 {
+            self.0.notification_word(n, offset)
+        }
+
+        fn set_notification_word(&mut self, n: NtfnRef, offset: u64, value: u64) {
+            self.0.set_notification_word(n, offset, value)
         }
     }
 

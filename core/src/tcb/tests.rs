@@ -452,18 +452,7 @@ fn buffer_words_need_a_frame_with_the_rights() {
 #[test]
 fn labels_outside_the_tcb_methods_are_illegal_before_any_length_check() {
     let mut w = World::new();
-    for l in [
-        0,
-        0x01,
-        0x10,
-        0x1F,
-        label::BIND_NOTIFICATION,
-        label::UNBIND_NOTIFICATION,
-        0x2E,
-        0x3F,
-        0x40,
-        u64::MAX,
-    ] {
+    for l in [0, 0x01, 0x10, 0x1F, 0x2E, 0x3F, 0x40, u64::MAX] {
         w.fails(S_B, l, &[], &[], ILLEGAL);
         w.fails(S_B, l, &[0; 8], &[S_EP, S_EP, S_EP], ILLEGAL);
     }
@@ -1231,6 +1220,135 @@ fn resume_restarts_only_stopped_threads() {
     assert_eq!(w.k.state(c), ThreadState::Restart);
     assert_eq!(w.k.thread_events, [ThreadEvent::CancelIpc(c)]);
     assert_eq!(w.k.sched.action(), Action::SwitchTo(c));
+}
+
+// ---------------------------------------------------------------------------
+// Notification binding
+// ---------------------------------------------------------------------------
+
+/// Three notifications in fake memory, and the root slots of capabilities
+/// to them that a test adds.
+const NT: [u64; 3] = [0x1800, 0x1840, 0x1880];
+const S_NT: u64 = S_FREE;
+
+fn nt(i: usize) -> NtfnRef {
+    NtfnRef::new(NT[i]).unwrap()
+}
+
+/// Puts a capability to notification `i` with `rights` in root slot
+/// `S_NT + slot`.
+fn put_ntfn(w: &mut World, slot: u64, i: usize, rights: Rights) {
+    let cap = Cap::new(CapType::Notification, NT[i], 6, rights, false, 0x5);
+    cdt::insert_root(&mut w.k, rs(S_NT + slot), cap);
+}
+
+#[test]
+fn bind_notification_errors_in_order() {
+    let mut w = World::new();
+    put_ntfn(&mut w, 0, 0, RW);
+    put_ntfn(&mut w, 1, 0, Rights::WRITE);
+    put_ntfn(&mut w, 2, 1, Rights::READ);
+    put_ntfn(&mut w, 3, 2, RW);
+    let l = label::BIND_NOTIFICATION;
+    // No extra capability; message words do not matter.
+    w.fails(S_B, l, &[], &[], TRUNCATED);
+    w.fails(S_B, l, &[1, 2, 3], &[], TRUNCATED);
+    // Not a notification, or without Read.
+    w.fails(S_B, l, &[], &[S_EP], ILLEGAL);
+    w.fails(S_B, l, &[], &[S_NT + 1], ILLEGAL);
+    // A notification with a waiter.
+    w.k.set_notification_word(nt(1), crate::ipc::ntfn_field::QUEUE_HEAD, TD);
+    w.k.set_notification_word(nt(1), crate::ipc::ntfn_field::QUEUE_TAIL, TD);
+    w.k.set_notification_word(nt(1), crate::ipc::ntfn_field::STATE, 1);
+    w.fails(S_B, l, &[], &[S_NT + 2], ILLEGAL);
+    // A notification bound already.
+    w.ok(S_C, l, &[], &[S_NT]);
+    w.fails(S_B, l, &[], &[S_NT], ILLEGAL);
+    // The TCB bound already: before the capability's own checks, after
+    // truncation.
+    w.ok(S_B, l, &[], &[S_NT + 3]);
+    for (extra, err) in [
+        (&[][..], TRUNCATED),
+        (&[S_NT + 1][..], ILLEGAL),
+        (&[S_EP][..], ILLEGAL),
+        (&[S_NT + 3][..], ILLEGAL),
+    ] {
+        w.fails(S_B, l, &[], extra, err);
+    }
+}
+
+#[test]
+fn bind_and_unbind_link_both_sides_and_only_unbind_a_bound_tcb() {
+    let mut w = World::new();
+    put_ntfn(&mut w, 0, 0, Rights::READ);
+    let un = label::UNBIND_NOTIFICATION;
+    w.fails(S_B, un, &[], &[], ILLEGAL);
+    w.fails(S_B, un, &[1], &[S_EP], ILLEGAL);
+    w.ok(S_B, label::BIND_NOTIFICATION, &[9], &[S_NT, S_EP]);
+    assert_eq!(w.k.bound_notification(t(TB)), Some(nt(0)));
+    assert_eq!(crate::ipc::notification(&w.k, nt(0)).bound, Some(t(TB)));
+    assert!(
+        w.k.thread_events.is_empty(),
+        "B was not receiving: nothing to cancel"
+    );
+    // Unbinding takes no arguments and ignores any it gets.
+    w.ok(S_B, un, &[1, 2], &[S_EP]);
+    assert_eq!(w.k.bound_notification(t(TB)), None);
+    assert_eq!(
+        crate::ipc::notification(&w.k, nt(0)),
+        crate::ipc::Notification::IDLE
+    );
+    w.fails(S_B, un, &[], &[], ILLEGAL);
+}
+
+#[test]
+fn binding_a_receiver_to_an_active_notification_delivers_its_word() {
+    let mut w = World::new();
+    put_ntfn(&mut w, 0, 0, RW);
+    let ep = EpRef::new(EP).unwrap();
+    let r = prepare_b(
+        &mut w,
+        ThreadState::BlockedOnReceive {
+            ep,
+            can_grant: true,
+        },
+    );
+    w.k.set_notification_word(nt(0), crate::ipc::ntfn_field::WORD, 0x30);
+    w.k.set_notification_word(nt(0), crate::ipc::ntfn_field::STATE, 2);
+    w.ok(S_B, label::BIND_NOTIFICATION, &[], &[S_NT]);
+    // IPC's cancel_ipc, through the hook, took B off its endpoint.
+    assert_eq!(w.k.thread_events, [ThreadEvent::CancelIpc(t(TB))]);
+    assert_eq!(w.k.state(t(TB)), ThreadState::Running);
+    let b = w.k.regs(t(TB));
+    assert_eq!((b.rdi, b.rsi, b.r10), (0x30, 0, r.r10));
+    assert!(w.k.queued(t(TB)) || w.k.sched.action() == Action::SwitchTo(t(TB)));
+    let n = crate::ipc::notification(&w.k, nt(0));
+    assert_eq!(
+        (n.state, n.word, n.bound),
+        (crate::ipc::NtfnState::Idle, 0, Some(t(TB)))
+    );
+}
+
+#[test]
+fn tcb_finalisation_unbinds_then_suspends() {
+    let mut w = World::new();
+    put_ntfn(&mut w, 0, 0, RW);
+    w.ok(S_B, label::BIND_NOTIFICATION, &[], &[S_NT]);
+    w.ok(S_B, label::RESUME, &[], &[]);
+    w.k.thread_events.clear();
+    finalise(&mut w.k, t(TB));
+    assert_eq!(w.k.bound_notification(t(TB)), None);
+    assert_eq!(
+        crate::ipc::notification(&w.k, nt(0)),
+        crate::ipc::Notification::IDLE
+    );
+    assert_eq!(w.k.state(t(TB)), ThreadState::Inactive);
+    assert!(!w.k.queued(t(TB)));
+    assert_eq!(w.k.thread_events, [ThreadEvent::CancelIpc(t(TB))]);
+    // Suspend alone keeps the binding.
+    w.ok(S_C, label::BIND_NOTIFICATION, &[], &[S_NT]);
+    w.ok(S_C, label::SUSPEND, &[], &[]);
+    assert_eq!(w.k.bound_notification(t(TC)), Some(nt(0)));
 }
 
 #[test]
