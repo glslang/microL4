@@ -261,8 +261,8 @@ source's rights AND this word, so rights never grow.
 | Bit | Right | Endpoint | Notification | Frame | Reply |
 | --- | --- | --- | --- | --- | --- |
 | 0 | Write | send | signal | map writable ([Rights word](#rights-word)) | |
-| 1 | Read | receive | wait, poll | map readable ([Rights word](#rights-word)) | |
-| 2 | Grant | send any capability ([Capability transfer](#capability-transfer)) | | | send capabilities in the reply ([Capability transfer](#capability-transfer)) |
+| 1 | Read | receive | wait, poll, bind ([`TCB_BindNotification`](#0x2b-tcb_bindnotification)) | map readable ([Rights word](#rights-word)) | |
+| 2 | Grant | send any capability ([Capability transfer](#capability-transfer)); on the capability a `Call` is received on, gives the reply capability Grant ([Reply capability](#reply-capability)) | | | send capabilities in the reply ([Capability transfer](#capability-transfer)) |
 | 3 | GrantReply | send a reply capability ([Reply capability](#reply-capability)) | | | |
 
 Bits 4 to 63 are ignored. Other capability types have no rights and are
@@ -468,7 +468,11 @@ cancellation](design.md#deletion-and-cancellation)). Arguments as
 | --- | --- |
 | `IllegalOperation` | the slot does not hold an Endpoint capability with Write, Read, Grant and GrantReply |
 
-An unbadged capability does nothing.
+An unbadged capability does nothing, after the rights check. Each released
+thread restarts its system call (or, for a queued fault, its faulting
+instruction), in queue order; the other senders keep their places. Threads
+whose message was already received, such as callers waiting for a reply,
+and threads waiting to receive are not affected.
 
 #### `0x13` `CNode_Copy`
 
@@ -652,7 +656,7 @@ What a receive phase returns:
 | 1 to 4 | `msg[0..4]` | never | never |
 | 5 to 120 | `msg[4..120]` | the sender's `msg[4..length]` during a transfer; a kernel invocation's arguments | the receiver's `msg[4..length]`; kernel reply results; fault words |
 | 121 | `user_data` | never | never |
-| 122 to 124 | `caps_or_badges` | the sender's first `extra_caps` entries, at the send-time lookup and again at transfer | the receiver's entry `i` when capability `i` is unwrapped |
+| 122 to 124 | `caps_or_badges` | the sender's first `extra_caps` entries, at the send-time lookup (`Send`, `NBSend`, `Call`; none for `Reply` or `ReplyRecv`) and again at transfer | the receiver's entry `i` when capability `i` is unwrapped; other entries keep their values |
 | 125 to 127 | `receive_cnode`, `receive_index`, `receive_depth` | the receiver's, once per transfer that may copy a capability to it, before the first capability is processed | never |
 
 ### Capability transfer
@@ -671,8 +675,13 @@ Capabilities move only when all hold:
 - the sender has a readable IPC buffer and `extra_caps` > 0;
 - the receiver has a writable IPC buffer.
 
-Then, in order of `i`, capability `i` is unwrapped if it is an endpoint
-capability to the endpoint the message goes through (not for replies):
+Otherwise nothing is copied or unwrapped, and the receiver gets
+`extra_caps` 0 and `caps_unwrapped` 0. A fault message, a fault reply, a
+kernel reply and a signal never move capabilities.
+
+When all hold, in order of `i`, capability `i` is unwrapped if it is an
+endpoint capability to the endpoint the message goes through (not for
+replies), whatever its rights:
 `caps_or_badges[i]` gets its badge, which may be 0, and bit `i` of
 `caps_unwrapped` is set. Otherwise it is copied into the receive slot if the
 slot is valid, empty and unused by this message, the capability passes
@@ -682,8 +691,15 @@ from the sender's capability as `CNode_Copy` would place it: a child of an
 original, a sibling of a copy. The first capability that can be neither
 unwrapped nor copied, including one refused at the depth limit, ends the
 transfer; so does a failed re-lookup of any of the sender's pointers at
-transfer time, before anything moves. The received `extra_caps` counts the
+transfer time, before anything moves, so that nothing moves at all, not even
+the capabilities named before it. The received `extra_caps` counts the
 capabilities processed before the end.
+
+The sender's pointers are looked up again at transfer. `Reply` and the reply
+phase of `ReplyRecv` are not looked up before that, so a pointer of theirs
+that does not resolve is no fault: no capability moves, as for any failed
+re-lookup. A pointer that reaches an empty slot resolves; that capability
+then cannot be copied and ends the transfer.
 
 ### Badges
 
@@ -692,7 +708,9 @@ by `CNode_Mint` on an unbadged capability ([Capability
 data](#capability-data)); 0 means unbadged. An endpoint message delivers the
 badge of the capability the sender invoked, as it was when the send began,
 in `rdi`. A signal ORs the badge of the signalling capability into the
-notification word. Replies and kernel replies deliver 0.
+notification word. Replies and kernel replies deliver 0. The badge of the
+capability a thread receives, waits or polls on, or binds with, plays no
+part.
 
 ### Reply capability
 
@@ -740,13 +758,19 @@ checked in the order listed, as in seL4 (`src/object/cnode.c`,
 | Operation | System call on a notification capability | Right | Effect |
 | --- | --- | --- | --- |
 | Signal | `Send`, `NBSend`; `Call` also returns an empty kernel reply | Write | word = word OR badge, or wake the first waiter, or wake the bound thread out of an endpoint receive; never blocks |
-| Wait | `Recv` | Read | if a signal is pending, return the word and clear it; else block |
+| Wait | `Recv`, the receive phase of `ReplyRecv` | Read | if a signal is pending, return the word and clear it; else block |
 | Poll | `NBRecv` | Read | if a signal is pending, return the word and clear it; else return 0 |
 
 The message registers of a signal are ignored, and its `extra_caps`, though
 still looked up, are not transferred. Only the
-bound thread may wait on or poll a bound notification. A pending signal
-through an unbadged capability returns word 0, like an empty poll.
+bound thread may wait on or poll a bound notification; any other thread
+takes a capability fault in the receive phase ([CapFault](#capfault-1)). A
+pending signal through an unbadged capability returns word 0, like an empty
+poll. Waiting and polling leave the caller slot alone. A signal wakes a
+bound thread only out of an endpoint receive: not while it waits on another
+notification, nor while it is blocked in `Send` or `Call`, before or after
+its message is received. The signal then stays pending until the thread
+next receives on an endpoint or waits on the notification.
 
 ### TCB_BindNotification and TCB_UnbindNotification
 
@@ -765,11 +789,20 @@ registers. Result: none.
 Errors are checked in the order listed, and the `IllegalOperation` cases in
 the order given, as in seL4 (`src/object/tcb.c`, `decodeBindNotification`).
 
-If the notification has a pending signal and the thread is blocked in an
-endpoint receive, the signal is delivered at once.
+A thread waiting on the notification cannot be bound to it (it has a
+waiter); a thread waiting on another notification can. If the notification
+has a pending signal and the thread is blocked in an endpoint receive, the
+signal is delivered at once: the thread leaves the endpoint's queue and
+returns from its receive with `rdi` = the notification word and `rsi` = 0,
+and the word is cleared. In any other state the signal stays pending.
 
 `TCB_UnbindNotification`, `Call` on the TCB capability, unbinds it. No
 arguments, no result. Error: `IllegalOperation` if the TCB is not bound.
+Unbinding changes nothing else: a pending signal stays pending, and a
+thread blocked in an endpoint receive, or waiting directly on the
+notification, stays blocked. `TCB_Suspend` and `TCB_Resume` leave a binding
+alone; deleting the TCB or the last capability to the notification
+unbinds.
 
 ### Errors, faults and silent drops
 

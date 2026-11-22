@@ -2124,7 +2124,14 @@ reaches only `B`'s descendants; another original with the same badge,
 minted again or by a holder of an unbadged capability, survives. So a server
 mints each badge once and gives clients only badged capabilities.
 `CNode_CancelBadgedSends` needs an Endpoint capability with all four rights
-(seL4 `hasCancelSendRights`) and does nothing for badge 0.
+(seL4 `hasCancelSendRights`) and does nothing for badge 0
+(`invokeCNodeCancelBadgedSends`), so the server mints `B` with all four and
+hands clients copies of `B` with fewer: a Copy of an original is its child,
+so the revoke deletes it. Revoke comes first because the released senders
+restart and resolve their `CPtr`s again: with the copies gone they find empty
+slots and cannot queue again with `b`. A client whose `Call` was already
+received keeps waiting for its reply, which no revoke or cancel touches
+([Deletion and cancellation](#deletion-and-cancellation)).
 
 ### Built when
 
@@ -2986,6 +2993,8 @@ capability saved in a CSpace slot.
     `Running`;
   - if `C` has a fault, the fault-reply rule ([Reply](#reply)) reads `R`'s
     message, `C` becomes `Restart` or `Inactive`, and the fault is cleared.
+    No capability moves, whatever `g` and `R`'s `extra_caps` (seL4
+    `doReplyTransfer` calls `handleFaultReply`, not `doIPCTransfer`).
 
 A reply never blocks: a reply capability exists only while its target is
 `BlockedOnReply`.
@@ -3024,26 +3033,33 @@ A message names up to three capabilities and copies at most one
 ([ADR 0017](adr/0017-capability-transfer.md)). Capabilities move only if the
 sender's capability has Grant (for a reply, the reply capability's Grant), the
 sender has a readable IPC buffer and sets `extra_caps`, and the receiver has a
-writable IPC buffer. Then:
+writable IPC buffer. Unwrapping needs the same: if any condition fails,
+nothing is copied or unwrapped and `R` receives `extra_caps` and
+`caps_unwrapped` 0 (seL4 `doNormalTransfer`, `transferCaps`). Then:
 
 1. The `extra_caps` pointers are looked up again in `S`'s CSpace, because
-   `S` may have blocked since the send-time lookup. If any lookup fails, no
-   capability moves.
+   `S` may have blocked since the send-time lookup. `Reply` and the reply
+   phase of `ReplyRecv` have no send-time lookup, so this is their only one
+   and its failure is no fault (seL4 `handleReply`). A pointer that reaches
+   an empty slot has not failed; step 3 stops at it. If any lookup fails, no
+   capability moves, not even those named before it: seL4's
+   `doNormalTransfer` looks them all up before `transferCaps` moves any
+   (`ipc.tex`, "Errors", says the earlier ones still move).
 2. The receive slot is found once: `receive_cnode`, resolved with all 64 bits
    in `R`'s CSpace, must be a CNode capability; `receive_index`, resolved
    from it with `receive_depth` bits, must reach a slot; the slot must be
    empty. Otherwise there is no slot.
 3. For each capability `i` in order: if it is an endpoint capability to `E`,
-   its badge goes into `R`'s `caps_or_badges[i]`, bit `i` of
-   `caps_unwrapped` is set, and the capability itself is not copied (this
-   never happens for replies, which have no `E`). Otherwise, if the slot is
-   still free, the capability passes the capability core's `derive` (reply
-   capabilities never do), and `insert_derived` accepts the copy below
-   `MAX_DERIVATION_DEPTH`, the copy goes into the slot with the same rights
-   and badge, derived from `S`'s capability exactly as `CNode_Copy` would
-   place it, and the slot is used. Otherwise the loop stops; a copy refused
-   at the depth limit is simply not transferred, like any capability that
-   cannot be derived.
+   whatever its rights, its badge goes into `R`'s `caps_or_badges[i]`, bit
+   `i` of `caps_unwrapped` is set, and the capability itself is not copied
+   (this never happens for replies, which have no `E`). Otherwise, if the
+   slot is still free, the capability passes the capability core's `derive`
+   (reply capabilities never do), and `insert_derived` accepts the copy
+   below `MAX_DERIVATION_DEPTH`, the copy goes into the slot with the same
+   rights and badge, derived from `S`'s capability exactly as `CNode_Copy`
+   would place it, and the slot is used. Otherwise the loop stops; a copy
+   refused at the depth limit is simply not transferred, like any capability
+   that cannot be derived.
 4. The delivered `extra_caps` is the number of capabilities processed before
    the loop stopped.
 
@@ -3080,9 +3096,13 @@ The reply capability is classic seL4's
   caller leaves `BlockedOnReply` any other way (`cancel_ipc` deletes the one
   capability derived from the caller's master).
 - **Saving.** It cannot be copied, minted or sent by IPC, but can be moved.
-  `CNode_SaveCaller` (label `0x18`) moves it from the caller slot into a
-  CSpace slot, so a server can keep a client waiting while it serves others;
-  the saved capability is used with `Send`, `NBSend` or `Call`.
+  `CNode_SaveCaller` (label `0x18`) moves it from the caller slot into an
+  empty CSpace slot, so a server can keep a client waiting while it serves
+  others; the saved capability is used with `Send`, `NBSend` or `Call`. A
+  full destination is `DeleteFirst` and is checked first; an empty caller
+  slot is then `IllegalOperation`, where seL4 succeeds (see Compared with
+  seL4 below). The move keeps the capability's place below the caller's
+  master, so `cancel_ipc` still finds it.
 - **Lost reply.** If it is destroyed without a reply, the caller stays
   `BlockedOnReply` until it is suspended, restarted or deleted. The kernel
   never invents a reply: `Call` trusts the server for liveness, as in seL4.
@@ -3099,7 +3119,8 @@ unbadged. `CNode_Mint` sets it once on an unbadged capability
 ([Slot operations](#slot-operations)). An endpoint message carries the badge
 of the capability the sender invoked, recorded when the send started, in the
 receiver's `rdi`. Replies and kernel replies carry 0. A sender cannot choose
-or change the badge it sends.
+or change the badge it sends. The badge of the capability a thread receives
+or waits on plays no part (seL4 `receiveIPC`, `receiveSignal`).
 
 ### Deletion and cancellation
 
@@ -3122,7 +3143,12 @@ may be reused once its finalisation
 
 To reuse a badge, a server follows [Badges, revoke and
 `CNode_CancelBadgedSends`](#badges-revoke-and-cnode_cancelbadgedsends);
-messages already delivered are not affected.
+messages already delivered are not affected. `cancel_badged_sends` touches
+only the endpoint's queue, as seL4's does: a queued `Call` with badge `b`
+restarts whole, and so sends again only if its capability survived; a
+caller whose message was already received is `BlockedOnReply`, keeps its
+reply capability, which names its TCB and not the badge, and waits for that
+reply as before.
 
 `cancel_all_ipc`, `cancel_badged_sends` and `cancel_all_signals` are not
 preemptible in v0, as in seL4 (`cancelAllIPC`, `cancelBadgedSends`,
@@ -3235,7 +3261,7 @@ model.
 | Only an endpoint capability to the endpoint carrying the message is unwrapped, and the receiver learns only its badge | transfer loop; proptest | M6 |
 | The badge a receiver sees is the badge of the capability the sender invoked, or 0 for a reply; no sender can choose it | `send` stores the capability's badge in `BlockedOnSend` (M5; host test `the_badge_is_the_one_the_sender_invoked_when_it_sent`); badge scenario (M6) | M5, M6 |
 | `Send` and `Call` need Write, `Call` also Grant or GrantReply, receiving needs Read, and a fault endpoint needs Write and Grant or GrantReply, checked at fault time | `l4core::syscall` and `ipc::deliver_fault` (`EndpointCap::can_send`, `can_call`, `can_receive`); host tests `call_needs_write_and_grant_or_grant_reply`, `send_needs_write_but_no_grant` and `receiving_needs_read`; syscall fuzzer, red-team brief 6 | M5, M10 |
-| A thread leaves a blocked state only by completing its operation or through `cancel_ipc`, `cancel_all_ipc`, `cancel_badged_sends` or `cancel_all_signals`, so a restarted thread re-executes its system call with its own arguments | `l4core::ipc` state machine; host tests `suspend_takes_a_thread_out_of_its_queue_and_resume_restarts_it` and `a_restarted_reply_recv_is_harmless`; proptest (M6) | M5, M6 |
+| A thread leaves a blocked state only by completing its operation (a bound thread's endpoint receive also completes with a signal from its notification, through `signal` or bind) or through `cancel_ipc`, `cancel_all_ipc`, `cancel_badged_sends` or `cancel_all_signals`, so a restarted thread re-executes its system call with its own arguments | `l4core::ipc` state machine; host tests `suspend_takes_a_thread_out_of_its_queue_and_resume_restarts_it` and `a_restarted_reply_recv_is_harmless`; proptest (M6) | M5, M6 |
 | A thread's fault record is set only while it is `BlockedOnSend` or `BlockedOnReply` for that fault | `deliver_fault`, `reply`, `cancel_*`; `ipc::check` in the host tests; proptest (M6) | M5, M6 |
 | Every IPC system call finishes in one kernel entry, in time bounded by the message (120 words, 3 capabilities) or, for a cancellation, by its queue, which holds at most the TCBs that exist (2^18 in 512 MiB with `TCB_BITS` = 11); no argument makes the kernel block or panic | no preemption point and no other loop in `l4core::ipc`; syscall fuzzer, red-team brief 6; worst-case cancellation measured by red-team brief 9 | M5, M6, M10 |
 | IPC never changes a thread's priority or timeslice | no function in `l4core::ipc` sets either; `IpcEnv` extends `Threads`, which can, so the type no longer enforces it ([ADR 0018](adr/0018-ipc-priorities.md)), and the host tests check after every step that no priority changed; red-team brief 9 | M5, M10 |
@@ -3284,14 +3310,16 @@ kernel signals for an interrupt or a SynIC event ([Delivery](#delivery-1),
 | Notification | Effect |
 | --- | --- |
 | `Waiting` | take the head `W`; `W` becomes `Running` with `rdi` = `b` and `rsi` = 0; `N` becomes `Idle` if the queue empties |
-| `Idle`, bound to a thread `T` that is `BlockedOnReceive` on any endpoint | `T` leaves that endpoint's queue and becomes `Running` with `rdi` = `b` and `rsi` = 0 |
+| `Idle`, bound to a thread `T` that is `BlockedOnReceive` on any endpoint | `cancel_ipc(T)` takes `T` off that endpoint's queue (the endpoint becomes `Idle` if it empties); `T` becomes `Running` with `rdi` = `b` and `rsi` = 0; `N` stays `Idle` |
 | `Idle`, otherwise | `N` becomes `Active` with word `b` |
 | `Active` | word = word OR `b` |
 
 A signal never blocks and never fails, so the interrupt path never waits on
-user space. A bound thread that is `BlockedOnReply`, `BlockedOnSend` or
-waiting on another notification is not woken; the signal stays pending
-until it next receives on an endpoint or waits on this notification.
+user space. A bound thread in any other state is not woken: `BlockedOnSend`
+or `BlockedOnReply` (a `Call` in progress, which seL4's `sendSignal` also
+leaves alone), waiting on another notification, runnable or `Inactive`. The
+signal then stays pending until the thread next receives on an endpoint or
+waits on this notification.
 Repeated signals coalesce: a waiter sees which bits were signalled, not how
 often, and interrupts that arrive before the driver waits are merged, not
 lost. The IRQ and SynIC paths use exactly this `signal`, with the badge of
@@ -3299,9 +3327,14 @@ the notification capability they hold.
 
 ### Wait and poll
 
-`wait(T, N, blocking)` runs for `Recv` (blocking) and `NBRecv` (not) on a
-notification capability with Read. If `N` is bound, only its bound thread
-may wait on it; any other thread takes a capability fault.
+`wait(T, N, blocking)` runs for `Recv` and the receive phase of `ReplyRecv`
+(blocking) and for `NBRecv` (not) on a notification capability with Read.
+The capability's badge plays no part: a badged capability waits on the same
+word as an unbadged one. If `N` is bound, only its bound thread may wait on
+it; any other thread takes a capability fault in the receive phase, the same
+fault as for a capability without Read (seL4 `handleRecv`). A
+bound thread that waits on another notification gets nothing from its own
+(seL4 `receiveSignal` does not look at the binding).
 
 | Notification | `blocking` | Effect |
 | --- | --- | --- |
@@ -3321,29 +3354,40 @@ a protocol that polls gives every signaller a non-zero badge.
 [Invocations](#invocations) numbers it and
 [`abi.md`](abi.md#tcb_bindnotification-and-tcb_unbindnotification) gives its
 semantics. It needs a
-notification capability with Read, and fails if the TCB is already bound or
-the notification is bound or has waiters. Binding sets the TCB's
-`bound_notification` and the notification's `bound_tcb`. If the
-notification is already `Active` and the TCB is `BlockedOnReceive`, the
-signal is delivered at once, as if it had arrived after binding.
+notification capability with Read, whose badge plays no part, and fails if
+the TCB is already bound or the notification is bound or has waiters (seL4
+`decodeBindNotification`): a thread already waiting on a notification
+cannot then be bound to it, but a thread waiting on another notification
+can. Binding sets the TCB's `bound_notification` and the notification's
+`bound_tcb`. If the notification is already `Active` and the TCB is
+`BlockedOnReceive`, the signal is delivered at once, as if it had arrived
+after binding: `cancel_ipc` takes the TCB off its endpoint's queue, the TCB
+becomes `Running` with `rdi` = word and `rsi` = 0, and `N` becomes `Idle`
+with word 0. In any other state the signal stays pending, as in
+[Signal](#signal).
 
 A bound thread gets a pending signal instead of an IPC at step 2 of the
 receive phase, is woken out of an endpoint receive by a signal, and may still
 wait on the notification directly. It tells a signal from a message by
 badge: `root` gives the notification capabilities badges that no endpoint
-capability uses. `TCB_UnbindNotification` clears both links; a thread
-already waiting directly on the notification stays queued. Deleting the TCB,
-or the final capability to the notification, also unbinds.
+capability uses. `TCB_UnbindNotification` clears both links and nothing
+else: the notification keeps its state and word, a thread in an endpoint
+receive stays there, and a thread already waiting directly on the
+notification stays queued (seL4 `unbindNotification`). Suspend and Resume
+leave a binding alone (seL4 `suspend`, `restart`). Deleting the TCB, or the
+final capability to the notification, also unbinds.
 
 ### Deletion
 
 When the final capability to `N` is deleted, the kernel unbinds it and runs
-`cancel_all_signals(N)`: every waiter, in queue order, becomes `Restart`
-(its retried `Recv` resolves its `CPtr` afresh, as for endpoints), the
-pending word is discarded, and `N` becomes `Idle`. Like the endpoint
-cancellations, the loop is not preemptible and its queue is bounded by the
-TCBs that exist. `cancel_ipc` on a `BlockedOnNotification` thread removes it
-from the queue.
+`cancel_all_signals(N)`, in that order, as seL4's `finaliseCap` does: every
+waiter, in queue order, becomes `Restart` (its retried `Recv` resolves its
+`CPtr` afresh, as for endpoints), the bound thread included if it was waiting
+directly, the pending word is discarded, and `N` becomes `Idle`. A bound
+thread in an endpoint receive loses only the link and stays queued there.
+Like the endpoint cancellations, the loop is not preemptible and its queue
+is bounded by the TCBs that exist. `cancel_ipc` on a
+`BlockedOnNotification` thread removes it from the queue.
 
 ### Where the code lives
 
