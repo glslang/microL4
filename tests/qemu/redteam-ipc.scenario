@@ -1,0 +1,21 @@
+# M6 red team: reply capabilities and bound notifications attacked from
+# ring 3 (user/root/src/redteam/ipc.rs); they held. A server
+# saves a client's reply capability with CNode_SaveCaller; suspending and
+# resuming the client must delete it, so a Send on it reaches nobody, and a
+# saved reply sent twice reaches the client once. A thread bound to a
+# notification is deleted while it waits on an endpoint: the notification
+# must be unbound, pollable and bindable again, and deleting a notification
+# whose bound thread waits on an endpoint leaves that thread queued.
+cmdline: test=redteam-ipc
+exit: success
+expect: microL4 kernel
+expect: root: cmdline "test=redteam-ipc"
+expect: redteam: ipc: S saved C's reply capability into slot
+expect: redteam: ipc: suspend and resume of C deleted the saved reply capability; a Send on X reached nobody
+expect: redteam: ipc: two Sends on a saved reply capability: C got the first (0x600d) and only it
+expect: redteam: ipc: B, bound to N and waiting on E3, woke with N's badge; N and B cannot be bound twice
+expect: redteam: ipc: B's deletion unbound N; N was Active for a poll, then bound to B2, which its signal woke
+expect: redteam: ipc: deleting N left B2 queued on E3, unbound: E3's message reached it, and it bound to N2
+expect: redteam: ipc: every reply and binding attack held
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

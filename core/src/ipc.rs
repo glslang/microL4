@@ -40,3 +40,7 @@ pub use notification::{
 /// The state machine's tests, and the world `crate::syscall`'s tests share.
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// The M6 red team's random-sequence fuzzer.
+#[cfg(test)]
+mod redteam;

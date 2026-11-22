@@ -10,9 +10,13 @@
 //! - `test=redteam-movss` ([`mov_ss`]): the same for [`probes::MOV_SS`],
 //!   `mov ss` with TF set followed by a control transfer.
 //! - `test=redteam-tlb` and `test=redteam-selfdelete`: [`vm`].
+//! - `test=redteam-ipc` ([`ipc`]), the M6 red team's: a stale saved reply
+//!   capability, a reply sent twice, and a bound thread deleted while it
+//!   receives.
 //!
 //! Every test ends with `TEST PASS` and `DebugHalt(0)`, or `TEST FAIL`.
 
+mod ipc;
 mod probes;
 mod vm;
 
@@ -131,6 +135,7 @@ pub fn run(bi: &BootInfo, name: &str) -> ! {
         "redteam-movss" => mov_ss(bi),
         "redteam-tlb" => vm::tlb(bi),
         "redteam-selfdelete" => vm::self_delete(bi),
+        "redteam-ipc" => ipc::run(bi),
         other => fail!("unknown red-team test {other:?}"),
     }
 }
