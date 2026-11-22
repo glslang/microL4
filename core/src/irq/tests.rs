@@ -353,6 +353,49 @@ fn an_ioapic_without_a_pin_count_or_version_serves_nothing_and_the_first_match_w
     );
 }
 
+/// Reviewer C's probe: an I/O APIC whose GSI base plus pins passes 2^32
+/// would serve GSIs that do not fit the IRQ table's 32 bits; it serves
+/// nothing, and GetIOAPIC of such a GSI is `InvalidArgument(0)`.
+#[test]
+fn an_ioapic_whose_gsis_pass_32_bits_serves_nothing() {
+    let mut p = q35_acpi().clone();
+    for (id, gsi_base) in [(9, 0xFFFF_FFF0), (10, 0xFFFF_FFE8)] {
+        p.ioapics.push(crate::acpi::IoApic {
+            id,
+            address: 0xFEC1_0000,
+            gsi_base,
+        });
+    }
+    // 0xFFFF_FFF0 + 24 passes 2^32; 0xFFFF_FFE8 + 24 ends at u32::MAX.
+    let r = Routing::from_platform(&p, &[24, 24, 24], &[QEMU, QEMU, QEMU]);
+    assert!(r.ioapics[0].is_some());
+    assert!(r.ioapics[1].is_none(), "GSIs past u32::MAX");
+    assert_eq!(r.ioapics[2].map(|io| io.gsi_base), Some(0xFFFF_FFE8));
+    assert_eq!(
+        r.pin(u64::from(u32::MAX)).map(|(p, _)| p),
+        Some(Pin { ioapic: 2, pin: 23 })
+    );
+    assert_eq!(r.pin(1 << 32), None);
+    assert_eq!(r.pin((1 << 32) | 2), None);
+
+    // GetIOAPIC of a GSI past 32 bits, even with routes built by hand.
+    let mut w = world(QEMU);
+    w.k.dev
+        .ioapics
+        .push(crate::testing::FakeIoApic::new(QEMU, 24));
+    w.k.dev.routing.ioapics[1] = Some(IoApicDesc {
+        gsi_base: 0xFFFF_FFF0,
+        pins: 24,
+        version: QEMU,
+    });
+    let before = snapshot(&w);
+    assert_eq!(
+        get_ioapic(&mut w, (1 << 32) | 2, 1, 0, S_H),
+        error(SyscallError::InvalidArgument(0))
+    );
+    assert_eq!(snapshot(&w), before, "nothing changed");
+}
+
 #[test]
 fn each_action_writes_the_documented_registers() {
     let pin = Pin { ioapic: 0, pin: 4 };

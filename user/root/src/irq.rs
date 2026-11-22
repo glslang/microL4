@@ -250,8 +250,9 @@ pub fn run(bi: &BootInfo) -> ! {
     let first_edge = t.signalled();
     t.ack(h);
     t.service();
-    // 2 and 3: a second edge before Ack signals and masks the pin; a third
-    // signals nothing while masked.
+    // 2 to 4: after that Ack an edge signals; a second before the next
+    // Ack signals too and masks the pin; a third, on the masked pin,
+    // signals nothing.
     t.edge();
     let second = t.signalled();
     t.service();
