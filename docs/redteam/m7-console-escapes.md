@@ -10,7 +10,8 @@ client.
 `Terminal::read` (the prompt), on any VT100-compatible terminal, which is
 what QEMU's `-nographic` serial and Hyper-V's named pipe feed.
 
-**Status:** open; not fixed, as the brief asks.
+**Status:** fixed in the M7 fix round, commit `8162512` ("console: show a
+client's control bytes, do not send them"; [The fix](#the-fix)).
 
 ## What breaks
 
@@ -50,13 +51,14 @@ write into another client's line or appear to change the focus.
 Host tests in `user/console/src/tests/redteam.rs`, over a small VT100 screen
 model (printable bytes, CR, LF, BS, `ESC [n A`, `ESC [2K`, `ESC [K`):
 
-- `a_client_s_escape_sequences_reach_the_terminal_unchanged` passes today:
-  client 2 forges `[console] focus 1 (root)` over the real status line, the
-  screen shows no trace of `focus 2 (evil)`, and the typed `hunter2` goes to
-  client 2.
-- `a_client_cannot_rewrite_console_s_status_line` states the guarantee and
-  fails today; it is `#[ignore]`d so the default run passes. Run it with
-  `cargo test -p console -- --ignored`.
+- `a_client_s_escape_sequences_reach_the_terminal_unchanged` passed before
+  the fix: client 2 forged `[console] focus 1 (root)` over the real status
+  line, the screen showed no trace of `focus 2 (evil)`, and the typed
+  `hunter2` went to client 2. The fix round turned it into
+  `a_client_s_escape_sequences_are_shown_not_obeyed`.
+- `a_client_cannot_rewrite_console_s_status_line` states the guarantee; it
+  failed before the fix and was `#[ignore]`d. It passes now, and is no
+  longer ignored.
 
 How sure: certain for the bytes console emits (the tests run the real
 `Terminal`); the screen effect depends on the terminal, and every
@@ -73,3 +75,29 @@ only for the focused client in raw mode. Record in `docs/design.md`
 ("Output") that client output is filtered and why, and add the filtered
 bytes to the proptest's model. A distinct mark on status lines (a prefix no
 client can print once filtered) is then optional.
+
+## The fix
+
+M7 fix round, in `user/console/src/terminal.rs`:
+
+- A client's bytes reach the terminal through `put_shown`: printable ASCII
+  and tab as they are, the C0 controls and DEL in caret notation (`^[`,
+  `^M`, `^?`), and every byte from `0x80` up as `\xNN` (`console::shown`).
+  That covers `Write`'s lines and 512-byte pieces, `Flush`, a `Read`'s
+  prompt and the `Attach` name in a status line. The `\r\n` ending a line
+  is console's own. M8's raw mode (label `0x125`, still `BadLabel`) is
+  where `term`'s bytes would pass as they are.
+- `user/console/src/tests/redteam.rs`: the attack now shows its escapes as
+  text below the real status line
+  (`a_client_s_escape_sequences_are_shown_not_obeyed`), the guarantee passes,
+  and `no_client_byte_moves_the_cursor_up` tries the same through a prompt, a
+  flush, a 512-byte line and a name.
+- `user/console/src/tests.rs`: golden
+  `a_clients_control_bytes_are_shown_not_sent` for every byte's form; the
+  proptest writes control and arbitrary bytes, shows them by a model of its
+  own, and fails any client or prompt byte that reaches the terminal as a
+  control byte but tab and the line's CR LF.
+- `docs/design.md` ("Output" and the console invariants) states the rule.
+- Not done: a distinct mark on status lines. A client can still print a
+  line that reads like `[console] focus 1 (root)`, but only on a line of
+  its own, below the real status line, which it can no longer erase.

@@ -1782,7 +1782,7 @@ Hypervisor capabilities.
 | Capabilities are created only by boot, retype, IRQControl and IOPortControl invocations, `Call` and fault delivery (reply capabilities), and deletion (Zombies); every other capability is derived from one its holder has | the only callers of `insert_root` and `insert_derived`; red-team brief 1 | M2, M10 |
 | Destroying a CNode or TCB is preemptible, recurses at most two levels, and keeps every invariant at each step | Zombie algorithm; proptest with random preemption points over nested and cyclic containers, including deleting a slot inside the container its own deletion destroys | M2 |
 | No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; the TCB `finalise` hook suspends the thread before `core/` clears its slots; proptest | M2, M5 |
-| The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container: the node is `IRQ_NODE` in the kernel image's `.bss` (`arch/x86_64/objects.rs`), and in the test kernels memory of its own at `IRQ_NODE_BASE`, which no CNode or TCB covers; M2's proptest, whose root CNode holds an IRQHandler; no M7 test destroys a CNode or TCB that holds a handler | M2, M7 |
+| The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container: the node is `IRQ_NODE` in the kernel image's `.bss` (`arch/x86_64/objects.rs`), and in the test kernels memory of its own at `IRQ_NODE_BASE`, which no CNode or TCB covers; M2's proptest, whose root CNode holds an IRQHandler; `test=redteam-irq`, which deletes a CNode K holding a handler whose IRQ node slot holds the last capability to a notification a thread W waits on: the handler is finalised inside the Zombie's reduction, which deletes that capability from the IRQ node through the handler's own hook (`irq::finalise`) and releases W, and the GSI can be issued again | M2, M7 |
 | Every relocation of a capability to another slot calls `moved(cap, old_slot, new_slot)` before the next preemption point, so back-references stay exact | one `l4core::cdt` move and one swap function, used by Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; `arch::paging::moved` rewrites the back-reference; proptest over nested CNode deletion with a mapped capability in slot 0 of the nested CNode, rotates and swaps of mapped capabilities, and untyped revoke, at random preemption points (the `vspace` proptest from M5); host test `moves_rotates_and_swaps_rewrite_back_references`; `CNode_SaveCaller` moves with `cdt::move_slot` (M6; host test `save_caller_moves_the_reply_capability_below_its_callers_master`); red-team brief 4 | M2, M5, M6, M10 |
 
 ### Compared with seL4
@@ -2195,7 +2195,7 @@ install. M9: Hypervisor narrowing.
 | The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step, through the decoder too (`random_messages_keep_every_slot_consistent`); debug asserts | M2, M4 |
 | No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless it is a partial revoke ([Slot operations](#slot-operations)) | single-step revoke with restart; a capability received by IPC is a descendant of the sender's (host test `a_received_copy_is_a_descendant_that_revoke_reaches`; `test=captransfer`, where the client's revoke of its frame takes the server's copy and its mapping), and a revoke of a badged original before `CNode_CancelBadgedSends` leaves the released senders nothing to send with (host test `revoking_first_retires_the_badge`, `test=badge`) (M6); red-team brief 2 | M2, M5, M6, M10 |
 | `depth` never exceeds 4095 and never wraps, so no capability leaves its ancestors' runs | one child-insert function in `l4core::cdt` checks the limit; proptest drives a chain to 4095 by copy and delete; red-team brief 1 | M2, M10 |
-| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5; host test `installs_stop_at_the_depth_limit`) and `IRQHandler_SetNotification` (M7; `cdt::child_too_deep` before any change, host test `irq_handler_errors_in_order` with a notification capability at depth 4095); IPC transfer stops at that capability (M6; host test `a_copy_refused_at_the_depth_limit_ends_the_transfer`); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
+| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds but where it cannot fail | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5; host test `installs_stop_at_the_depth_limit`) and `IRQHandler_SetNotification` (M7; `cdt::child_too_deep` before any change, host test `irq_handler_errors_in_order` with a notification capability at depth 4095); IPC transfer stops at that capability (M6; host test `a_copy_refused_at_the_depth_limit_ends_the_transfer`). Two inserts `.expect` success, and cannot be refused: IRQControl's and IOPortControl's issues (`l4core::irq`'s and `l4core::ioport`'s `insert_derived(..).expect(..)`), whose parent is boot's original at depth 0, from which nothing derives a copy (`cnode::derive` refuses both control capabilities, for Copy, Mint and IPC transfer alike), so the child is always at depth 1; tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
 
 ### Compared with seL4
 
@@ -3686,7 +3686,10 @@ recommends (TLFS CPUID `0x4000_0004` EAX bits 3 and 8).
 
 The MADT gives up to four I/O APICs (ID, base, GSI base); the pin count is the
 version register's MRE + 1, at most 120, since the 8-bit register select
-reaches redirection entries 0 to 119 only.
+reaches redirection entries 0 to 119 only. An I/O APIC whose GSI base plus
+pin count passes 2^32 serves no GSI (`Routing::from_platform`; bad firmware
+only), since a GSI is 32 bits; `ioapic.rs` keeps each I/O APIC's version
+beside its registers and writes the EOI register only from version `0x20`.
 
 Remote IRR (bit 14 of an entry) is set when the I/O APIC sends a level
 interrupt, and a level pin sends nothing more until an EOI for that vector
@@ -3917,10 +3920,10 @@ both Remote IRR paths, with QEMU's I/O APIC at version `0x20` and, in the
 | --- | --- | --- |
 | Each interrupt source (GSI, SINT, MSI vector) has at most one issued IRQHandler, copies aside | `l4core::irq`'s issue refuses a GSI that has an entry (`IrqTable::holder`) with `RevokeFirst`; `irq::check` ("a GSI has two entries"); host tests `irq_control_errors_in_order` and `a_refused_issue_never_touches_an_issued_pin`; the IRQ table's proptest, whose model issues a GSI once; `test=irq`, where `GetISA(4)` again and `GetIOAPIC(4)` are `RevokeFirst`. SINTs and MSI vectors: M9 | M7, M9 |
 | Each vector in `0x30`-`0xEF` belongs to at most one source; no other vector is issued | an entry's vector is its index plus `0x30` (`irq::vector`, host test `irq_n_is_vector_0x30_plus_n`), and an issue takes the lowest free entry (`IrqTable::lowest_free`) or fails with `RevokeFirst` (host test `with_every_vector_taken_an_issue_is_revoke_first`); the IRQ table's proptest, whose model allocates the same way | M7 |
-| An IRQ node slot holds only a notification capability with the Write right and never names a deleted notification | `SetNotification`'s checks before any change (host test `irq_handler_errors_in_order`); `irq::check` at every kernel exit of the host tests and the proptest; the bound capability is a derivation-list child or sibling like any copy (host test `set_notification_copies_the_capability_into_the_irq_node_as_cnode_copy_would`), so it keeps its notification alive and goes with the handler (host tests `rebinding_the_last_capability_to_a_notification_finalises_it`, `deleting_the_handler_deletes_the_irq_nodes_capability_and_may_finalise_its_notification`). No M7 test revokes the untyped of a bound notification; that case rests on the derivation list's own tests (M2) | M7 |
+| An IRQ node slot holds only a notification capability with the Write right and never names a deleted notification | `SetNotification`'s checks before any change (host test `irq_handler_errors_in_order`); `irq::check` at every kernel exit of the host tests and the proptest; the bound capability is a derivation-list child or sibling like any copy (host test `set_notification_copies_the_capability_into_the_irq_node_as_cnode_copy_would`), so it keeps its notification alive and goes with the handler (host tests `rebinding_the_last_capability_to_a_notification_finalises_it`, `deleting_the_handler_deletes_the_irq_nodes_capability_and_may_finalise_its_notification`); host test `revoking_a_bound_notifications_original_empties_the_irq_node_slot`, where a revoke of the bound capability's original deletes the IRQ node's copy and the next interrupt is lost; `test=redteam-irq`, where revoking the untyped of the bound notification N deletes N and the IRQ node's copy, and a notification N2 retyped at N's address gets no signal in 200 ms of the PIT's interrupts and Acks until the handler is bound to it | M7 |
 | Deleting the last IRQHandler masks its source, empties its IRQ node slot and frees its vector | `irq::finalise` and `irq::after_delete` through the kernel's hooks; host tests `deleting_the_last_handler_unbinds_masks_keeping_vector_and_trigger_and_frees_the_irq`, `revoking_irq_control_deletes_every_handler` and `a_freed_vector_reissued_elsewhere_never_hears_the_old_pin`; the IRQ table's proptest, which checks after every step that every pin without an entry is masked; `test=irq`, where a deleted ISA IRQ 4 is issued again as IRQ 0, a copy keeps it issued and revoking IRQControl deletes both handlers | M7 |
-| Between two Acks an I/O APIC pin delivers at most three interrupts: two, plus one the local APIC already holds when the mask lands | `irq::deliver`'s `pending` and `masked`; host tests `an_edge_pin_stays_open_for_the_first_edge_and_masks_on_the_second_before_ack`, `the_local_apic_may_hold_a_third_interrupt_when_the_mask_lands` and `a_level_pin_is_masked_on_delivery_and_refires_at_ack_while_asserted`; the IRQ table's proptest, which fails an edge pin's fourth interrupt or a level pin's second between two Acks (its random sequences reach two; the third only in the host test); `test=irq`, where a fourth edge with no Ack signals nothing. No scenario drives the PIT at its highest rate: not built in M7 | M7 |
-| No pin is unmasked with Remote IRR set | issue's `MaskRte`, `CheckRemoteIrr`, `ClearRemoteIrr` and `CheckRemoteIrr` again before `ProgramRte`, each starting with a read of the entry in `ioapic::perform`; `FakeIoApic` counts every write that unmasks a level entry with Remote IRR set, which must stay 0 after every step of the host tests and the proptest, whose sequences strand Remote IRRs; host tests `issue_clears_a_stale_remote_irr_through_the_eoi_register_from_version_0x20`, `below_version_0x20_issue_clears_a_stale_remote_irr_by_toggling_the_trigger`, `a_remote_irr_that_stays_set_is_revoke_first_and_the_pin_stays_masked` and `a_level_interrupt_pending_at_deletion_is_dropped_and_its_eoi_clears_remote_irr`; `test=irq`, which deletes a level handler with its line high and issues the pin again; `test=irq_stale`, which strands a level pin's Remote IRR (its entry's vector changed between delivery and EOI) and then issues the pin, with QEMU's I/O APIC at version `0x20` and, in the `irq_stale_0x11` scenario, at `0x11` (`-global ioapic.version=0x11` through `qemu_args:`; QEMU accepts only those two, from memory) | M7 |
+| Between two Acks an I/O APIC pin delivers at most three interrupts: two, plus one the local APIC already holds when the mask lands | `irq::deliver`'s `pending` and `masked`; host tests `an_edge_pin_stays_open_for_the_first_edge_and_masks_on_the_second_before_ack`, `the_local_apic_may_hold_a_third_interrupt_when_the_mask_lands` and `a_level_pin_is_masked_on_delivery_and_refires_at_ack_while_asserted`; the IRQ table's proptest, which fails an edge pin's fourth interrupt or a level pin's second between two Acks (its random sequences reach two; the third only in the host test); `test=irq`, where a fourth edge with no Ack signals nothing; `test=redteam-irq`'s PIT storm, about 18.6 kHz of edges on GSI 2, whose polls may find at most three signals in 200 ms with no Ack and in 20 ms after each of ten Acks (runs have found 1, and 1 or 2 per Ack). The PIT at its highest rate is not driven | M7 |
+| No pin is unmasked with Remote IRR set | Two writes unmask a pin. Issue's `ProgramRte` comes only after `l4core::irq`'s `MaskRte`, then `CheckRemoteIrr` (`ioapic::perform` reads the entry and answers from its Remote IRR bit), `ClearRemoteIrr` if it is set and `CheckRemoteIrr` again, which refuses the issue with `RevokeFirst` if it is still set; from `MaskRte` on the I/O APIC sends nothing on the pin, so nothing sets Remote IRR between. Ack's `UnmaskRte` does not look at Remote IRR: it relies on the interrupt path, `arch::irq::handle`, which EOIs every device vector after `deliver` and before the kernel exits, with EOI-broadcast suppression off (`apic::SVR_VALUE`, host test `svr_error_and_timer_values`), so a level delivery's Remote IRR is clear before any Ack can run; a level pin deleted with a delivery pending keeps its vector, so that delivery's EOI clears it too. Tested: `FakeIoApic` counts every write that unmasks a level entry with Remote IRR set, which must stay 0 after every step of the host tests and the proptest, whose sequences strand Remote IRRs; host tests `issue_clears_a_stale_remote_irr_through_the_eoi_register_from_version_0x20`, `below_version_0x20_issue_clears_a_stale_remote_irr_by_toggling_the_trigger`, `a_remote_irr_that_stays_set_is_revoke_first_and_the_pin_stays_masked`, `a_level_pin_is_masked_on_delivery_and_refires_at_ack_while_asserted` and `a_level_interrupt_pending_at_deletion_is_dropped_and_its_eoi_clears_remote_irr`, the only test with a delivery pending at the deletion; `test=irq`, where an Ack with the level line high signals again (so the Ack found Remote IRR clear), and a level handler deleted after its delivery and EOI, the line still high, is issued again; `test=irq_stale`, which strands a level pin's Remote IRR (its entry's vector changed between delivery and EOI) and then issues the pin, with QEMU's I/O APIC at version `0x20` and, in the `irq_stale_0x11` scenario, at `0x11` (`-global ioapic.version=0x11` through `qemu_args:`; QEMU accepts only those two, from memory). The EOI register is written only on an I/O APIC whose version, read and kept by `ioapic.rs`'s `IoApic`, is `0x20` or later | M7 |
 | Every fixed interrupt is EOI'd exactly once: `0x30`-`0xFE` always, `0x20`-`0x2F` only when its ISR bit is set, `0xFF` never | `l4core::apic::needs_eoi` (host test `every_fixed_interrupt_is_eoied_once`), asked once per interrupt by `arch::irq::handle`, after `deliver` for a device vector, which writes no EOI itself; the `ticks` scenario and, from M7, `irq` and `console`, whose device interrupts keep arriving | M3, M7 |
 | User code cannot enter an interrupt handler with `int n` | DPL 0 on every gate but `#BP`; red-team brief 5 | M3, M10 |
 | No interrupt arrives before the IDT is loaded; pins stay masked until issued; the PIC, LINT0 and LINT1 stay masked | M3 init order, QEMU scenario | M3 |
@@ -3981,6 +3984,13 @@ reply ([System calls](abi.md#system-calls)).
 | `0x40`-`0x43`, `0x61` (PIT, speaker) | none | yes |
 | `0x64`, `0x92`, `0xCF9`, the ACPI PM1 control port | none | yes, but each can reset or power off the machine; root gives them only to trusted servers (M10 brief 7) |
 | `0xCF8`-`0xCFF` (PCI configuration) | none | yes, but it reaches every device, which is as strong as DMA; root gives it only to a trusted PCI manager (M9 uses ECAM) |
+| `0x510`-`0x51B` (QEMU's `fw_cfg`) | none | yes, but its DMA interface at `0x514`-`0x51B` makes QEMU read or write guest memory at any address the guest names, which is as strong as DMA (from memory of QEMU's `hw/nvram/fw_cfg.c`); no M7 server needs it, and root gives it to none |
+
+The kernel keeps only the 8259s' primary ports. Intel's ICH chipsets also
+decode them at aliases, `0x24`-`0x3D` and `0xA4`-`0xBD` (from memory of the
+ICH datasheets); neither QEMU's q35 nor Hyper-V does, so on both targets those
+ports reach nothing. On hardware with an ICH they would reach the PIC, and
+the kernel would have to keep them too.
 
 ### Why invocations, not the TSS I/O bitmap
 
@@ -4474,8 +4484,18 @@ writer and `debug::print` are `#[cfg(feature = "debug")]`, so release code
 naming them does not compile. Before any scenario, `cargo xtask test`
 disassembles the release kernel (`xtask/src/disasm.rs`, with `llvm-objdump`
 from rustup's `llvm-tools`, which `tools/setup.sh` adds, else one on `PATH`)
-and fails on any of four things:
+and fails on any of six things:
 
+- a `call` or jump to one of `io.rs`'s functions from any function but the
+  three that may make one (`disasm::IO_CALLERS`): the IOPort executor
+  (`Objects`' `IoPorts::port_in` and `port_out`), `pic::init` and
+  `arch::exit`, each found by the address range its symbol covers;
+- an address inside `io.rs`'s functions anywhere but as a direct call's or
+  jump's target: in an instruction that loads, compares, pushes or stores it
+  (a sign-extended 32-bit immediate or displacement, `movabs`, or the target
+  objdump prints for a rip-relative operand), or as eight bytes anywhere in
+  the kernel's data sections but `.rootimage`, the root task's ELF, which is
+  where a function pointer would sit;
 - an `in` or `out`, string forms included, outside `io.rs`'s functions (the
   address ranges their symbols cover);
 - an immediate in `0x3F8` to `0x3FF` moved into `dx`, `edx` or `rdx` (only a
@@ -4487,33 +4507,38 @@ and fails on any of four things:
   move the port into `dx` themselves;
 - any symbol whose name contains `serial`.
 
-It also fails if the listing has fewer than 1,000 instructions or no `io.rs`
-function with an `in` and one with an `out`, so a listing it misreads cannot
-pass by finding nothing. That catches a port access added outside
-`serial.rs`, one inlined into another function, and a call of `io.rs` with a
-COM1 port. So that each `in` and `out` sits under an `io.rs` symbol, the six
+It also fails if the listing has fewer than 1,000 instructions, no `io.rs`
+function with an `in` and one with an `out`, no call to them from the three
+callers, or no data to scan, so a listing it misreads cannot pass by finding
+nothing. So that each `in` and `out` sits under an `io.rs` symbol, the six
 functions there (`inb`, `inw`, `inl`, `outb`, `outw`, `outl`) are
 `#[inline(never)]` and take the port as their first argument, which they move
-into `dx` themselves. A release kernel calls them from
-three places only: the IOPort invocations, `pic::init` at boot (ports `0x20`,
-`0x21`, `0xA0` and `0xA1`, when the MADT sets `PCAT_COMPAT`, as q35's does)
-and `arch::exit` (`isa-debug-exit`, after a panic). The `release` scenario
-([Scenarios](#scenarios)) boots that
-kernel: all output comes from `uart`, and root ends the run through an IOPort
-capability for `isa-debug-exit` (`0xF4`) made from IOPortControl, writing what
-`arch::exit` writes: `0x10` for success, which QEMU turns into exit status 33,
-or `0x11` for failure (35). BootInfo does not say whether the kernel has
-`debug`, so root learns it from the scenario's `test=` name: that test makes
-no debug system call, since one would raise `UnknownSyscall` in root, which
-has no fault handler, and stop it silently until the 60-second limit. The
-test checks that fault itself, from another thread whose fault endpoint root
-holds.
+into `dx` themselves; so that each call sits under a caller's symbol, the
+three callers are `#[inline(never)]` too. A release kernel calls `io.rs` from
+those three places only: the IOPort invocations, `pic::init` at boot (ports
+`0x20`, `0x21`, `0xA0` and `0xA1`, when the MADT sets `PCAT_COMPAT`, as q35's
+does) and `arch::exit` (`isa-debug-exit`, after a panic). The first two rules
+hold whatever port UART code would compute: it needs `in` and `out`, which
+only `io.rs` has, so it would have to reach `io.rs` from one of those three
+functions, whose code a reviewer reads once. The port rules are a second line;
+alone they missed a port read from memory or computed from a base (the M7 red
+team's finding, `docs/redteam/m7-disasm-computed-port.md`, whose listing is
+now a host test that fails the call-site rule). The `release` scenario
+([Scenarios](#scenarios)) boots that kernel: all output comes from `uart`, and
+root ends the run through an IOPort capability for `isa-debug-exit` (`0xF4`)
+made from IOPortControl, writing what `arch::exit` writes: `0x10` for success,
+which QEMU turns into exit status 33, or `0x11` for failure (35). BootInfo
+does not say whether the kernel has `debug`, so root learns it from the
+scenario's `test=` name: that test makes no debug system call, since one would
+raise `UnknownSyscall` in root, which has no fault handler, and stop it
+silently until the 60-second limit. The test checks that fault itself, from
+another thread whose fault endpoint root holds.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")` on `serial.rs`, `kprintln!`'s writer and `debug::print`, so release code naming them does not compile (every release build, and `cargo xtask clippy`'s release configuration); `cargo xtask test`'s disassembly check, `disasm::check` (no `in` or `out` outside `io.rs`'s functions, no `0x3F8` to `0x3FF` moved into `dx`, none passed as `io.rs`'s port argument, no `serial` symbol), whose host tests in `xtask/src/disasm.rs` run each rule on listings that break it; the `release` scenario, whose `forbid:` lines catch a debug kernel's banner, BootInfo summary, `DEBUG HALT` and panic lines | M7 |
+| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")` on `serial.rs`, `kprintln!`'s writer and `debug::print`, so release code naming them does not compile (every release build, and `cargo xtask clippy`'s release configuration); `cargo xtask test`'s disassembly check, `disasm::check` (`io.rs` called only from the IOPort executor, `pic::init` and `arch::exit`, its addresses in no other instruction and in no data, no `in` or `out` outside `io.rs`'s functions, no `0x3F8` to `0x3FF` moved into `dx`, none passed as `io.rs`'s port argument, no `serial` symbol), whose host tests in `xtask/src/disasm.rs` run each rule on listings and an ELF that break it, the M7 red team's computed-port writer among them; the `release` and `release_fault` scenarios, whose `next:` puts the root task's first line right after the loader's last, so a release kernel that prints anything at boot fails, and whose `forbid:` lines catch a debug kernel's banner, BootInfo summary, `DEBUG HALT` and panic lines | M7 |
 | Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test `debug_numbers_need_a_debug_kernel`; the `release` scenario, whose root test (`user/root/src/release.rs`) has a probe thread make `DebugPutChar`, `DebugHalt`, `DebugDumpScheduler` and numbers 19 and 31, and takes each `UnknownSyscall` on endpoint D with the number in MR18 (`root::check::console`, host test `the_probes_faults_are_answered_two_bytes_on`) | M5, M7 |
 | `DebugPutChar` and `DebugDumpScheduler` change no register a thread can rely on | `l4core::syscall` returns them without writing a register, and `dispatch` writes none; host test `debug_system_calls_go_back_to_the_kernel` | M5 |
 | Debug system calls read no user memory and take no capability | `dispatch::debug_call` uses only `rdi`'s value and kernel state; review | M5 |
@@ -4907,6 +4932,19 @@ not flushed; a client writes its prompt and reads, with no `Flush` between.
 The prompt is shown again with every redraw of the client's input line until
 its `Read` is answered, and then cleared.
 
+A client's bytes reach the terminal shown, not obeyed (`console::shown`, the
+M7 red team's finding 1, `docs/redteam/m7-console-escapes.md`): printable
+ASCII (`0x20`-`0x7E`) and tab as they are; the C0 controls and DEL in caret
+notation, `^[` for ESC, `^M` for CR, `^H` for BS, `^?` for DEL; and every byte
+from `0x80` up, the C1 controls among them, as `\xNN`. That holds for its
+output, its prompt and its `Attach` name in a status line; the `\r\n` that
+ends each of its lines is console's own. Sent as they were, a client's ESC and
+CSI sequences would move a VT100 terminal's cursor up into other lines, erase
+console's focus status line and forge one. M8's raw mode (label `0x125`,
+`BadLabel` until then) is where `term`'s escape sequences would pass as they
+are; M7 does not build it. A client can still print text that looks like a
+status line, but only on a line of its own, below the real one.
+
 #### Input
 
 | Byte | Effect on the focused client's edit buffer | Echo |
@@ -5005,7 +5043,7 @@ fault of root or of `watch`, which have no handler and print nothing.
 
 ### The harness
 
-Four new scenario directives and values (`xtask/src/scenario.rs`); a scenario
+Five new scenario directives and values (`xtask/src/scenario.rs`); a scenario
 without them runs exactly as before.
 
 | Directive | Meaning |
@@ -5013,6 +5051,7 @@ without them runs exactly as before.
 | `send: <text>` | writes `<text>` to QEMU's standard input, COM1's receive side, once every `expect:` above it has matched; consecutive `send:` lines go together, in order. Escapes: `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`; a `\` before anything else is an error. As for every value, the ends are trimmed and ` #` starts a comment, so a space or `#` there is `\x20` or `\x23`. A scenario's `send:` lines total at most 4 KiB once unescaped (a parse error otherwise), far below a pipe's 64 KiB, so the blocking write to QEMU's stdin never waits past the timeout on a guest that has stopped reading |
 | `kernel: release` | boots the kernel built without features (no `debug`, no `selftest`), in the run's profile; `kernel: selftest` is the default |
 | `forbid: <text>` | no line of the transcript may contain `<text>`; checked as each line arrives and reported when the run ends, naming the first such line |
+| `next: <text>` | right after an `expect:` or another `next:` (a parse error otherwise): the serial line right after the one that step matched must start with `<text>`, so no line came between them; any other line there fails the scenario, naming it, and nothing after it matches. `release` and `release_fault` put the root task's first line next after the loader's `entering kernel`, so a release kernel that prints anything at boot fails them, whatever it prints |
 | `exit: timeout` | beside `success` and `failure`: the guest must still be running when the scenario's `timeout:`, which it then needs, ends the boot, with every `expect:` matched. For a kernel with no exit of its own; no scenario uses it now that `release` ends through `isa-debug-exit` |
 
 **Timing.** A `send:` must have an `expect:` above it (a parse error
@@ -5025,13 +5064,15 @@ lost however fast it arrives. Each `send:` is logged in `serial.log` as an
 `xtask: sent "<text>"` line at the point it was written; neither the matcher
 nor `forbid:` reads those lines.
 
-**Implementation.** The scenario becomes a list of steps (`expect`, `send`);
-the matcher, unchanged in what it matches, returns the sends it reaches as
-it advances, and the main loop writes them to QEMU's stdin, which is piped
-for scenarios with a `send:` and stays `/dev/null` for the others. Matching
-stays line-based: a prompt without a newline is never seen, so a test makes
-the line before each `send:` a whole one and checks echo with host tests.
-xtask builds the release kernel beside the selftest one and copies it out to
+**Implementation.** The scenario becomes a list of steps (`expect`, `send`,
+`next`); the matcher, unchanged in what `expect:` matches, returns the sends
+it reaches as it advances, takes a `next:` only at the start of the line after
+its step's, and stays broken once one fails, and the main loop writes them to
+QEMU's stdin, which is piped for scenarios with a `send:` and stays
+`/dev/null` for the others. Matching stays line-based: a prompt without a
+newline is never seen, so a test makes the line before each `send:` a whole
+one and checks echo with host tests. xtask builds the release kernel beside
+the selftest one and copies it out to
 `target/xtask/release-kernel/<profile>/kernel.elf`, since a feature change
 rebuilds in place ([A release kernel without UART
 code](#a-release-kernel-without-uart-code)). `cargo xtask image`, `run` and
@@ -5042,8 +5083,10 @@ code](#a-release-kernel-without-uart-code)). `cargo xtask image`, `run` and
 **`console`** (`cmdline: test=console`, the selftest kernel). Root prints its
 summary through `DebugPutChar`, starts `watch`, builds uart and console,
 attaches as client 1 (`root`), points its output at console and starts
-clients `a` (badge 2) and `b` (badge 3), each with an IPC buffer in KiB 1 or 2
-of root's buffer frame (`spawn`), which attach and report on D. A client asks
+clients `a` (badge 2) and `b` (badge 3), and `r`, whose console capability
+has root's badge, so that it reads as client 1 for root, each with an IPC
+buffer in KiB 1, 2 or 3 of root's buffer frame (`spawn`), which attach and
+report on D. A client asks
 for its next step with a `Call` on D whose message reports on its last one,
 with label `0x130`, above every fault type: MR0 the step it did (`u64::MAX`
 for its first report, once it has attached), MR1 its status (0, or the error
@@ -5051,7 +5094,7 @@ that stopped it), and MR2 on the line it read, as a byte string
 (`root::check::console::Report`); its fault endpoint is the same
 capability, D with Write, GrantReply and its client number as badge, so root
 tells a fault from a report by the label. Root answers one client at a time
-and keeps the other's reply capability saved (`CNode_SaveCaller`), so every
+and keeps the others' reply capabilities saved (`CNode_SaveCaller`), so every
 write boundary is fixed, and root blocks only on D or in calls to console and
 uart, never in a call to a client that may fault:
 
@@ -5060,7 +5103,9 @@ uart, never in a call to a client that may fault:
 | Interleaved lines | `a` writes `a1 alpha `, `b` writes `b1 bravo `, `a` writes `one\n`, `b` writes `one\n`; `b` writes a 300-byte line, `b2` and filler, in three writes of 100 bytes (through the IPC buffer), with `a`'s whole line `a2 short` between them; `a` writes `a3 x\na4 y\na5 ` in one write, `b` writes `b3 z\n`, `a` writes `end\n` | `a1 alpha one`, `b1 bravo one`, `a2 short`, the 300-byte `b2` line, `a3 x`, `a4 y`, `b3 z`, `a5 end`, each whole and in that order |
 | Burst | `b` writes twelve 200-byte lines back to back | `b burst 01` to `b burst 12`, whole. On hardware uart may hold some of console's writes; QEMU's transmitter empties at once, so its queue never fills and `Stats` shows 0 Writes held (MR6) |
 | Input | `a` and `b` each write a prompt and `Read`; root answers both before it prints `console: input next`, then waits on D for both reports | see the steps below |
-| Totals | root asks uart's `Stats` | signals and THRE bursts (MR0, MR3) above 0, exactly the 22 bytes the harness sent, 0 overruns and line errors |
+| Type-ahead | once uart's `Stats` show the harness's line received and root's `Sync` has made console take it, `a` writes a 35-byte prompt and `Read`s | `a`'s 37-byte line, waiting, answers the `Read` at once, after console has flushed the prompt; both pass MR3, so the reply and the flush's uart `Write` share the IPC buffer |
+| Drain | `r` (for client 1), `a` and `b` each report that they have the step and, once root has all three reports and answers them, `Read` once more | nothing: console must save all three `Read`s, as nothing more was typed for any client (below) |
+| Totals | root asks uart's `Stats` | signals and THRE bursts (MR0, MR3) above 0, exactly the 60 bytes the harness sent (22 for the input, 38 for the type-ahead line), 0 overruns and line errors |
 
 ```text
 expect: console: input next
@@ -5072,19 +5117,27 @@ expect: [console] focus 2 (a)
 expect: a: read "hi a"
 ```
 
-Each client prints what it read and reports it to root, which checks that
-`a` received exactly `hi a` and `b` exactly `to b`, and nothing else reached
-any client (`root::check::console`). Root then prints `TEST PASS` through
-console, syncs and calls `DebugHalt(0)`; the scenario ends with `DEBUG HALT
-0 from TCB` and exit success. The echoed lines (`b> to b`) are in the
-transcript but not expected, since whether a prompt shows depends on whether
-the client's `Read` arrived before its input; host tests pin echo exactly.
-Typed bytes reach console only after uart's service routine, which alone
-signals `RX_READY`, has run for them, so the input part shows receive
-interrupts at work; MR3 shows transmit interrupts. `expect:` matches
-substrings, so wholeness rests on the pieces: every piece of the interleaved
-lines is distinct, and a piece console put inside another line would be
-missing from its own, whose `expect:` then fails.
+Each client prints what it read and reports it to root, which checks that `a`
+received exactly `hi a` and `b` exactly `to b` (`root::check::console`). Then
+the type-ahead line, typed while `a` has no `Read`, waits for `a` and answers
+its next `Read` at once. Last, the drain shows that nothing else reached any
+client, root included: once every drain step's `Read` is made (root lets every
+thread above priority 1 run until it blocks, `spawn::let_others_run`) and
+console has taken all three (root's `Sync`, queued behind any it has not, is
+answered) and every thread has blocked again, a `Read` console answered would
+have its client's report waiting on D, so root's `NBRecv` on D must find
+nothing (`check::drained`). Each client reports first that it has its drain
+step, so a step that never reached a client hangs the test rather than passing
+it. Root then prints `TEST PASS` through console, syncs and calls
+`DebugHalt(0)`; the scenario ends with `DEBUG HALT 0 from TCB` and exit
+success. The echoed lines (`b> to b`) are in the transcript but not expected,
+since whether a prompt shows depends on whether the client's `Read` arrived
+before its input; host tests pin echo exactly. Typed bytes reach console only
+after uart's service routine, which alone signals `RX_READY`, has run for
+them, so the input part shows receive interrupts at work; MR3 shows transmit
+interrupts. `expect:` matches substrings, so wholeness rests on the pieces:
+every piece of the interleaved lines is distinct, and a piece console put
+inside another line would be missing from its own, whose `expect:` then fails.
 
 **`release`** (`kernel: release`, `cmdline: test=release`). The loader prints
 as always; the kernel prints nothing. Root issues the COM1 range, IRQ 4 and,
@@ -5104,9 +5157,12 @@ output, and prints through console:
   overruns), then `TEST PASS`.
 
 Then `Sync`, and `IOPort_Out32(0xF4, 0x10)` ends the run. xtask expects those
-lines in order and exit success, and has `forbid: microL4 kernel`, `forbid:
-bootinfo:`, `forbid: DEBUG HALT` and `forbid: KERNEL PANIC`, which a kernel
-with `debug` would print. With `cargo xtask test`'s disassembly of the same
+lines in order and exit success, with `next: root: microL4 root task` right
+after the loader's `entering kernel`, so no line may come between the two:
+a release kernel that printed anything at boot fails, whatever it printed.
+It also has `forbid: microL4 kernel`, `forbid: bootinfo:`, `forbid: DEBUG
+HALT` and `forbid: KERNEL PANIC`, which a kernel with `debug` would print
+later too. With `cargo xtask test`'s disassembly of the same
 kernel, this is M7's "the release kernel contains no UART code". A server
 fault there ends the run with failure and a `TEST FAIL` line through `watch`;
 a root-task fault has no handler and no output, so it shows only as the
@@ -5118,10 +5174,10 @@ a root-task fault has no handler and no output, so it shows only as the
 | --- | --- | --- |
 | Byte strings, labels, error labels; the two clients; `print!`'s output and `exit`; the device invocations | `libsys::proto`, `libsys::console`, `libsys::uart`, `libsys::output`, `libsys::device` | round trips for every `n` from 0 to 952, each `length`, `BadLength` cases, the ignored high bytes; writes split at 952; `fmt::Write`; `Polled` against a model port; each device invocation's message |
 | The 16550 driver: registers, setup, the service routine, the rings, held requests, requests; `uart::run`, the loop | crate `uart` (`user/uart`), `no_std`, `#![forbid(unsafe_code)]`, generic over a port trait; `run` for the target only | against a 16550 model (IIR priorities, THRE cleared by an IIR read or a THR write, 16-byte FIFOs, the trigger and the timeout, OE, OUT2 and an edge-triggered line; a transmitter that takes a byte time per byte, and one that empties at once as QEMU's does) and an I/O APIC pin with the kernel's Ack rule that drops edges while masked: setup's accesses in order; in 400 random interleavings of host input, transmit progress, a kernel writer (with FIFOs only: [Sharing COM1 with a debug kernel](#sharing-com1-with-a-debug-kernel)) and uart's steps, uart never loses a byte, overflows the FIFO, or blocks with a cause pending and no signal (`random_interleavings_lose_nothing_and_never_strand_uart`); the same model finds such a state when the loop services before it Acks, so the test can tell (`servicing_before_the_ack_strands_uart`); on a working device with input no faster than the line rate the limit of 64 is never reached; held Writes released in order; Drain answered only when empty; a full ring stops and resumes reception; a device whose IIR never clears is left after 64 reads |
-| The terminal: clients, output arbitration, line editing, focus; `console::run`, the loop | crate `console` (`user/console`), the same way | golden byte transcripts for every row of the event and input tables; a proptest of random writes at random boundaries, flushes, reads and typed bytes, focus keys included, by eight clients against a model of per-client lines, checking the invariants below |
+| The terminal: clients, output arbitration, line editing, focus, how a client's bytes are shown; `console::run`, the loop | crate `console` (`user/console`), the same way | golden byte transcripts for every row of the event and input tables and for every byte's shown form, in output, prompts and names; the M7 red team's attack over a VT100 screen model (`tests/redteam.rs`); a proptest of random writes of any bytes at random boundaries, flushes, reads and typed bytes, focus keys included, by eight clients against a model of per-client lines, checking the invariants below |
 | Building a server's VSpace and CSpace; `watch` | the plan and `watch`'s failure line in `root::process` (`user/root/src/process.rs`, in the root crate's library); the invocations and `watch` itself in `user/root/src/servers.rs`, in the program | the page plan of M6's image, of an image across a 2 MiB boundary, and of segments with gaps; no scratch page when the mapping ends on a 2 MiB boundary; `watch`'s failure line for each fault type |
-| The two tests | `user/root/src/console.rs`, `release.rs`; verdicts in `root::check::console` | the script, the reports' layout, the lines each client must receive, uart's totals, the probe's faults |
-| The directives and the release kernel | `xtask/src/scenario.rs`; the release kernel in `xtask/src/compile.rs`, its disassembly check in `xtask/src/disasm.rs` | parsing `send:` escapes and placement, the 4 KiB cap, `kernel:`, `forbid:` and `exit: timeout`; the matcher releasing each send after the expects above it, and consecutive sends together; each disassembly rule on a listing that breaks it, and on one that passes |
+| The two tests | `user/root/src/console.rs`, `release.rs`; verdicts in `root::check::console` | the script (the drain's one `Read` per client, root's included, last), the reports' layout, the lines each client must receive, the drain's verdict, uart's totals, the probe's faults |
+| The directives and the release kernel | `xtask/src/scenario.rs`; the release kernel in `xtask/src/compile.rs`, its disassembly check in `xtask/src/disasm.rs` | parsing `send:` escapes and placement, the 4 KiB cap, `kernel:`, `forbid:`, `next:` and its placement, and `exit: timeout`; the matcher releasing each send after the expects above it, and consecutive sends together, and taking a `next:` only at the start of the next line, failing on a line between, a line that only contains it, or the text further along the same line; each disassembly rule on a listing (or, for data, an ELF) that breaks it, and on one that passes |
 
 `cargo xtask test` runs the host tests of `uart` and `console` beside
 `libsys`'s and `root`'s, and `cargo xtask clippy` lints both crates for the
@@ -5140,15 +5196,16 @@ release kernel.
 | uart never blocks except in its receive on U: it sends only to reply capabilities and signals only NC; the one endpoint it could send on is its fault endpoint, which only the kernel uses | `uart::run` (`user/uart/src/run.rs`) receives with `Recv` and `ReplyRecv` on U, answers held requests with `Send` on slot 7, a reply capability, and signals only slot 5; `uart::slot` holds no other capability it could send on but F; review | M7 |
 | uart never writes more than 15 bytes into the FIFO per THRE seen, so with working FIFOs even a debug kernel's byte cannot overflow it | `Uart` writes at most its burst, 15 with working FIFOs and 1 without, after each THRE it sees; `random_interleavings_lose_nothing_and_never_strand_uart` checks the most bytes after one THRE against the burst and that the model's FIFO never overflows, with a debug kernel's writer on devices with FIFOs (without them a kernel byte can be lost: [Sharing COM1 with a debug kernel](#sharing-com1-with-a-debug-kernel)) | M7 |
 | uart never blocks with an interrupt cause pending and no signal pending, whatever the order of device events, edges dropped on a masked pin included | `Uart::on_interrupt` Acks before every service routine, which drains until IIR is clear (ADR 0028); `servers::start` refuses a level or active-low route for IRQ 4; host test `random_interleavings_lose_nothing_and_never_strand_uart`, which fails if uart waits with the line high, against a pin model that drops edges while masked, and `servicing_before_the_ack_strands_uart`, which shows the model finds the old order's stranding; the `console` and `release` scenarios' typed input | M7 |
-| Every byte queued for transmit is sent once and in order; every byte received, unless overrun, reaches console once and in order | host tests `random_interleavings_lose_nothing_and_never_strand_uart` (every byte console wrote on the wire once and in order, the kernel's beside them; every byte the host sent received, or with overruns the survivors in order), `a_write_that_does_not_fit_is_held_and_released_in_order` and `a_full_ring_stops_and_resumes_reception`; the `console` and `release` scenarios, where uart's `Stats` count exactly the 22 and 14 bytes the harness sent (`root::check::console`, host test `uarts_totals`) | M7 |
+| Every byte queued for transmit is sent once and in order; every byte received, unless overrun, reaches console once and in order | host tests `random_interleavings_lose_nothing_and_never_strand_uart` (every byte console wrote on the wire once and in order, the kernel's beside them; every byte the host sent received, or with overruns the survivors in order), `a_write_that_does_not_fit_is_held_and_released_in_order` and `a_full_ring_stops_and_resumes_reception`; the `console` and `release` scenarios, where uart's `Stats` count exactly the 60 and 14 bytes the harness sent (`root::check::console`, host test `uarts_totals`) | M7 |
 | Whenever uart waits, IER.THRI is set exactly while the transmit queue holds bytes or a Drain is held, and IER's data bit is clear only while the receive ring is full | `Uart::wanted_ier`; `random_interleavings_lose_nothing_and_never_strand_uart` compares the model's IER with it each time uart waits; host tests `a_drain_is_answered_only_when_the_queue_and_fifo_are_empty` and `a_full_ring_stops_and_resumes_reception` | M7 |
-| console emits each client's bytes once and in order, `\n` as `\r\n`; a line of at most 512 bytes that its client does not flush midway reaches the wire with no other byte from console inside it | `Terminal::write`, `flush` and `read`; the proptest `eight_clients_against_a_model_of_their_lines` (512 cases of up to 120 operations), which checks each client's bytes on the terminal against the model's and that each whole line's bytes are consecutive; goldens `a_write_that_completes_lines_sends_them_whole`, `a_break_comes_only_after_another_clients_line` and `held_bytes_go_out_at_512`; the `console` scenario's interleaved and burst parts | M7 |
-| Each typed line reaches exactly one client, the one focused while its bytes were read, as edited; echo, status and redrawn lines reach no client | `Terminal::input` routes each byte by the focus when it is read, and only Enter hands a line to a client; the proptest, which compares every line a typed byte completes, and its client, with the model's; goldens for every row of the input table and `the_scenarios_input_reaches_the_right_clients`; the `console` scenario, where root checks each client's lines (`root::check::console`, host test `each_client_reads_its_line_and_nothing_else`) | M7 |
+| console emits each client's bytes once and in order, `\n` as `\r\n` and every byte but printable ASCII and tab as its visible escape; a line of at most 512 bytes that its client does not flush midway reaches the wire with no other byte from console inside it | `Terminal::write`, `flush` and `read`, through `put_shown` (`console::shown`); the proptest `eight_clients_against_a_model_of_their_lines` (512 cases of up to 120 operations), which checks each client's bytes on the terminal against the model's, its own rendering of the escapes, and that each whole line's bytes are consecutive; goldens `a_write_that_completes_lines_sends_them_whole`, `a_break_comes_only_after_another_clients_line`, `held_bytes_go_out_at_512` and `a_clients_control_bytes_are_shown_not_sent`; the `console` scenario's interleaved and burst parts | M7 |
+| No client can move the terminal's cursor out of its own line: none can erase or overwrite console's status line or another client's line | the escapes above, on a client's output, prompt and `Attach` name alike; the proptest, which fails any byte of a client's output or prompt that reaches the terminal as a control byte but tab and the CR LF that ends its line; the M7 red team's tests (`user/console/src/tests/redteam.rs`, `docs/redteam/m7-console-escapes.md`), which run its cursor-up and erase attack over a VT100 screen model and find console's status line kept. A client can still print text that looks like a status line, on a line of its own | M7 |
+| Each typed line reaches exactly one client, the one focused while its bytes were read, as edited; echo, status and redrawn lines reach no client | `Terminal::input` routes each byte by the focus when it is read, and only Enter hands a line to a client; the proptest, which compares every line a typed byte completes, and its client, with the model's; goldens for every row of the input table and `the_scenarios_input_reaches_the_right_clients`; the `console` scenario, where root checks each client's lines (`root::check::console`, host test `each_client_reads_its_line_and_nothing_else`) and its drain finds no line left for root, `a` or `b` (host test `a_drain_read_answered_is_something_more`) | M7 |
 | Every `Read` is answered at most once, and exactly once if its client survives and a line is typed for it | an Enter answers a saved `Read` once and clears it, and `CNode_SaveCaller` refuses a second save, which console answers with `Busy`; the proptest, which compares every `Read`'s answer (a line, saved, or `Busy`) with the model's; golden `enter_answers_the_saved_read_or_joins_the_waiting_lines` | M7 |
 | console never blocks on a client; it blocks only in calls to uart, which always reply | `console::run` (`user/console/src/run.rs`) answers clients only by `ReplyRecv` or by `Send` on a saved reply capability, and calls only uart, whose requests always get a reply (a held one later); review | M7 |
 | Priorities: uart above console above its clients | `servers.rs`'s `WATCH_PRIORITY`, `UART_PRIORITY`, `CONSOLE_PRIORITY` and `CLIENT_PRIORITY`, set with `TCB_SetSchedParams` with an equal MCP; both scenarios print them | M7 |
-| A server fault ends the run with failure, whatever root is waiting on, and a client fault reaches root, which never waits in a call to a client | `watch` (`servers.rs`), which only receives on F and ends the run through `Polled` and the exit port or `DebugHalt(1)`; its failure line, host test `watchs_line_for_each_fault`; clients driven through their `Call`s on D, their fault endpoint; review. No scenario makes a server fault | M7 |
-| In a release kernel, everything on COM1 after the loader comes from uart, or from `watch` once a server has faulted | the `release` scenario's `forbid:` lines; the disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)); `watch` writes only through `Polled` on root's COM1 IOPort | M7 |
+| A server fault ends the run with failure, whatever root is waiting on, and a client fault reaches root, which never waits in a call to a client | `watch` (`servers.rs`), which only receives on F and ends the run through `Polled` and the exit port or `DebugHalt(1)`; its failure line, host test `watchs_line_for_each_fault`; clients driven through their `Call`s on D, their fault endpoint; review; the `release_fault` scenario, where root revokes its COM1 IOPort, deleting uart's copy, while root waits in console's `Write` and console in uart's: uart's port access fails, its panic's `DebugPutChar` raises `UnknownSyscall`, and `watch` writes `TEST FAIL: uart fault 2` through `Polled` and ends the run with failure, on a kernel that prints nothing | M7 |
+| In a release kernel, everything on COM1 after the loader comes from uart, or from `watch` once a server has faulted | the `release` and `release_fault` scenarios' `next:`, which puts the root task's first line right after the loader's last, and `release`'s `forbid:` lines; the disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)); `watch` writes only through `Polled` on root's COM1 IOPort | M7 |
 
 ### Compared with seL4
 
