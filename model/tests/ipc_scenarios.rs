@@ -8,7 +8,7 @@ use l4core::regs::Fault;
 use l4core::syscall::Outcome;
 use l4model::ipc::{Buffer, Info, MCap, NState, State, sysno, word};
 use l4model::ipc_harness::{
-    Action, BAD_CPTR, Config, NO_BUFFER_THREAD, RO_THREAD, World, info, slot,
+    Action, BAD_CPTR, Config, NO_BUFFER_THREAD, RO_THREAD, RW, THREADS, World, info, second, slot,
 };
 
 fn world() -> World {
@@ -1602,6 +1602,115 @@ fn signals_and_fault_messages_move_no_capabilities() {
     assert_eq!(state(&w, 0), State::BlockedOnReply);
     assert_eq!(Info::decode(w.m.threads[3].regs.rsi).extra_caps, 0);
     assert_eq!(root(&w, FREE), MCap::Null);
+}
+
+// ---------------------------------------------------------------------------
+// Two CSpaces
+// ---------------------------------------------------------------------------
+
+/// A world where thread 3's CSpace root is the second CNode, whose slot `n`
+/// holds another capability than the root's, or none.
+fn two_cspaces() -> World {
+    let mut second_cspace = [false; THREADS];
+    second_cspace[3] = true;
+    World::new(&Config {
+        second_cspace,
+        ..Config::default()
+    })
+}
+
+fn in_second(w: &World, s: u64) -> MCap {
+    w.m.cap((1, s as usize))
+}
+
+#[test]
+fn each_side_of_a_transfer_names_capabilities_in_its_own_cspace() {
+    let mut w = two_cspaces();
+    // Thread 3's receive slot is its slot 16; the root's slot 16 holds
+    // thread 0's TCB capability, and its slot 28, which thread 0 sends,
+    // is empty in the second CNode.
+    step(&mut w, recv_into(3, second::EP0, second::FREE));
+    step(&mut w, send_caps(0, 3, EP0, &[slot::N0_BADGED]));
+    assert_eq!(Info::decode(w.m.threads[3].regs.rsi).extra_caps, 1);
+    let n0 = MCap::Notification {
+        ntfn: 0,
+        badge: 0x100,
+        rights: RW,
+    };
+    assert_eq!(in_second(&w, second::FREE), n0);
+    assert_eq!(root(&w, second::FREE), MCap::Tcb(0));
+    // Back the other way: thread 3's slot 7 is endpoint 0 with badge 0x11,
+    // which unwraps, and its slot 12 notification 1 with badge 0x800; the
+    // root's are endpoint 0 with Write only and endpoint 1.
+    step(&mut w, recv_into(0, EP0, FREE));
+    step(
+        &mut w,
+        send_caps(3, 3, second::EP0, &[second::EP0_BADGED, second::N1_BADGED]),
+    );
+    let info = Info::decode(w.m.threads[0].regs.rsi);
+    assert_eq!((info.extra_caps, info.caps_unwrapped), (2, 0b01));
+    assert_eq!(w.m.threads[0].words[word::CAPS_OR_BADGES], 0x11);
+    let n1 = MCap::Notification {
+        ntfn: 1,
+        badge: 0x800,
+        rights: RW,
+    };
+    assert_eq!(root(&w, FREE), n1);
+    // A receive slot in another CNode, through the copy of the root
+    // CNode's capability in thread 3's slot 15; the root's slot 15 is an
+    // endpoint.
+    step(
+        &mut w,
+        Action::recv(3, second::EP0).with_words(receive_slot(second::ROOT_CNODE, FREE + 1, 64)),
+    );
+    step(&mut w, send_caps(0, 3, EP0, &[N1]));
+    assert!(matches!(
+        root(&w, FREE + 1),
+        MCap::Notification { ntfn: 1, .. }
+    ));
+    assert_eq!(in_second(&w, FREE + 1), MCap::Null);
+}
+
+#[test]
+fn a_fault_endpoint_and_cnode_invocations_resolve_in_the_threads_own_cspace() {
+    let mut w = two_cspaces();
+    // Thread 3's fault endpoint `CPtr` is 0, empty in both CNodes: the
+    // fault finds no handler. Then its slot 2, endpoint 1, which is
+    // endpoint 0 in the root.
+    let fault = Action::Exception {
+        t: 3,
+        vector: 6,
+        error: 0,
+        cr2: 0,
+    };
+    assert!(matches!(step(&mut w, fault.clone()), Outcome::Stopped(_)));
+    let mut second_cspace = [false; THREADS];
+    second_cspace[3] = true;
+    let mut fault_eps = Config::default().fault_eps;
+    fault_eps[3] = second::EP1;
+    let mut w = World::new(&Config {
+        fault_eps,
+        second_cspace,
+        ..Config::default()
+    });
+    step(&mut w, fault);
+    assert_eq!(w.m.endpoints[1].queue, [3]);
+    assert_eq!(w.m.endpoints[0].queue, []);
+    // `CNode_Delete` through `CPtr` 1 deletes in thread 3's own CNode.
+    let mut w = two_cspaces();
+    step(&mut w, Action::delete(3, true, second::N0_W_BADGED));
+    assert_eq!(w.m.threads[3].regs.rsi, 0);
+    assert_eq!(in_second(&w, second::N0_W_BADGED), MCap::Null);
+    assert!(matches!(
+        root(&w, second::N0_W_BADGED),
+        MCap::Endpoint { ep: 3, .. }
+    ));
+    // So does `CNode_SaveCaller`, into thread 3's slot 20.
+    step(&mut w, Action::recv(3, second::EP2));
+    step(&mut w, Action::call(0, EP2, 0, 0, [0; 4]));
+    step(&mut w, Action::save_caller(3, true, 20));
+    assert_eq!(in_second(&w, 20), MCap::Reply { to: 0, grant: true });
+    assert_eq!(root(&w, 20), MCap::Tcb(4));
 }
 
 // ---------------------------------------------------------------------------

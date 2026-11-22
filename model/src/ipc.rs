@@ -326,6 +326,9 @@ pub enum Place {
 pub struct Stats {
     pub copied: u64,
     pub unwrapped: u64,
+    /// Transfers that looked capabilities up, from a sender to a receiver
+    /// with another CSpace root.
+    pub between_cspaces: u64,
     /// Transfers that moved nothing because a re-lookup failed.
     pub relookup_failed: u64,
     /// Transfers that stopped at a capability they could not move.
@@ -1288,6 +1291,9 @@ impl Model {
     ) -> (u64, u64) {
         if !grant || !self.readable(s) || sent.extra_caps == 0 || !self.writable(r) {
             return (0, 0);
+        }
+        if self.threads[s].cspace != self.threads[r].cspace {
+            self.stats.between_cspaces += 1;
         }
         let mut caps = Vec::new();
         for i in 0..sent.extra_caps as usize {
