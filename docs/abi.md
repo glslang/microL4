@@ -1680,8 +1680,11 @@ with the [notification semantics](#notification-semantics) of IPC. Masking:
 
 So between two `Ack`s an I/O APIC pin delivers at most three interrupts: two,
 plus one the local APIC may already hold when the mask lands.
-A driver binds, Acks once, services its device once, then loops: wait,
-service, Ack.
+A driver binds, Acks once, services its device once, then loops. For a
+level pin the loop is wait, service, Ack. For an edge pin it is wait, Ack,
+service: an edge that arrives while the pin is masked may be dropped, so
+the Ack must open the pin before the driver's last look at its device
+(ADR 0028).
 
 #### `0x68` `IRQHandler_Ack`
 
