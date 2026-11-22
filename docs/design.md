@@ -3788,13 +3788,18 @@ them). A second edge before Ack masks the pin, so a device the driver cannot
 or will not quiet (the PIT at its highest rate, say) costs at most three
 interrupts per Ack (two, plus one the local APIC may already hold when the
 mask lands), and interrupt load follows the driver's own scheduling.
-An edge lost while masked comes after a signal the driver has not yet
-handled, so draining the device before Ack still sees it. An MSI cannot be
+An edge lost while masked can belong to a cause the driver's service has
+already passed, so a driver of an edge pin Acks before it services: the
+pin is then open for every cause after its last look at the device, and a
+second edge during service masks it again but leaves a signal, so the
+driver runs once more (ADR 0028). A level line keeps asserting, so its
+driver services first and then Acks. An MSI cannot be
 masked without touching the device; a masked SINT loses message interrupts
 and makes the host's `HvCallSignalEvent` fail (TLFS
-`inter-partition-communication.md`). Every driver runs one loop: wait,
-service, Ack. After `SetNotification` it Acks once and services its device
-once, since an interrupt between issue and binding signalled nothing.
+`inter-partition-communication.md`). A driver of a level pin loops wait,
+service, Ack, and one of an edge pin wait, Ack, service. After
+`SetNotification` either Acks once and services its device once, since an
+interrupt between issue and binding signalled nothing.
 
 ### Delivery
 
@@ -5073,7 +5078,7 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 (answered) | Answered in M6: reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint (`libsys::notification`); a saved reply capability vanishes when its client is suspended or deleted (`libsys::invoke::cnode_save_caller`). `cnode_cancel_badged_sends` says to revoke the badged original first |
 | Are the IMCR ports `0x22` and `0x23` real on q35 and Hyper-V? | They are kept from user space on the assumption that they can route PIC interrupts around the local APIC | M7 | Keep them reserved; reserving an absent port costs nothing |
 | What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Decided by the M7 spec check ([ADR 0027](adr/0027-stale-remote-irr.md)); check in M7. QEMU's I/O APIC is version `0x20`, Hyper-V's `0x11` (the M3 Hyper-V check). Normal operation needs nothing: the local APIC's EOI broadcast clears Remote IRR on any version, as in seL4, because a pin keeps its vector and trigger. For a stale one, issue writes the entry level-triggered and masked, then writes the old vector to the EOI register from version `0x20`, or below it switches the entry to edge-triggered and back, as Linux's `__eoi_ioapic_pin` does (from memory). Masking and unmasking leaves Remote IRR set, and the local APIC broadcasts an EOI only for a vector in service, so neither is an option. A self-test runs both paths on QEMU, whose I/O APIC takes `version=0x11` (from memory). Hyper-V's path stays unchecked: no planned driver there uses a level pin (COM1 is edge; VMBus uses SINTs) |
-| Must a driver of an edge pin Ack before it services, not after? | [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) give every driver the loop wait, service, Ack, and say that an edge lost while masked comes after a signal the driver has not yet handled; but two deliveries whose signals merge before the driver's receive mask the pin, and a cause after its last poll then loses its edge with no signal pending on an I/O APIC that drops edges while masked, as QEMU's does (from memory: `ioapic_set_irq`, `hw/intc/ioapic.c`, where [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) says QEMU latches them) | M7 | Yes: `uart` runs wait, Ack, service ([The loop](#the-loop)), and a level pin's driver keeps wait, service, Ack. The kernel's behaviour does not change; the two sentences and the QEMU claim need the lead's correction, with an ADR for `docs/abi.md` |
+| Must a driver of an edge pin Ack before it services, not after? | [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) give every driver the loop wait, service, Ack, and say that an edge lost while masked comes after a signal the driver has not yet handled; but two deliveries whose signals merge before the driver's receive mask the pin, and a cause after its last poll then loses its edge with no signal pending on an I/O APIC that drops edges while masked, as QEMU's does (from memory: `ioapic_set_irq`, `hw/intc/ioapic.c`, where [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) says QEMU latches them) | M7 (answered) | Answered in M7: yes (ADR 0028). A driver of an edge pin loops wait, Ack, service, and one of a level pin wait, service, Ack; [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) now say so. The kernel's behaviour does not change. Whether QEMU latches an edge on a masked pin or drops it, the Ack-first loop loses nothing, so the claim stays from memory. |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
 | Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 | Yes; raise the radix to 13 if not |
 | Does Hyper-V's COM1 behave as a 16550A for `uart`: FIFOs (IIR bits 6 and 7), the character timeout, a THRE interrupt when THRI is set with the FIFO empty, OUT2 gating the line, and a transmitter that drains with no client on the named pipe? | `uart`'s setup, its 15-byte burst and its lost-interrupt reasoning assume it ([`uart`](#uart)); a transmitter that stalls without a pipe client would hold console's writes, and every client's, for good | M8 Hyper-V check | Yes, as Linux guests' 8250 driver assumes there (from memory); without FIFOs `uart` falls back to 1-byte bursts. Boot `test=release` with a client on the pipe and type its line, then once with none |
