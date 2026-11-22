@@ -8,8 +8,15 @@
 //! - [`syscall`] wraps every system call of `docs/abi.md`, "System calls",
 //!   the debug ones included, with messages as [`MessageInfo`] and message
 //!   registers laid out by `l4core::ipc`.
-//! - [`invoke`] performs the Untyped, CNode and TCB invocations, and
-//!   [`Error`] is the error a failed one returns, decoded.
+//! - [`transfer`] lays out messages with words past MR3 and extra
+//!   capabilities, and reads what a receive says about the capabilities it
+//!   got ([`ReceivedCaps`]); [`Ipc`] names the receive slot.
+//! - [`notification`] signals, waits and polls, and tells a bound
+//!   notification's signal from a message ([`Event`]).
+//! - [`invoke`] performs the Untyped, CNode and TCB invocations,
+//!   `CNode_SaveCaller`, `CNode_CancelBadgedSends` and the notification
+//!   binding included, and [`Error`] is the error a failed one returns,
+//!   decoded.
 //! - [`objects`] hands out the root task's free slots and picks the untyped
 //!   its objects are retyped from.
 //! - [`print!`] and [`println!`] write through `DebugPutChar`; the panic
@@ -33,14 +40,17 @@ pub mod cpu;
 mod debug;
 pub mod error;
 pub mod invoke;
+pub mod notification;
 pub mod objects;
 #[cfg(target_os = "none")]
 mod start;
 pub mod syscall;
+pub mod transfer;
 
 pub use l4core::bootinfo::{self, BootInfo};
 pub use l4core::cap::{ObjectType, Rights};
 pub use l4core::cmdline;
+pub use l4core::error::{LookupFailure, SyscallError};
 pub use l4core::ipc::{self, IpcBuffer, MessageInfo};
 pub use l4core::regs::{UserReg, fault_label};
 
@@ -50,7 +60,9 @@ pub use debug::_print;
 pub use debug::{Console, debug_dump_scheduler, debug_halt, debug_put_char};
 pub use error::Error;
 pub use invoke::{IpcBufferFrame, Registers, Reply, Slot};
+pub use notification::{Event, poll, signal, wait};
 pub use objects::{AllocError, ObjectAlloc, SlotAlloc, UntypedAlloc};
 pub use syscall::{
     CPtr, Ipc, Message, Received, call, nb_recv, nb_send, recv, reply, reply_recv, send, yield_now,
 };
+pub use transfer::{Arrival, ReceivedCaps, compose};

@@ -1,0 +1,49 @@
+# M6's done-when: the capability-transfer scenario (user/root/src/captransfer.rs;
+# docs/abi.md, "Capability transfer"). The root task, client C, retypes
+# endpoints E and E2, frames F and F2, and a server S with an IPC buffer
+# and a CSpace of its own: a 64-slot CNode with a 58-bit guard holding E
+# with Read and Grant, E with Read only, the CNode itself and the root
+# task's VSpace, so S can use only that and what it receives. C maps F at
+# 0x501000 and writes 0xc0ffeecab5f00d there. C then calls E once per
+# step, and S, which names the step's receive slot first, answers with
+# what it saw: the MessageInfo and badge, its caps_or_badges (preset to
+# sentinels), which of its slots 8 to 11 hold a capability (CNode_Move of
+# a slot onto itself: DeleteFirst if full) and the word it read. The
+# steps: an endpoint capability arrives and S calls C back through it with
+# its badge; a frame arrives and S maps it at 0x502000 and reads C's word;
+# without Grant nothing moves; capabilities to E arrive unwrapped as their
+# badges, 0 included, whatever their rights, leaving the slot to F2; an
+# occupied slot ends the transfer; one message copies at most one
+# capability; a reply carries a capability only through a reply capability
+# with Grant, copied, never unwrapped; S's frame copy survives C revoking
+# and deleting the copy it sent (siblings), and goes, with its mapping,
+# when C revokes F (its parent), as S's endpoint copy does with C's E2
+# capability.
+cmdline: test=captransfer
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=captransfer"
+expect: root: microL4 root task
+expect: root: cmdline "test=captransfer"
+expect: captransfer: server S (TCB slot
+expect: priority 200) has a CSpace of its own, a 64-slot CNode
+expect: captransfer: client C, the root task, calls E (slot
+expect: mapped at 0x501000, holding 0xc0ffeecab5f00d
+expect: captransfer: ok   step 0: an endpoint capability: S calls C back through its copy: S received extra_caps 1, caps_unwrapped 0b000, copied capability 0; S's slots 8 to 11 full: 1000
+expect: captransfer: ok   step 0: S called back through its copy of C's E2 capability, and C received the call with its badge 0xe2
+expect: captransfer: ok   step 1: a frame capability: S maps its copy and reads what C wrote: S received extra_caps 1, caps_unwrapped 0b000, copied capability 0; S's slots 8 to 11 full: 1100
+expect: captransfer: ok   step 2: without Grant nothing moves, not even a capability to E: S received extra_caps 0, caps_unwrapped 0b000, copied none; S's slots 8 to 11 full: 1100
+expect: captransfer: ok   step 3: capabilities to E arrive unwrapped as their badges, whatever their rights, and leave the slot to F2: S received extra_caps 3, caps_unwrapped 0b011, copied capability 2; S's slots 8 to 11 full: 1110
+expect: captransfer: ok   step 4: an occupied receive slot ends the transfer at F2, after the unwrapped capability: S received extra_caps 1, caps_unwrapped 0b001, copied none; S's slots 8 to 11 full: 1110
+expect: captransfer: ok   step 5: one copy per message: the second capability finds the slot used: S received extra_caps 1, caps_unwrapped 0b000, copied capability 0; S's slots 8 to 11 full: 1111
+expect: captransfer: ok   step 6: a reply through a reply capability with Grant carries S's capability to E, copied, not unwrapped
+expect: captransfer: ok   step 6: the reply's capability is in C's slot
+expect: and an NBRecv on it returns nothing pending
+expect: captransfer: ok   step 7: a reply to a call S received without Grant carries nothing
+expect: captransfer: ok   step 7: C's slot
+expect: stayed empty
+expect: captransfer: ok   step 8: C revoked and deleted the frame copy it sent: S's copy, its sibling, still maps the frame: S received extra_caps 0, caps_unwrapped 0b000, copied none; S's slots 8 to 11 full: 1111
+expect: captransfer: ok   step 9: C revoked F and its E2 capability: S's copies, their children, are gone: S received extra_caps 0, caps_unwrapped 0b000, copied none; S's slots 8 to 11 full: 0011
+expect: captransfer: ok   step 9: S's mapping at 0x502000 went with its copy (F2 maps there now), and C's own mapping of F still reads 0xc0ffeecab5f00d
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

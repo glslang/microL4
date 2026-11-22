@@ -7,8 +7,8 @@
  *
  * Stacks follow .bss, each a segment of its own above an unmapped guard
  * page that no segment covers, so an overflow faults instead of
- * overwriting what lies below: two thread stacks, .thread_stack.0 and
- * .thread_stack.1 (the root task's spawn.rs; a program without them gets
+ * overwriting what lies below: six thread stacks, .thread_stack.0 to
+ * .thread_stack.5 (the root task's spawn.rs; a program without them gets
  * empty segments, which the kernel ignores), then libsys's .libsys_stack.
  * The image ends at the top of the libsys stack; the kernel maps the IPC
  * buffer and BootInfo right after it.
@@ -22,6 +22,10 @@ PHDRS
     data    PT_LOAD FLAGS(6);   /* R W */
     thread0 PT_LOAD FLAGS(6);   /* R W */
     thread1 PT_LOAD FLAGS(6);   /* R W */
+    thread2 PT_LOAD FLAGS(6);   /* R W */
+    thread3 PT_LOAD FLAGS(6);   /* R W */
+    thread4 PT_LOAD FLAGS(6);   /* R W */
+    thread5 PT_LOAD FLAGS(6);   /* R W */
     stack   PT_LOAD FLAGS(6);   /* R W */
 }
 
@@ -71,6 +75,38 @@ SECTIONS
         KEEP(*(.thread_stack.1))
         . = ALIGN(4K);
     } :thread1
+
+    . = ALIGN(4K) + 4K;
+
+    .thread_stack2 (NOLOAD) : ALIGN(4K)
+    {
+        KEEP(*(.thread_stack.2))
+        . = ALIGN(4K);
+    } :thread2
+
+    . = ALIGN(4K) + 4K;
+
+    .thread_stack3 (NOLOAD) : ALIGN(4K)
+    {
+        KEEP(*(.thread_stack.3))
+        . = ALIGN(4K);
+    } :thread3
+
+    . = ALIGN(4K) + 4K;
+
+    .thread_stack4 (NOLOAD) : ALIGN(4K)
+    {
+        KEEP(*(.thread_stack.4))
+        . = ALIGN(4K);
+    } :thread4
+
+    . = ALIGN(4K) + 4K;
+
+    .thread_stack5 (NOLOAD) : ALIGN(4K)
+    {
+        KEEP(*(.thread_stack.5))
+        . = ALIGN(4K);
+    } :thread5
 
     . = ALIGN(4K) + 4K;
 

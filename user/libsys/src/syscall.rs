@@ -12,7 +12,9 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use l4core::ipc::{IPC_BUFFER_SIZE, IPC_BUFFER_WORDS, IpcBuffer, MSG_REG_COUNT, MessageInfo};
-use l4core::ipc::{MrLocation, MsgReg, mr_location};
+use l4core::ipc::{MSG_MAX_EXTRA_CAPS, MrLocation, MsgReg, mr_location, word};
+
+use crate::invoke::Slot;
 
 /// A capability pointer, resolved in the caller's CSpace.
 pub type CPtr = u64;
@@ -112,7 +114,9 @@ pub unsafe fn syscall(number: u64, rdi: u64, msg: &Message) -> Received {
 }
 
 /// `Send`: sends `msg` to `dest`, blocking until it is taken. On a kernel
-/// object it performs the invocation and drops the reply.
+/// object it performs the invocation and drops the reply; on a
+/// notification it signals ([`crate::signal`]); on a reply capability
+/// saved with `CNode_SaveCaller` it replies and consumes the capability.
 pub fn send(dest: CPtr, msg: &Message) {
     // SAFETY: Send changes no register but rcx and r11, and no fault it
     // raises sets one.
@@ -236,6 +240,52 @@ impl Ipc {
             Some(MrLocation::Register(r)) => panic!("MR{i} travels in {}", r.name()),
             None => panic!("MR{i} past the last message register"),
         }
+    }
+
+    /// Writes `caps` to `caps_or_badges[0..caps.len()]`, the capability
+    /// pointers a send names (`docs/abi.md`, "Capability transfer"); the
+    /// message's `extra_caps` must say how many. Panics past three.
+    pub fn set_caps(self, caps: &[CPtr]) {
+        assert!(
+            caps.len() <= MSG_MAX_EXTRA_CAPS,
+            "{} extra caps",
+            caps.len()
+        );
+        for (i, &c) in caps.iter().enumerate() {
+            self.set_word(word::CAPS_OR_BADGES + i, c);
+        }
+    }
+
+    /// `caps_or_badges`: after a receive, entry `i` holds the badge of
+    /// extra capability `i` if the kernel unwrapped it, and otherwise what
+    /// it held before (`docs/abi.md`, "IPC buffer semantics").
+    pub fn caps_or_badges(self) -> [u64; MSG_MAX_EXTRA_CAPS] {
+        core::array::from_fn(|i| self.word(word::CAPS_OR_BADGES + i))
+    }
+
+    /// Names the slot a received capability is copied into: `receive_cnode`
+    /// is `slot.root`, a `CPtr` resolved with all 64 bits in this thread's
+    /// CSpace, and `receive_index` and `receive_depth` name the slot from
+    /// that CNode, as a CNode invocation's slot argument does. The kernel
+    /// copies only into an empty slot, and reads these words once per
+    /// message that may carry a capability. `None` writes 0 to all three:
+    /// `CPtr` 0 reaches the null slot of the root task's CSpace, and of any
+    /// CSpace that leaves slot 0 empty, which is no CNode, so nothing is
+    /// copied (capabilities to the endpoint are still unwrapped).
+    pub fn set_receive_slot(self, slot: Option<Slot>) {
+        let s = slot.unwrap_or(Slot::new(0, 0, 0));
+        self.set_word(word::RECEIVE_CNODE, s.root);
+        self.set_word(word::RECEIVE_INDEX, s.index);
+        self.set_word(word::RECEIVE_DEPTH, s.depth);
+    }
+
+    /// The receive slot words as [`Ipc::set_receive_slot`] wrote them.
+    pub fn receive_slot(self) -> Slot {
+        Slot::new(
+            self.word(word::RECEIVE_CNODE),
+            self.word(word::RECEIVE_INDEX),
+            self.word(word::RECEIVE_DEPTH),
+        )
     }
 }
 

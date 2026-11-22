@@ -339,7 +339,7 @@ pub fn run(bi: &BootInfo) -> ! {
     let tcbs = objects
         .retype(ipc, ObjectType::Tcb, 0, 2)
         .unwrap_or_else(|e| fail!("retyping the TCBs: {e}"));
-    for (i, stack) in STACKS.iter().enumerate() {
+    for (i, stack) in STACKS[..2].iter().enumerate() {
         let t = Thread {
             tcb: tcbs + i as u64,
             fault_ep: done,
