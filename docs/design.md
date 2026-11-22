@@ -4445,7 +4445,7 @@ kernel side is in [Interrupts](#interrupts), [I/O ports](#io-ports) and
 one ELF to build, embed and check, and no ELF loader in `root`. They do not
 share root's VSpace, as the M5 and M6 test threads do: `root` builds a VSpace
 for each from its own image frames, so a server writes only its own memory,
-and a fault stops only that server and reaches root. Clients in
+and a fault stops only that server and reaches root's `watch`. Clients in
 `test=console` are test code and run in root's VSpace, each with a CSpace of
 its own.
 
@@ -4460,7 +4460,10 @@ its own.
 | BootInfo's two pages | none | unmapped |
 
 The paging structures are those root's own image range needs (one PDPT, PD
-and PT with M6's image). The IPC buffer sits at root's address, so the
+and PT with M6's image). root fills each fresh data frame through a scratch
+mapping in its own VSpace (a free page under its image's page table, as
+`test=tlb` maps one), unmaps it there, then maps it in the server; a frame
+capability maps once. The IPC buffer sits at root's address, so the
 pointer libsys's `_start` recorded in root's data, which the copy carries,
 names the server's own buffer, and `Ipc::root()` works unchanged. Every other
 static starts as root's value at spawn: server code keeps its state in locals
@@ -4479,28 +4482,31 @@ M6's image, and some 120 KiB of RAM.
 
 uart receives on endpoint U and is bound to notification NU, which IRQ 4
 signals; console receives on endpoint C and is bound to notification NC,
-which uart signals; root receives client reports and every fault on endpoint
-D. Each server's CNode has 16 slots, with guard 0 of size 60 applied through
-`TCB_Configure`, so its CPtr `n` is slot `n`. The slot numbers are constants
-of the server's crate (`uart::slot`, `console::slot`), which `root` fills
-from.
+which uart signals; root receives client reports on endpoint D; root's
+thread `watch` receives the servers' faults on endpoint F
+([Failures](#failures)). Each server's CNode has 16 slots, with guard 0 of
+size 60 applied through `TCB_Configure`, so its CPtr `n` is slot `n`; slot 1
+holds the CNode with the same guard, so `CNode_SaveCaller` on slot 1 names
+slot `n` with `index` `n` and `depth` 64, as root names its own slots. The
+slot numbers are constants of the server's crate (`uart::slot`,
+`console::slot`), which `root` fills from.
 
 | `uart` slot | Capability | Rights, badge |
 | --- | --- | --- |
-| 1 | its own CNode | for `CNode_SaveCaller` |
+| 1 | its own CNode, guard 0 of size 60 | for `CNode_SaveCaller` |
 | 2 | endpoint U, uart's requests | Read |
 | 3 | IOPort `0x3F8`-`0x3FF`, a copy of root's | |
 | 4 | IRQHandler of ISA IRQ 4, a copy of root's, already bound to notification NU | |
 | 5 | console's notification NC | Write, badge `RX_READY` (bit 32) |
-| 6 | root's endpoint D, its fault endpoint | Write, GrantReply, badge `UART` |
+| 6 | endpoint F, its fault endpoint | Write, GrantReply, badge `UART` |
 | 7 | empty: a held request's reply capability | |
 
 | `console` slot | Capability | Rights, badge |
 | --- | --- | --- |
-| 1 | its own CNode | for `CNode_SaveCaller` |
+| 1 | its own CNode, guard 0 of size 60 | for `CNode_SaveCaller` |
 | 2 | endpoint C, console's requests | Read |
 | 3 | endpoint U | Write, GrantReply, badge 1 (the writer) |
-| 4 | endpoint D, its fault endpoint | Write, GrantReply, badge `CONSOLE` |
+| 4 | endpoint F, its fault endpoint | Write, GrantReply, badge `CONSOLE` |
 | 8 to 15 | empty: client `b`'s saved Read reply goes in slot 7 + `b` | |
 
 A client holds endpoint C with Write and GrantReply and a badge from 1 to 8,
@@ -4511,27 +4517,33 @@ capability to console's endpoint: it never sends to console and so can never
 block on it. It signals NC with `RX_READY` when input arrives, and console
 fetches the bytes with a `Call`.
 
-`root` binds before it hands over, so neither server holds a notification it
-could rebind: `IRQControl_GetISA(4)` into its own CNode,
-`IRQHandler_SetNotification` with a capability to NU badged `IRQ` (bit 32),
-`TCB_BindNotification` of uart to NU and of console to NC, then copies of the
-handler and the COM1 IOPort into uart's CNode.
+`root` binds before it hands over, so neither server holds a notification
+with Read and neither can bind or rebind itself: `IRQControl_GetISA(4)` into
+its own CNode, whose flags must say edge and active high (root fails the test
+otherwise, since uart's loop is right only for an edge pin: [The
+loop](#the-loop)), `IRQHandler_SetNotification` with a capability to NU
+badged `IRQ` (bit 32), `TCB_BindNotification` of uart to NU and of console to
+NC, then copies of the handler and the COM1 IOPort into uart's CNode. uart
+could still point its handler at NC, the one notification it can signal; that
+harms only the service it provides.
 
 | `root` keeps | Why |
 | --- | --- |
 | IRQControl and IOPortControl | the servers of M8 and M9 |
-| the original IRQHandler and COM1 IOPort | revoking one takes uart's copy back |
+| the original IRQHandler and COM1 IOPort | revoking one takes uart's copy back; `watch` writes a failure line through the IOPort |
 | the original of every object it retyped for a server | revoking stops the server and reclaims its memory |
 | endpoint C's original, and a client capability with badge 1 | root is console's client 1 |
 | endpoint U with badge 2 | `Stats` only |
-| endpoint D | client reports, and the faults of every server and client |
+| endpoint D | client reports, and the faults of clients and of `test=release`'s probe |
+| endpoint F and the thread `watch` | the servers' faults ([Failures](#failures)) |
 | under QEMU, IOPort `0xF4`-`0xF7` | `isa-debug-exit`, to end a run in any kernel |
 
 #### Server priorities
 
 | Thread | Priority | Why |
 | --- | --- | --- |
-| `root` | 255 | builds everything, then only blocks: on D, or in a call to console |
+| `root` | 255 | builds everything, then only blocks: on D, or in a call to console or uart |
+| `watch` | 255 | blocks only on F; it must run even while root waits in a call to a server that has faulted |
 | `uart` | 200 | above everything it serves, so a receive or THRE interrupt preempts console and clients at once |
 | `console` | 150 | above its clients, as [Priorities](#priorities) asks of every server |
 | clients | 100 | |
@@ -4549,12 +4561,12 @@ on slot 3.
 
 | Step | Access | Why |
 | --- | --- | --- |
-| 1 | IER (1) = 0 | no interrupt during setup |
+| 1 | LCR (3) = `0x03`; IER (1) = 0 | DLAB clear, so offset 1 is IER whatever LCR held; no interrupt during setup |
 | 2 | read LSR (5) until TEMT, at most 10,000 times | bytes the loader, a debug kernel or root wrote leave before the FIFO reset |
 | 3 | LCR (3) = `0x80`; DLL (0) = 1; DLM (1) = 0; LCR = `0x03` | 115,200 baud, 8 data bits, no parity, 1 stop bit: the setting of the kernel's writer and of OVMF |
 | 4 | FCR (2) = `0x87` | FIFOs on and cleared, receive trigger at 8 bytes, as Linux's 8250 driver sets a 16550A (from memory) |
-| 5 | read IIR (2) | bits 6 and 7 both set: working FIFOs, burst 15; otherwise a 16450, burst 1 |
-| 6 | MCR (4) = `0x0B` | DTR, RTS and OUT2, which gates the interrupt line on a PC; the kernel's writer leaves OUT2 off |
+| 5 | read IIR (2) | bits 6 and 7 both set: working FIFOs, burst 15; otherwise a 16450 or a 16550 with broken FIFOs: FCR = 0, burst 1 |
+| 6 | MCR (4) = `0x0B` | DTR, RTS and OUT2, which gates the interrupt line on a PC (QEMU's model does not gate it, from memory); the kernel's writer leaves OUT2 off |
 | 7 | read LSR and MSR (6) | clears latched errors and modem deltas |
 | 8 | IER = `0x05` | received data (with the character timeout) and line status; THRE only while needed; modem status never |
 | 9 | `IRQHandler_Ack`, then the service routine | an interrupt between issue and binding signalled nothing ([IRQControl and IRQHandler](#irqcontrol-and-irqhandler)) |
@@ -4563,13 +4575,20 @@ on slot 3.
 
 uart is bound to NU and receives on U with `Recv`, and with `ReplyRecv` after
 a request it answers at once. A receive is a signal when `rsi` is 0 and `rdi`
-has `IRQ` (`libsys::Event::classify` with bits 32 and up). A signal runs the
-service routine, then `IRQHandler_Ack`: wait, service, Ack, as every driver
-does. A message runs one request. uart sends only to reply capabilities and
-signals only NC, so it blocks nowhere but in its receive.
+has `IRQ` (`libsys::Event::classify` with bits 32 and up). A signal runs
+`IRQHandler_Ack`, then the service routine: wait, Ack, service, the order of
+setup's step 9, and not the wait, service, Ack that
+[IRQHandler](abi.md#irqhandler) describes, which suits a level pin and loses
+interrupts on an edge pin (below). A message runs one request. uart sends
+only to reply capabilities and signals only NC, so it blocks nowhere but in
+its receive.
 
-The service routine reads IIR until bit 0 says no interrupt is pending, at
-most 64 times, and handles each cause in the 16550's priority order:
+The service routine reads IIR until bit 0 says no interrupt is pending and
+handles each cause in the 16550's priority order. A read whose cause moves no
+byte (a line status, THRE with the queue empty, a data cause with LSR.DR
+clear) counts toward a limit of 64 a routine; the reads that move bytes are
+bounded by the queue and the ring, since a full ring clears IER's data bit
+and an empty queue clears IER.THRI.
 
 | IIR bits 1 to 3 | Cause | uart | Cleared by |
 | --- | --- | --- | --- |
@@ -4581,24 +4600,40 @@ most 64 times, and handles each cause in the 16550's priority order:
 If the routine moved any byte into the ring, it signals NC once.
 
 **Lost interrupts.** Draining until IIR is clear leaves the line low, so the
-next cause makes a new edge. The kernel keeps an edge pin open for the first
-edge after an Ack and masks it only on a second delivery before the Ack, which
-signals too ([IRQControl and IRQHandler](#irqcontrol-and-irqhandler)). So a
-cause that arrives after the routine's last IIR read and before the Ack, even
-one whose edge a masked pin drops, finds a signal already pending, and uart's
-next receive returns at once and services it; uart needs no check of its own
-after the Ack. As insurance against a device that loses a THRE interrupt
-anyway, every Write and Drain first reads LSR and, if THRE is set and bytes
-wait, writes a burst; every Read first moves what LSR.DR shows into the ring.
-The 64-read bound keeps a device whose IIR never clears from holding uart
-forever: uart then Acks, counts it, and its line stays high, so it delivers
-nothing more; that is a broken device.
+next cause makes a new edge. The kernel masks an edge pin on the second
+delivery since the last Ack ([IRQControl and
+IRQHandler](#irqcontrol-and-irqhandler)), and an I/O APIC may drop an edge
+while the pin is masked; QEMU's does (from memory: `ioapic_set_irq`,
+`hw/intc/ioapic.c`, citing the 82093AA). With the Ack first, every delivery
+since the Ack came after the receive that woke uart, so if one masked the pin
+its signal is still pending: a cause that arrives after the routine's last
+IIR read either finds the pin open and makes an edge, or finds a signal
+waiting, and uart's next receive returns at once and services it. Servicing
+before the Ack would lose it: two deliveries while uart handles a request (its
+own accesses can lower the line, and so can a debug kernel's THR write) mask
+the pin, and their signals merge into the one the next receive returns; a
+cause after that routine's last IIR read then loses its edge and finds no
+signal, and the line, held high by the cause, makes no new edge, so input, or
+a held Write and console with it, waits for good. The price is spurious
+signals: uart's own accesses raise the line again within a routine, and QEMU
+takes every raise of its line as a new edge (from memory), so a signal often
+finds IIR clear at its first read. As insurance against a device that loses a
+THRE interrupt anyway, every Write and Drain first reads LSR and, if THRE is
+set and bytes wait, writes a burst; every Read first moves what LSR.DR shows
+into the ring. The limit of 64 keeps a device whose IIR never clears from
+holding uart forever: uart then counts it (`Stats` MR7) and receives again;
+on hardware its line stays high and makes no new edge, so the device is
+served again only when a request touches it: that is a broken device. QEMU
+transmits a burst as it is written and so reports THRE again after each one
+(from memory: `serial_xmit`); one routine then empties the queue, up to 137
+bursts, none of which counts toward the limit.
 
 **Overruns.** An overrun loses bytes; uart counts it (`Stats`) and goes on.
 While the receive ring is full, the data bit stays clear and the 16550 keeps
 what it has. QEMU then takes no more bytes from its character device, since
-its receive path offers the guest only the FIFO's free space (from memory:
-`serial_can_receive`, `hw/char/serial.c`), so input is never lost on QEMU; on
+its receive path never takes more bytes than the FIFO has room for (from
+memory: `serial_can_receive`, `hw/char/serial.c`, which offers at most the
+trigger level), so input is never lost on QEMU; on
 hardware the FIFO overruns and LSR.OE counts it. A Read that frees ring space
 sets the data bit again, and the 16550 raises its data or timeout interrupt
 for what it held.
@@ -4646,7 +4681,7 @@ Byte strings, labels and errors are as for console ([Protocols](#protocols)).
 | `0x110` | `Write` | a byte string of at most 952 bytes | MR0 `n`, once all `n` bytes are queued | `BadLength`, `Busy` |
 | `0x111` | `Read` | none | a byte string: everything the receive ring held | |
 | `0x112` | `Drain` | none | nothing, once the queue and the FIFO are empty | `Busy` |
-| `0x113` | `Stats` | none | MR0 interrupts handled, MR1 bytes received, MR2 bytes sent, MR3 THRE bursts, MR4 overruns, MR5 line errors, MR6 Writes held, MR7 service routines cut short at 64 reads | |
+| `0x113` | `Stats` | none | MR0 signals handled, MR1 bytes received, MR2 bytes sent, MR3 bursts written for a THRE cause in the service routine (not those a request wrote), MR4 overruns, MR5 line errors, MR6 Writes held, MR7 service routines cut short by the limit of 64 | |
 
 `Write`, `Read` and `Drain` need badge 1, console's; any other badge gets
 `BadBadge`. `Stats` takes any badge.
@@ -4686,8 +4721,11 @@ A reply's label is 0 on success. Errors have `length` 0:
 | `0x104` | `BadBadge` | a badge outside the requests' range |
 
 Request labels are above every kernel invocation label (`0x01` to `0x8F`),
-so a request sent on the wrong capability gets `IllegalOperation` from the
-kernel, never a kernel operation; error labels are above the kernel's error
+so a request sent on a kernel object's capability gets `IllegalOperation`
+from the kernel, never a kernel operation (on a notification it is only a
+signal, and on the other server's endpoint `BadLabel`); every request label
+is non-zero, so a request's `rsi` is never 0 and never looks like a signal to
+`Event::classify`; error labels are above the kernel's error
 codes (1 to 10), so a client tells a server's refusal from the kernel's, such
 as `InvalidCapability` for a capability without Write.
 
@@ -4703,8 +4741,10 @@ as `InvalidCapability` for a capability without Write.
 Every request needs a badge from 1 to 8, else `BadBadge`. A client exists from
 its first request and needs no `Attach`; `Attach` only names it in status
 lines. A saved `Read` reply vanishes if its client is suspended or deleted
-(`libsys::invoke::cnode_save_caller`); console learns it only when it answers,
-and the line is then dropped.
+(`libsys::invoke::cnode_save_caller`), leaving slot 7 + `b` empty. console
+cannot tell: its `Send` on the empty slot does nothing, so a line typed for
+the client meanwhile is lost; the client's next `Read` saves into the slot as
+usual, so the slot, not a flag of console's, decides `Busy`.
 
 Neither protocol is in `docs/abi.md`, which is the kernel's and the loader's
 contract: the kernel sees only messages with user labels. Both are defined
@@ -4732,7 +4772,7 @@ or typed bytes.
 
 | Event | console sends, in order | Owner after |
 | --- | --- | --- |
-| A `Write` by `c` completes a line (its held bytes, then the new ones, up to `\n`) | a break; the line, `\n` as `\r\n`; then restoring | none, or input of the focused client |
+| A `Write` by `c` completes one or more lines (its held bytes, then the new ones, up to the last `\n`) | a break; the lines, each `\n` as `\r\n`; then restoring | none, or input of the focused client |
 | `c`'s held bytes reach 512 with no `\n` | a break; the 512 bytes | output of `c` |
 | `Flush` by `c` with held bytes | the same, with the held bytes | output of `c` |
 | `Read` by `c` with a typed line waiting | as `Flush`; the line is the reply, at once | |
@@ -4791,22 +4831,54 @@ literal Ctrl-T.
 | `libsys::console::Client` | a client capability: `attach`, `write` (split into messages of at most 952 bytes), `flush`, `read_line`, `sync`, and `core::fmt::Write` |
 | `libsys::uart::Client` | console's side of uart: `write`, `read`, `drain`, `stats` |
 | `libsys::output` | where `print!` and `println!` go: `DebugPutChar`, the default, or a console client capability (`use_console`, `use_debug`); `set_exit_port` names an IOPort for `isa-debug-exit`; `exit(status)` syncs the console if `print!` goes there, then writes `0x10` (status 0) or `0x11` to that port with `IOPort_Out32` if one is set, and stops, else calls `DebugHalt(status)` |
+| `libsys::output::Polled` | a `core::fmt::Write` on a COM1 IOPort capability that bypasses uart, for [Failures](#failures): before each byte it polls LSR until THRE, at most 100,000 times as the kernel's writer does, then writes THR (`\n` as `\r\n`); after the text it polls for TEMT within the same bound; it touches no other register |
 
 The panic handler and root's `fail!` end with `libsys::exit(1)`, so a test
 that has set an exit port fails at once on a release kernel, where
 `DebugHalt` would be an `UnknownSyscall` fault with no handler; without one,
-everything behaves as before. A server's `DebugHalt` in a release kernel
-faults to root, which ends the run with failure. The output and the exit port
-are statics of a VSpace, and a CPtr names a slot of one CSpace, so:
+everything behaves as before. A server's `DebugHalt` or `DebugPutChar` in a
+release kernel, its panic message included, faults to `watch`, which ends the
+run with failure. The output and the exit port are statics of a VSpace, and a
+CPtr names a slot of one CSpace, so:
 
 - `root` spawns the servers before it points its own output at console, and
   each server's entry sets its output to `DebugPutChar` (a server printing
   through console would call itself);
+- `watch` shares root's VSpace, whose `print!` names console once root has
+  switched, so it never uses `print!`, only `Polled`;
 - threads in root's VSpace with CSpaces of their own, such as
   `test=console`'s clients, write through a `console::Client` of their own;
   `print!` there would use root's CPtr;
 - in `test=release` root prints nothing until console is up, then its usual
   summary through console.
+
+### Failures
+
+root is console's client, so it cannot also be the servers' fault handler: a
+server that faults while root waits in a call to it, or in a call to console
+while console waits on uart, leaves its fault queued on an endpoint no thread
+receives on, and `fail!`'s print and `exit`'s `Sync` would wait on the dead
+server too, until the 60-second limit. So the servers' fault endpoint is F,
+and a thread of root's, `watch`, does nothing but receive on it.
+
+| Item | Rule |
+| --- | --- |
+| `watch` | root's VSpace and CSpace, a stack from `spawn::STACKS`, no IPC buffer (a fault then arrives as MR0 to MR3), no fault endpoint, priority and MCP 255; root starts it before either server, with the CPtrs of F, root's COM1 IOPort and the exit port (0 for none) as its arguments, so root issues the COM1 range, and `0xF4`-`0xF7` in `test=release`, before it starts `watch` |
+| On a message | whatever its label: `TEST FAIL: <the server its badge names> fault <label>, MR0 to MR3 <words>` through `Polled` on root's COM1 IOPort, then the end of the run with failure: `IOPort_Out32(0xF4, 0x11)` if it has an exit port, else `DebugHalt(1)`; it never replies, so the server stays stopped |
+| Its bytes | may fall between bytes uart had already written and a debug kernel's; uart, below watch, does not run while it writes, and `Polled` waits for THRE, so the FIFO cannot overflow |
+
+Faults of clients and of `test=release`'s probe go to D, where root expects
+them ([Scenarios](#scenarios)); root reports a client's fault through
+console, which still answers. root's own `fail!` and panic still print through
+console, and `exit(1)` still syncs: console answers a `Write` once the line is
+in uart's queue, not on the wire, so without the `Sync` the end of the run
+could overtake the failure line. That cannot hang on a faulted server: root
+runs `fail!` only after console has answered its last call, and a server that
+faults during the print or the `Sync` ends the run through `watch`. So a
+failure is reported through console while both servers run, and through
+`Polled` once one has faulted. Only these still end at the 60-second limit: a
+server that stops answering without faulting, and, in a release kernel, a
+fault of root or of `watch`, which have no handler and print nothing.
 
 ### The harness
 
@@ -4843,18 +4915,24 @@ copied out. `cargo xtask run` and `image` keep the selftest kernel; a
 ### Scenarios
 
 **`console`** (`cmdline: test=console`, the selftest kernel). Root prints its
-summary through `DebugPutChar`, builds uart and console, attaches as client 1
-(`root`), points its output at console and starts clients `a` (badge 2) and
-`b` (badge 3), which attach and report on D. Root drives each client one step
-at a time over an endpoint of the client's own and waits for its report, so
-every write boundary is fixed:
+summary through `DebugPutChar`, starts `watch`, builds uart and console,
+attaches as client 1 (`root`), points its output at console and starts
+clients `a` (badge 2) and `b` (badge 3), each with an IPC buffer in KiB 1 or 2
+of root's buffer frame (`spawn`), which attach and report on D. A client asks
+for its next step with a `Call` on D whose message reports on its last one,
+with label `0x130`, above every fault type; its fault endpoint is the same
+capability, D with Write, GrantReply and its client number as badge, so root
+tells a fault from a report by the label. Root answers one client at a time
+and keeps the other's reply capability saved (`CNode_SaveCaller`), so every
+write boundary is fixed, and root blocks only on D or in calls to console and
+uart, never in a call to a client that may fault:
 
 | Part | What the clients do | What the transcript shows |
 | --- | --- | --- |
 | Interleaved lines | `a` writes `a1 alpha `, `b` writes `b1 bravo `, `a` writes `one\n`, `b` writes `one\n`; `b` writes a 300-byte line, `b2` and filler, in three writes of 100 bytes (through the IPC buffer), with `a`'s whole line `a2 short` between them; `a` writes `a3 x\na4 y\na5 ` in one write, `b` writes `b3 z\n`, `a` writes `end\n` | `a1 alpha one`, `b1 bravo one`, `a2 short`, the 300-byte `b2` line, `a3 x`, `a4 y`, `b3 z`, `a5 end`, each whole and in that order |
 | Burst | `b` writes twelve 200-byte lines back to back | `b burst 01` to `b burst 12`, whole; uart may hold some of console's writes (`Stats` MR6) |
-| Input | `a` and `b` each write a prompt and `Read`; root prints `console: input next` | see the steps below |
-| Totals | root asks uart's `Stats` | interrupts and THRE bursts above 0, exactly the 22 bytes the harness sent, 0 overruns and line errors |
+| Input | `a` and `b` each write a prompt and `Read`; root answers both before it prints `console: input next`, then waits on D for both reports | see the steps below |
+| Totals | root asks uart's `Stats` | signals and THRE bursts (MR0, MR3) above 0, exactly the 22 bytes the harness sent, 0 overruns and line errors |
 
 ```text
 expect: console: input next
@@ -4873,12 +4951,18 @@ console, syncs and calls `DebugHalt(0)`; the scenario ends with `DEBUG HALT
 0 from TCB` and exit success. The echoed lines (`b> to b`) are in the
 transcript but not expected, since whether a prompt shows depends on whether
 the client's `Read` arrived before its input; host tests pin echo exactly.
+Typed bytes reach console only after uart's service routine, which alone
+signals `RX_READY`, has run for them, so the input part shows receive
+interrupts at work; MR3 shows transmit interrupts. `expect:` matches
+substrings, so wholeness rests on the pieces: every piece of the interleaved
+lines is distinct, and a piece console put inside another line would be
+missing from its own, whose `expect:` then fails.
 
 **`release`** (`kernel: release`, `cmdline: test=release`). The loader prints
 as always; the kernel prints nothing. Root issues the COM1 range, IRQ 4 and,
-under QEMU (`BootInfo.hypervisor_vendor`), `0xF4`-`0xF7`, builds uart and
-console, attaches as client 1, sets its output and its exit port, and prints
-through console:
+under QEMU (`BootInfo.hypervisor_vendor`), `0xF4`-`0xF7`, sets its exit port,
+starts `watch`, builds uart and console, attaches as client 1, sets its
+output, and prints through console:
 
 - its usual summary (`root: microL4 root task`, the command line, the slot
   regions);
@@ -4888,25 +4972,26 @@ through console:
   probe's registers and `ip` + 2, so the probe goes on to the next;
 - `release: type a line`, then, after `send: release input\r`, `release: read
   "release input"`, since focus starts on client 1;
-- uart's `Stats` (interrupts above 0, 14 bytes received, 0 overruns), then
-  `TEST PASS`.
+- uart's `Stats` (signals and THRE bursts above 0, 14 bytes received, 0
+  overruns), then `TEST PASS`.
 
 Then `Sync`, and `IOPort_Out32(0xF4, 0x10)` ends the run. xtask expects those
 lines in order and exit success, and has `forbid: microL4 kernel`, `forbid:
 bootinfo:`, `forbid: DEBUG HALT` and `forbid: KERNEL PANIC`, which a kernel
 with `debug` would print. With `cargo xtask test`'s disassembly of the same
-kernel, this is M7's "the release kernel contains no UART code". A root-task
-fault there has no handler and no output, so it shows only as the 60-second
-timeout.
+kernel, this is M7's "the release kernel contains no UART code". A server
+fault there ends the run with failure and a `TEST FAIL` line through `watch`;
+a root-task fault has no handler and no output, so it shows only as the
+60-second timeout.
 
 ### Code and tests
 
 | Part | Where | Host tests |
 | --- | --- | --- |
 | Byte strings, labels, error labels; the two clients; `print!`'s output and `exit` | `libsys::proto`, `libsys::console`, `libsys::uart`, `libsys::output` | round trips for every `n` from 0 to 952, each `length`, `BadLength` cases, the ignored high bytes; writes split at 952; `fmt::Write` |
-| The 16550 driver: registers, setup, the service routine, the rings, held requests, requests; `uart::run`, the loop | crate `uart` (`user/uart`), `no_std`, `#![forbid(unsafe_code)]`, generic over a port trait; `run` for the target only | against a 16550 model (IIR priorities, THRE cleared by an IIR read or a THR write, 16-byte FIFOs, the trigger and the timeout, OE, OUT2 and an edge-triggered line) and an I/O APIC pin with the kernel's Ack rule that drops edges while masked: setup's accesses in order; random interleavings of host input, transmit progress, a kernel writer and uart's steps never lose a byte, overflow the FIFO, or leave uart blocked with a cause pending and no signal; held Writes released in order; Drain answered only when empty; a full ring stops and resumes reception |
+| The 16550 driver: registers, setup, the service routine, the rings, held requests, requests; `uart::run`, the loop | crate `uart` (`user/uart`), `no_std`, `#![forbid(unsafe_code)]`, generic over a port trait; `run` for the target only | against a 16550 model (IIR priorities, THRE cleared by an IIR read or a THR write, 16-byte FIFOs, the trigger and the timeout, OE, OUT2 and an edge-triggered line; a transmitter that takes a byte time per byte, and one that empties at once as QEMU's does) and an I/O APIC pin with the kernel's Ack rule that drops edges while masked: setup's accesses in order; random interleavings of host input, transmit progress, a kernel writer and uart's steps never lose a byte, overflow the FIFO, or leave uart blocked with a cause pending and no signal; the same model finds such a state when the loop services before it Acks, so the test can tell; on a working device the limit of 64 is never reached; held Writes released in order; Drain answered only when empty; a full ring stops and resumes reception |
 | The terminal: clients, output arbitration, line editing, focus; `console::run`, the loop | crate `console` (`user/console`), the same way | golden byte transcripts for every row of the event and input tables; a proptest of random writes at random boundaries, flushes, reads and typed bytes, focus keys included, by eight clients against a model of per-client lines, checking the invariants below |
-| Building a server's VSpace and CSpace | `root::process` (plan, host-tested) and `user/root/src/process.rs` | the page plan of M6's image, of an image across a 2 MiB boundary, and of segments with gaps |
+| Building a server's VSpace and CSpace; `watch` | `root::process` (plan, host-tested) and `user/root/src/process.rs` | the page plan of M6's image, of an image across a 2 MiB boundary, and of segments with gaps; `watch`'s failure line for each fault type |
 | The two tests | `user/root/src/console.rs`, `release.rs`; verdicts in `root::check::console` | the script, the lines each client must receive, the input byte counts |
 | The directives | `xtask/src/scenario.rs`; the release kernel in `xtask/src/compile.rs` | parsing `send:` escapes and placement, `kernel:` and `forbid:`; the matcher releasing each send after the expects above it, and consecutive sends together |
 
@@ -4925,7 +5010,7 @@ release kernel.
 | No page is writable in two VSpaces: a server maps root's text and read-only pages read-only, and its own data, stack and IPC buffer frames | `root::process::plan` host tests; review | M7 |
 | uart never blocks except in its receive on U: it sends only to reply capabilities and signals only NC; the one endpoint it could send on is its fault endpoint, which only the kernel uses | the crate's structure and slot table; review | M7 |
 | uart never writes more than 15 bytes into the FIFO per THRE seen, so even a debug kernel's byte cannot overflow it | `uart` host test with a kernel writer in the model | M7 |
-| uart never blocks with an interrupt cause pending and no signal pending, whatever the order of device events, edges dropped on a masked pin included | draining until IIR is clear before every Ack; `uart` host test against the I/O APIC model | M7 |
+| uart never blocks with an interrupt cause pending and no signal pending, whatever the order of device events, edges dropped on a masked pin included | an Ack before every service routine, which drains until IIR is clear; root refuses a level route for IRQ 4; `uart` host test against the I/O APIC model | M7 |
 | Every byte queued for transmit is sent once and in order; every byte received, unless overrun, reaches console once and in order | `uart` host tests; `console` scenario totals | M7 |
 | IER.THRI is set exactly while the transmit queue holds bytes or a Drain is held; IER's data bit is clear only while the receive ring is full | `uart` host tests after every step | M7 |
 | console emits each client's bytes once and in order, `\n` as `\r\n`; a line of at most 512 bytes that its client does not flush midway reaches the wire with no other byte from console inside it | `console` proptest; `console` scenario | M7 |
@@ -4933,7 +5018,8 @@ release kernel.
 | Every `Read` is answered at most once, and exactly once if its client survives and a line is typed for it | `console` proptest; `CNode_SaveCaller` refuses a second save (`Busy`) | M7 |
 | console never blocks on a client; it blocks only in calls to uart, which always reply | the crate's structure; review | M7 |
 | Priorities: uart above console above its clients | `root::process`; both scenarios print them | M7 |
-| In a release kernel, everything on COM1 after the loader comes from uart | `release` scenario's `forbid:` lines; the disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)) | M7 |
+| A server fault ends the run with failure, whatever root is waiting on, and a client fault reaches root, which never waits in a call to a client | `watch`, which only receives on F; clients driven through their `Call`s on D; review | M7 |
+| In a release kernel, everything on COM1 after the loader comes from uart, or from `watch` once a server has faulted | `release` scenario's `forbid:` lines; the disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)) | M7 |
 
 ### Compared with seL4
 
@@ -4987,6 +5073,7 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 (answered) | Answered in M6: reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint (`libsys::notification`); a saved reply capability vanishes when its client is suspended or deleted (`libsys::invoke::cnode_save_caller`). `cnode_cancel_badged_sends` says to revoke the badged original first |
 | Are the IMCR ports `0x22` and `0x23` real on q35 and Hyper-V? | They are kept from user space on the assumption that they can route PIC interrupts around the local APIC | M7 | Keep them reserved; reserving an absent port costs nothing |
 | What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Decided by the M7 spec check ([ADR 0027](adr/0027-stale-remote-irr.md)); check in M7. QEMU's I/O APIC is version `0x20`, Hyper-V's `0x11` (the M3 Hyper-V check). Normal operation needs nothing: the local APIC's EOI broadcast clears Remote IRR on any version, as in seL4, because a pin keeps its vector and trigger. For a stale one, issue writes the entry level-triggered and masked, then writes the old vector to the EOI register from version `0x20`, or below it switches the entry to edge-triggered and back, as Linux's `__eoi_ioapic_pin` does (from memory). Masking and unmasking leaves Remote IRR set, and the local APIC broadcasts an EOI only for a vector in service, so neither is an option. A self-test runs both paths on QEMU, whose I/O APIC takes `version=0x11` (from memory). Hyper-V's path stays unchecked: no planned driver there uses a level pin (COM1 is edge; VMBus uses SINTs) |
+| Must a driver of an edge pin Ack before it services, not after? | [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) give every driver the loop wait, service, Ack, and say that an edge lost while masked comes after a signal the driver has not yet handled; but two deliveries whose signals merge before the driver's receive mask the pin, and a cause after its last poll then loses its edge with no signal pending on an I/O APIC that drops edges while masked, as QEMU's does (from memory: `ioapic_set_irq`, `hw/intc/ioapic.c`, where [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) says QEMU latches them) | M7 | Yes: `uart` runs wait, Ack, service ([The loop](#the-loop)), and a level pin's driver keeps wait, service, Ack. The kernel's behaviour does not change; the two sentences and the QEMU claim need the lead's correction, with an ADR for `docs/abi.md` |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
 | Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 | Yes; raise the radix to 13 if not |
 | Does Hyper-V's COM1 behave as a 16550A for `uart`: FIFOs (IIR bits 6 and 7), the character timeout, a THRE interrupt when THRI is set with the FIFO empty, OUT2 gating the line, and a transmitter that drains with no client on the named pipe? | `uart`'s setup, its 15-byte burst and its lost-interrupt reasoning assume it ([`uart`](#uart)); a transmitter that stalls without a pipe client would hold console's writes, and every client's, for good | M8 Hyper-V check | Yes, as Linux guests' 8250 driver assumes there (from memory); without FIFOs `uart` falls back to 1-byte bursts. Boot `test=release` with a client on the pipe and type its line, then once with none |
