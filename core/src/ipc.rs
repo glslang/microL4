@@ -13,15 +13,18 @@
 //! The notification objects (M6), with signal, wait and poll, binding,
 //! their cancellation and their invariants, are in `notification`.
 
+mod badge;
 mod endpoint;
 mod machine;
 pub mod message;
 mod notification;
+mod transfer;
 
+pub use badge::cancel_badged_sends;
 pub use endpoint::{Endpoint, EndpointCap, EpState, IpcEnv, ep_field};
 pub use machine::{
     DoubleFault, cancel_all_ipc, cancel_ipc, check, deliver_fault, finalise, read_message, receive,
-    reply, reply_error, reply_success, send, transfer,
+    reply, reply_error, reply_success, save_caller, send, transfer,
 };
 pub use message::{
     IPC_BUFFER_BITS, IPC_BUFFER_SIZE, IPC_BUFFER_WORDS, IpcBuffer, LABEL_BITS, MSG_MAX_EXTRA_CAPS,
