@@ -18,7 +18,10 @@
 # call and each client checks every answer, and a shared sequence number
 # shows each signaller's bit reached S after its last signal. Unbound, S
 # does not wake for a signal, which waits in N for the root task's polls,
-# and later signals merge there for a wait.
+# and later signals merge there for a wait. Last, with a signal pending in
+# N and S unbound in an endpoint receive, binding S delivers the signal at
+# once, the design's change from seL4, and leaves N idle, so the next
+# signal wakes S alone.
 cmdline: test=ipcntfn
 exit: success
 expect: microL4 kernel
@@ -39,5 +42,6 @@ expect: ipcntfn: ok   every call answered right: S received 100 calls from C1 an
 expect: signal deliveries for 200 signals, carrying 0x300000000 between them,
 expect: each signaller's bit reached S after its last signal
 expect: ipcntfn: ok   unbound, S did not wake for a signal, which waited in N: a poll returned 0x40000000000, the next 0; two more signals merged into 0x300000000 for a wait
+expect: ipcntfn: ok   binding S again while it waited on E with 0x10000000000 pending in N delivered the signal at once, rsi 0, and left N idle: the next signal woke S with 0x20000000000 alone
 expect: TEST PASS
 expect: DEBUG HALT 0 from TCB
