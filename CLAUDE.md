@@ -64,8 +64,9 @@ system calls); without it every command boots the selftest kernel.
   `DebugHalt`, or on the release kernel `isa-debug-exit` through an IOPort);
   every boot has a 60-second limit. Besides `cmdline:`, `exit:`, `timeout:`,
   `qemu_args:` and `expect:`, a scenario can `send:` input to COM1 once the
-  `expect:` lines above it match, `forbid:` text, pick `kernel: release`, and
-  ask for `exit: timeout` (`docs/design.md`, "The harness").
+  `expect:` lines above it match, `forbid:` text, require with `next:` that
+  the line right after an `expect:`'s starts with a text, pick `kernel:
+  release`, and ask for `exit: timeout` (`docs/design.md`, "The harness").
 - When a scenario fails, xtask prints the tail of COM1 and keeps the full log
   in `target/xtask/scenarios/<name>/serial.log`, beside its `disk.img`; a
   scenario that passes keeps its log but not its 64 MiB disk image.

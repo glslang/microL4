@@ -50,7 +50,7 @@ run with a pass or fail status.
 ## M7 status (2026-11-22)
 
 M7 built the release kernel and its check as decided, with two points made
-precise:
+precise and, in the fix round, a rule added:
 
 - "Outside the IOPort path in `io.rs`" means outside `io.rs`'s functions: the
   check fails on any `in` or `out` whose address lies outside the symbols of
@@ -63,6 +63,14 @@ precise:
   `0x3F8` to `0x3FF` into `dil`, `di`, `edi` or `rdi`, the port argument.
   Since those functions move the port into `dx` themselves, that is how
   release code would name COM1 without the second rule's `mov` into `dx`.
+- The M7 fix round made the claim that only the IOPort invocations,
+  `pic::init` and `arch::exit` call `io.rs` a rule of the check, since the
+  port rules miss a port computed at run time
+  (`docs/redteam/m7-disasm-computed-port.md`): a call or jump to `io.rs`'s
+  functions from any other function fails it, and so does an `io.rs` address
+  anywhere but as a direct call's or jump's target, in code or in the kernel's
+  data. Those callers are `#[inline(never)]`, the IOPort invocations' through
+  `Objects`' `IoPorts::port_in` and `port_out`.
 
 The release kernel is built without features and copied to
 `target/xtask/release-kernel/<profile>/kernel.elf`; `cargo xtask test`

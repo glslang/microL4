@@ -8,7 +8,8 @@ say it cannot.
 
 **Where:** `xtask/src/disasm.rs`, `scan`.
 
-**Status:** open; not fixed, as the brief asks.
+**Status:** fixed in the M7 fix round, commit `6f5d6ea` ("disasm: io.rs is
+reached only from its three callers"; [The fix](#the-fix)).
 
 ## What breaks
 
@@ -48,10 +49,12 @@ the same way, and so would a loop over a port table, a function pointer to
 
 `xtask/src/disasm.rs`, the listing llvm-objdump gave of that function:
 
-- `a_computed_com1_port_passes_the_check` passes today: `scan` finds
-  nothing.
-- `a_computed_com1_port_fails_the_check` states the guarantee and fails
-  today; it is `#[ignore]`d. Run it with `cargo test -p xtask -- --ignored`.
+- `a_computed_com1_port_passes_the_check` passed before the fix: `scan`
+  found nothing. The fix round removed it.
+- `a_computed_com1_port_fails_the_check` states the guarantee; it failed
+  before the fix and was `#[ignore]`d. It passes now, no longer ignored, and
+  asserts the two findings: both calls come from a function that may not
+  call `io.rs`, while the port rules alone still find nothing.
 
 How sure: certain; the kernel was built and booted.
 
@@ -69,3 +72,27 @@ scenario could set COM1's scratch register and LCR to known values before
 the kernel boots, or `forbid:` any byte before the loader's banner is
 replaced by uart's, but neither proves the code is absent, which only the
 call-site rule does.
+
+## The fix
+
+M7 fix round, in `xtask/src/disasm.rs` and the kernel:
+
+- The check fails on a call or jump to one of `io.rs`'s functions from any
+  function but `IO_CALLERS`: `Objects`' `IoPorts::port_in` and `port_out`
+  (the IOPort executor), `pic::init` and `arch::exit`, each now
+  `#[inline(never)]` so that its symbol bounds its code.
+- It fails on an address inside `io.rs`'s functions anywhere but as a
+  direct call's or jump's target: in any other instruction (sign-extended
+  immediates and displacements, `movabs`, the target of a rip-relative
+  operand) and as eight bytes anywhere in the kernel's data sections but
+  `.rootimage`, which is where a function pointer would sit.
+- It insists on calls from those callers and on data to scan, beside the
+  old sanity checks; the port rules stay as a second line.
+- Shown on real release kernels: the red team's writer above failed with
+  "io.rs's function called from a function that may not call it" for both
+  calls, a writer through a function pointer in a static failed on the
+  pointer's address in `.rodata` (or, folded by LLVM, in its code), and
+  reviewer U's writer (a run-time port, in a module not named `serial`)
+  failed the same way.
+- `docs/design.md` ("A release kernel without UART code") and ADR 0021's M7
+  status state the rule.
