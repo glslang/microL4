@@ -6,7 +6,7 @@
 use l4core::error::LookupFailure;
 use l4core::regs::Fault;
 use l4core::syscall::Outcome;
-use l4model::ipc::{Buffer, Info, MCap, NState, State, word};
+use l4model::ipc::{Buffer, Info, MCap, NState, State, sysno, word};
 use l4model::ipc_harness::{
     Action, BAD_CPTR, Config, NO_BUFFER_THREAD, RO_THREAD, World, info, slot,
 };
@@ -1034,6 +1034,28 @@ fn an_unbadged_signal_is_remembered_with_word_0() {
 }
 
 #[test]
+fn an_empty_poll_returns_0_in_rdi_and_rsi_whatever_they_held() {
+    let mut w = world();
+    // Idle, then Waiting: nothing pending either way. The poller's rsi and
+    // MR0 to MR3 hold junk on entry; the message registers must stay.
+    for waiting in [false, true] {
+        if waiting {
+            step(&mut w, Action::recv(2, N0));
+            assert_eq!(ntfn(&w, 0), (NState::Waiting, 0, None, vec![2]));
+        }
+        step(
+            &mut w,
+            Action::sys(1, sysno::NB_RECV, N0, info(0x55, 3), Some([5, 6, 7, 8])),
+        );
+        let r = w.m.threads[1].regs;
+        assert_eq!((r.rdi, r.rsi), (0, 0), "waiters: {waiting}");
+        assert_eq!(mrs(&w, 1), [5, 6, 7, 8]);
+        assert_eq!(state(&w, 1), State::Running);
+    }
+    assert_eq!(state(&w, 2), State::BlockedOnNotification { ntfn: 0 });
+}
+
+#[test]
 fn a_signal_wakes_the_first_waiter_and_waiters_queue_in_order() {
     let mut w = world();
     step(&mut w, Action::recv(1, N1));
@@ -1276,6 +1298,27 @@ fn deleting_a_notification_unbinds_it_and_restarts_its_waiters() {
     step(&mut w, Action::recv(1, N1));
     step(&mut w, Action::delete(0, true, slot::N1_NONE));
     assert_eq!(state(&w, 1), State::BlockedOnNotification { ntfn: 1 });
+}
+
+#[test]
+fn deleting_a_notification_restarts_several_waiters_in_queue_order() {
+    let mut w = world();
+    for t in [3, 1, 2] {
+        step(&mut w, Action::recv(t, N2));
+    }
+    assert_eq!(ntfn(&w, 2), (NState::Waiting, 0, None, vec![3, 1, 2]));
+    step(&mut w, Action::delete(4, true, N2));
+    assert_eq!(ntfn(&w, 2), (NState::Idle, 0, None, vec![]));
+    for t in [3, 1, 2] {
+        assert_eq!(state(&w, t), State::Restart);
+    }
+    // Made runnable in queue order, behind the threads already ready.
+    let woken: Vec<usize> = w.m.queues[&100]
+        .iter()
+        .copied()
+        .filter(|t| [1, 2, 3].contains(t))
+        .collect();
+    assert_eq!(woken, [3, 1, 2]);
 }
 
 #[test]
