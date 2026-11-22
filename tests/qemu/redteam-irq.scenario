@@ -1,0 +1,21 @@
+# M7 red team: IRQControl and IRQHandler attacked from ring 3 with the PIT
+# as an interrupt source (user/root/src/redteam/irq.rs); they held. A PIT
+# storm on GSI 2 signals at most three times per Ack; an issued GSI cannot
+# be issued again through GetIOAPIC; 300 issues of one GSI reuse one
+# vector and every GSI can be issued at once; revoking a bound
+# notification's untyped empties the IRQ node, so a notification retyped
+# at its address is never signalled; and deleting a CNode that holds a
+# handler, whose IRQ node holds the last capability to a notification a
+# thread waits on, releases the thread and frees the GSI.
+cmdline: test=redteam-irq
+exit: success
+expect: microL4 kernel
+expect: root: cmdline "test=redteam-irq"
+expect: redteam: irq: a PIT storm at 18.6 kHz on GSI 2 signalled
+expect: redteam: irq: 300 issues and deletions of GSI 5 reused IRQ
+expect: redteam: irq: revoking N's untyped emptied the IRQ node
+expect: redteam: irq: deleting CNode K finalised the handler in it
+expect: redteam: irq: every interrupt attack held
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
+forbid: KERNEL PANIC
