@@ -134,8 +134,8 @@ fn hyperv_log() -> &'static Recorded {
 }
 
 /// Each ACPI dump, parsed once per test process: the hex is slow under
-/// Miri.
-fn q35_acpi() -> &'static acpi::Platform {
+/// Miri. `crate::irq`'s tests use them too.
+pub(crate) fn q35_acpi() -> &'static acpi::Platform {
     static P: OnceLock<acpi::Platform> = OnceLock::new();
     P.get_or_init(|| {
         let m = DumpMemory::parse(Q35_ACPI).unwrap();
@@ -143,7 +143,7 @@ fn q35_acpi() -> &'static acpi::Platform {
     })
 }
 
-fn hyperv_acpi() -> &'static acpi::Platform {
+pub(crate) fn hyperv_acpi() -> &'static acpi::Platform {
     static P: OnceLock<acpi::Platform> = OnceLock::new();
     P.get_or_init(|| {
         let m = DumpMemory::parse(HYPERV_ACPI).unwrap();

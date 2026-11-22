@@ -1,0 +1,16 @@
+# M7, ADR 0027: issuing a pin clears a stale Remote IRR on an I/O APIC of
+# version 0x11, Hyper-V's, which has no EOI register: the kernel writes
+# the masked entry edge-triggered and then level-triggered again (Linux's
+# __eoi_ioapic_pin). QEMU's I/O APIC takes the version as a property. The
+# test is irq_stale's (kernel/src/arch/x86_64/irq_stale.rs).
+cmdline: test=irq_stale
+qemu_args: -global ioapic.version=0x11
+exit: success
+expect: microL4 kernel
+expect: ioapic: 0: ID 0, version 0x11, 24 pins
+expect: irq_stale: I/O APIC 0 is version 0x11
+expect: Remote IRR stranded
+expect: irq_stale: ok   GetIOAPIC(
+expect: cleared Remote IRR by toggling the trigger, as it has no EOI register
+expect: irq_stale: ok   the comparator's next interrupt arrived
+expect: TEST PASS

@@ -25,6 +25,9 @@ pub const MAIN_COUNTER: u32 = 0x0F0;
 pub const ENABLE_CNF: u64 = 1 << 0;
 /// `GEN_CONF` bit 1: legacy replacement routing.
 pub const LEG_RT_CNF: u64 = 1 << 1;
+/// A comparator's `Tn_INT_TYPE_CNF`: its interrupt is level-triggered,
+/// held until its `GINTR_STA` bit is cleared; 0 is edge.
+pub const TN_INT_TYPE_CNF: u64 = 1 << 1;
 /// A comparator's `Tn_INT_ENB_CNF`: it raises interrupts.
 pub const TN_INT_ENB_CNF: u64 = 1 << 2;
 /// A comparator's `Tn_FSB_EN_CNF`: it delivers by FSB (MSI) message.
@@ -38,6 +41,30 @@ pub const MAX_COMPARATORS: u8 = 24;
 /// Comparator `n`'s configuration and capabilities register.
 pub const fn comparator_config(n: u8) -> u32 {
     0x100 + 0x20 * n as u32
+}
+
+/// Comparator `n`'s comparator value register.
+pub const fn comparator_value(n: u8) -> u32 {
+    comparator_config(n) + 8
+}
+
+/// `Tn_INT_ROUTE_CAP`, bits 32-63 of a comparator's configuration: bit `i`
+/// is set if it can drive I/O APIC input `i`.
+pub const fn route_cap(config: u64) -> u32 {
+    (config >> 32) as u32
+}
+
+/// A comparator's configuration raising a level-triggered, one-shot
+/// interrupt on I/O APIC input `route` (`Tn_INT_ROUTE_CNF`, bits 9-13),
+/// with FSB delivery off and every other bit as read. The `test=irq_stale`
+/// self-test uses it to strand a Remote IRR.
+pub const fn level_config(old: u64, route: u8) -> u64 {
+    const ROUTE: u64 = 0x1F << 9;
+    const PERIODIC: u64 = 1 << 3;
+    (old & !(ROUTE | PERIODIC | TN_FSB_EN_CNF))
+        | ((route as u64 & 0x1F) << 9)
+        | TN_INT_TYPE_CNF
+        | TN_INT_ENB_CNF
 }
 
 /// The general configuration to write: legacy replacement off, the main
@@ -144,6 +171,28 @@ pub const fn counter_delta(start: u64, now: u64, mask: u64) -> u64 {
 mod tests {
     use super::*;
     use std::string::ToString;
+
+    #[test]
+    fn a_level_comparator_routes_to_one_input() {
+        assert_eq!((comparator_config(2), comparator_value(2)), (0x140, 0x148));
+        // QEMU's comparators can drive inputs 2, 8 and 16 to 23
+        // (`intcap` 0xff0104, from memory), with 64-bit and periodic
+        // capability bits.
+        let old = 0x00FF_0104_0000_0030 | TN_FSB_EN_CNF | 1 << 3;
+        assert_eq!(route_cap(old), 0x00FF_0104);
+        let v = level_config(old, 23);
+        assert_eq!(v >> 9 & 0x1F, 23);
+        assert_eq!(
+            v & (TN_INT_TYPE_CNF | TN_INT_ENB_CNF),
+            TN_INT_TYPE_CNF | TN_INT_ENB_CNF
+        );
+        assert_eq!(v & (TN_FSB_EN_CNF | 1 << 3), 0, "no FSB delivery, one-shot");
+        assert_eq!(
+            v & !(0x1F << 9 | 0xE),
+            old & !(0x1F << 9 | 0xE | TN_FSB_EN_CNF | 1 << 3)
+        );
+        assert_eq!(quiet_comparator(v), Some(v & !TN_INT_ENB_CNF));
+    }
 
     /// QEMU's HPET: 10 ns, three comparators, 64-bit, legacy replacement
     /// capable, vendor 0x8086, revision 1 (hw/timer/hpet.c).

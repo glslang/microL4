@@ -1,0 +1,19 @@
+# M7, ADR 0027: issuing a pin clears a stale Remote IRR, here on QEMU's
+# default I/O APIC, version 0x20, through its EOI register
+# (kernel/src/arch/x86_64/irq_stale.rs). The HPET's last comparator raises
+# a level interrupt on a GSI it can drive with vector 0xef; once the local
+# APIC holds it, the entry is rewritten masked with vector 0xee and the
+# line lowered, so no EOI can clear Remote IRR. GetIOAPIC for that GSI,
+# made through l4core::invoke on the root task's IRQControl, must clear it
+# and leave the entry unmasked, and the comparator's next interrupt must
+# arrive with the issued vector. irq_stale_0x11 runs the version 0x11 path.
+cmdline: test=irq_stale
+exit: success
+expect: microL4 kernel
+expect: ioapic: 0: ID 0, version 0x20, 24 pins
+expect: irq_stale: I/O APIC 0 is version 0x20
+expect: Remote IRR stranded
+expect: irq_stale: ok   GetIOAPIC(
+expect: cleared Remote IRR through the EOI register
+expect: irq_stale: ok   the comparator's next interrupt arrived
+expect: TEST PASS

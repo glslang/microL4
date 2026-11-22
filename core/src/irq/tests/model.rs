@@ -215,10 +215,13 @@ fn drain(w: &mut World, m: &mut Model, p: &mut Paths) {
     panic!("interrupts never stopped");
 }
 
-/// Compares the kernel with the model, and checks the invariants.
+/// Compares the kernel with the model, and checks the invariants. Under
+/// Miri only the IRQs a sequence can issue (four GSIs, so IRQs 0 to 3) and
+/// a few above are compared.
 fn compare(w: &World, m: &Model) {
     checked(w);
-    for irq in 0..IRQS as u8 {
+    let irqs = if cfg!(miri) { 8 } else { IRQS as u8 };
+    for irq in 0..irqs {
         let e = entry(w, irq);
         let node = node(w, irq);
         match m.irqs.get(&irq) {
@@ -447,7 +450,7 @@ fn run(version: u8, ops: &[Op]) -> Paths {
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: if cfg!(miri) { 4 } else { 512 },
+        cases: if cfg!(miri) { 2 } else { 512 },
         failure_persistence: None,
         ..ProptestConfig::default()
     })]
@@ -455,13 +458,14 @@ proptest! {
     #[test]
     fn random_irq_operations_and_interrupts_match_the_model(
         qemu in any::<bool>(),
-        ops in proptest::collection::vec(op(), 1..if cfg!(miri) { 16 } else { 80 }),
+        ops in proptest::collection::vec(op(), 1..if cfg!(miri) { 12 } else { 80 }),
     ) {
         run(if qemu { QEMU } else { HYPERV }, &ops);
     }
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "a statistic over many random sequences")]
 fn random_sequences_reach_every_path() {
     let mut runner = TestRunner::new_with_rng(
         Config {
@@ -470,7 +474,7 @@ fn random_sequences_reach_every_path() {
         },
         TestRng::deterministic_rng(RngAlgorithm::ChaCha),
     );
-    let cases = if cfg!(miri) { 2 } else { 128 };
+    let cases = 128;
     let mut t = Paths::default();
     for i in 0..cases {
         let ops = proptest::collection::vec(op(), 80)
@@ -488,9 +492,6 @@ fn random_sequences_reach_every_path() {
         t.unmasked_by_ack += p.unmasked_by_ack;
         t.deleted_pending += p.deleted_pending;
         t.most_between_acks = t.most_between_acks.max(p.most_between_acks);
-    }
-    if cfg!(miri) {
-        return;
     }
     for (what, n) in [
         ("issued", t.issued),

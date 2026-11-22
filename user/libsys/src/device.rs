@@ -149,13 +149,15 @@ impl IsaIrq {
     /// 0 level-triggered, bit 1 active low); `None` for values the kernel
     /// never returns.
     pub fn from_words(irq: u64, gsi: u64, flags: u64) -> Option<IsaIrq> {
+        if flags > 3 {
+            return None;
+        }
         Some(IsaIrq {
             irq: u8::try_from(irq).ok()?,
             gsi: u32::try_from(gsi).ok()?,
             level: flags & 1 != 0,
             active_low: flags & 2 != 0,
         })
-        .filter(|_| flags <= 3)
     }
 }
 
@@ -165,11 +167,7 @@ fn word(reply: &Reply, i: usize) -> Result<u64, Error> {
     if i < reply.length() {
         Ok(reply.word(i))
     } else {
-        Err(Error::Undecoded {
-            label: 0,
-            length: reply.length() as u64,
-            words: [0; crate::error::MAX_DETAIL_WORDS],
-        })
+        Err(undecoded(reply))
     }
 }
 
