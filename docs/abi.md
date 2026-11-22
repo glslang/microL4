@@ -1559,7 +1559,7 @@ representation](design.md#capability-representation):
 | IRQControl | none | no (derives to nothing) | no | IRQHandler, revocable | nothing |
 | IRQHandler | `irq`, 8 bits | yes | data ignored | copies of the issued (original) handler | notification unbound; an I/O APIC pin or a SINT masked (a pin keeps its vector and trigger in its entry); vector freed |
 | IOPortControl | none | no (derives to nothing) | no | IOPort, revocable | nothing |
-| IOPort | `first`, `last`, 16 bits each | yes | data ignored | copies of the issued (original) range | range freed |
+| IOPort | `first`, `last`, 16 bits each: `data` = `first` in bits 0 to 15, `last` in bits 16 to 31 | yes | data ignored | copies of the issued (original) range | range freed |
 | Hypervisor | `restricted`, 1 bit; `connection`, 24 bits; `post`, `signal`, 1 bit each | yes (passes `derive`) | narrows and makes an original; see [Mint data word](#mint-data-word) | copies of an original: the boot capability or a narrowed one | nothing |
 
 Static kernel memory reserved at boot for interrupts, I/O ports and Hyper-V:
@@ -1890,7 +1890,7 @@ Hyper-V fill, under the same names.
 | Item | Where | Meaning | Milestone |
 | --- | --- | --- | --- |
 | `CAP_IRQ_CONTROL` | initial slot 4 | IRQControl | M4 (invocations M7) |
-| `CAP_IO_PORT_CONTROL` | initial slot 7 | IOPortControl | M4 |
+| `CAP_IO_PORT_CONTROL` | initial slot 7 | IOPortControl | M4 (invocations M7) |
 | `CAP_HYPERVISOR` | initial slot 12 | unrestricted Hypervisor capability; null if not Hyper-V, if an M9 privilege is missing, or if the firmware locked the hypercall MSR outside `.hvcall` | M9 |
 | `CAP_SYNIC_MESSAGE_FRAME` | initial slot 13 | 4 KiB Frame for the SIM page; null whenever slot 12 is | M9 |
 | `CAP_SYNIC_EVENT_FRAME` | initial slot 14 | 4 KiB Frame for the SIEF page; null whenever slot 12 is | M9 |
