@@ -170,6 +170,39 @@ fn a_saved_reply_capability_goes_when_its_caller_is_suspended() {
 }
 
 #[test]
+fn a_saved_fault_reply_capability_restarts_its_thread_when_used() {
+    // The pager pattern: D, F's handler, saves the reply to F's fault,
+    // serves something else, and later C replies through the saved
+    // capability with the fault-reply rule.
+    let mut w = World::new();
+    w.set_fault_ep(F, S_EP1);
+    w.recv(D, S_EP1);
+    w.exception(F, 14, 0x4, 0x1000);
+    assert_eq!(w.state(F), ThreadState::BlockedOnReply);
+    assert!(w.k.fault(tcb(F)).is_some());
+    let reply = w.caller_slot(D);
+    assert_eq!(cnode_call(&mut w, D, SAVE, 2, S_FREE, 64), Outcome::Done);
+    assert_eq!(kernel_reply(&w, D), OK);
+    assert_eq!(w.cap(rs(S_FREE)), reply);
+    // D receives again, and A's Call reaches it; F still waits.
+    w.recv(D, S_EP1);
+    w.call(A, S_EP1, 2, 0, [0; 4]);
+    assert_eq!(w.state(F), ThreadState::BlockedOnReply);
+    assert_eq!(w.cap(rs(S_FREE)), reply);
+    w.check();
+    // Label 0: F restarts its faulting instruction, its fault cleared.
+    w.send(C, S_FREE, 0, 0, [0; 4]);
+    assert_eq!(w.state(F), ThreadState::Restart);
+    assert_eq!(w.k.fault(tcb(F)), None);
+    assert_eq!(w.regs(F).next_ip, w.regs(F).fault_ip);
+    assert!(w.cap(rs(S_FREE)).is_null());
+    assert!(!cdt::has_children(&w.k, tcb(F).slot(TCB_SLOT_REPLY)));
+    // D still holds A's reply capability.
+    assert_eq!(w.caller_slot(D), Cap::reply(tcb(A).get(), false, true));
+    w.check();
+}
+
+#[test]
 fn save_caller_with_no_invoking_thread_has_nothing_to_save() {
     let mut w = World::new();
     assert_eq!(

@@ -751,6 +751,36 @@ fn a_saved_reply_capability_carries_capabilities_by_its_grant() {
 }
 
 #[test]
+fn a_reply_through_a_saved_capability_may_fill_the_slot_it_was_saved_in() {
+    // `docs/design.md`, IPC, "Compared with seL4": a reply deletes its
+    // reply capability before it transfers, so when the server saved that
+    // capability in the very slot the caller named as its receive slot,
+    // the copy lands there (seL4's `doReplyTransfer` transfers first, finds
+    // the slot full and moves nothing).
+    let mut w = World::new();
+    w.recv(B, S_EP0);
+    offer(&mut w, A, INTO_ROOT);
+    w.call(A, S_EP0, 1, 0, [0; 4]);
+    assert_eq!(w.state(A), ThreadState::BlockedOnReply);
+    let reply = w.caller_slot(B);
+    assert_eq!(reply, Cap::reply(tcb(A).get(), false, true));
+    w.call(B, S_ROOT, label::CNODE_SAVE_CALLER, 2, [S_FREE, 64, 0, 0]);
+    assert_eq!(w.regs(B).rsi, info(0, 0));
+    assert_eq!(w.cap(rs(S_FREE)), reply);
+    verify(&w);
+    send_caps(&mut w, B, SEND, S_FREE, 4, &[S_FRAME_RW]);
+    assert_eq!(w.state(A), ThreadState::Running);
+    assert_eq!((w.regs(A).rdi, got(&w, A)), (0, (4, 0, 1, 1)));
+    assert_eq!(w.cap(rs(S_FREE)), frame(FRAME_RW, RW));
+    assert_eq!(parent(&w, rs(S_FREE)), Some(rs(S_FRAME_RW)));
+    assert!(!cdt::has_children(
+        &w.k,
+        tcb(A).slot(crate::cap::TCB_SLOT_REPLY)
+    ));
+    assert_eq!(w.state(B), ThreadState::Running);
+}
+
+#[test]
 fn fault_messages_and_fault_replies_move_no_capability() {
     let mut w = World::new();
     w.set_fault_ep(A, S_EP1);
