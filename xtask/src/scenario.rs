@@ -10,15 +10,26 @@
 //! ```text
 //! # Comments start with '#'.
 //! cmdline: test=hello
-//! exit: success            # or: failure
+//! kernel: selftest         # or: release, the kernel built without features
+//! exit: success            # or: failure, or timeout
 //! timeout: 60              # seconds; optional, at most 60
 //! qemu_args: -cpu qemu64   # optional; appended to the QEMU command line
 //! expect: microL4 kernel   # a substring of one serial line
+//! send: hello\r            # written to COM1's input once the expects above
+//!                          # it have matched
 //! expect: TEST PASS
+//! forbid: KERNEL PANIC     # no serial line may contain this
 //! ```
+//!
+//! `exit: timeout` means the guest must still be running when the
+//! scenario's `timeout:`, which it then needs, ends the boot: the only end a
+//! release kernel without a user-level exit has. A `send:` value takes the
+//! escapes `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`; as for every
+//! value, its ends are trimmed and ` #` starts a comment, so a space or `#`
+//! there is `\x20` or `\x23` (`docs/design.md`, "The harness").
 
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -27,7 +38,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use crate::compile::Artifacts;
+use crate::compile::{Artifacts, Kernel};
 use crate::{Result, image, qemu, rel};
 
 /// Every boot gets at most this long.
@@ -44,34 +55,53 @@ const MAX_LOG_LINES: usize = 100_000;
 pub enum Exit {
     Success,
     Failure,
+    /// Still running when the timeout ends the boot.
+    Timeout,
 }
 
 impl Exit {
-    fn status(self) -> i32 {
+    /// QEMU's exit status when the guest ends the run this way.
+    fn status(self) -> Option<i32> {
         match self {
-            Exit::Success => qemu::GUEST_SUCCESS,
-            Exit::Failure => qemu::GUEST_FAILURE,
+            Exit::Success => Some(qemu::GUEST_SUCCESS),
+            Exit::Failure => Some(qemu::GUEST_FAILURE),
+            Exit::Timeout => None,
         }
     }
+}
+
+/// One `expect:` or `send:`, in file order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Text a serial line must contain, after the previous step's.
+    Expect(String),
+    /// Bytes written to COM1's input once every `expect:` before it matched.
+    Send(Vec<u8>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Scenario {
     pub name: String,
     pub cmdline: String,
+    /// The kernel the image boots.
+    pub kernel: Kernel,
     /// Extra QEMU arguments, split on whitespace.
     pub qemu_args: Vec<String>,
     pub exit: Exit,
     pub timeout: Duration,
-    pub expect: Vec<String>,
+    pub steps: Vec<Step>,
+    /// Text no serial line may contain.
+    pub forbid: Vec<String>,
 }
 
 pub fn parse(name: &str, text: &str) -> Result<Scenario> {
     let mut cmdline = String::new();
+    let mut kernel = Kernel::Selftest;
     let mut qemu_args = Vec::new();
     let mut exit = None;
-    let mut timeout = MAX_TIMEOUT;
-    let mut expect = Vec::new();
+    let mut timeout = None;
+    let mut steps = Vec::new();
+    let mut forbid = Vec::new();
     for (n, raw) in text.lines().enumerate() {
         let err = |msg: &str| format!("{name}.scenario:{}: {msg}", n + 1);
         // A '#' starts a comment, except inside `expect:` text, where it may
@@ -90,40 +120,98 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
         .trim();
         match key.trim() {
             "cmdline" => cmdline = value.to_string(),
+            "kernel" => {
+                kernel = Kernel::parse(value)
+                    .ok_or_else(|| err("kernel must be `selftest` or `release`"))?
+            }
             "qemu_args" => qemu_args.extend(value.split_whitespace().map(String::from)),
+            "qemu" => {
+                return Err(err("unknown key \"qemu\"; QEMU arguments go in `qemu_args:`").into());
+            }
             "exit" => {
                 exit = Some(match value {
                     "success" => Exit::Success,
                     "failure" => Exit::Failure,
-                    _ => return Err(err("exit must be `success` or `failure`").into()),
+                    "timeout" => Exit::Timeout,
+                    _ => {
+                        return Err(err("exit must be `success`, `failure` or `timeout`").into());
+                    }
                 })
             }
             "timeout" => {
                 let secs: u64 = value
                     .parse()
                     .map_err(|_| err("timeout must be whole seconds"))?;
-                timeout = Duration::from_secs(secs);
-                if timeout.is_zero() || timeout > MAX_TIMEOUT {
+                let t = Duration::from_secs(secs);
+                if t.is_zero() || t > MAX_TIMEOUT {
                     return Err(err("timeout must be between 1 and 60 seconds").into());
                 }
+                timeout = Some(t);
             }
             "expect" if value.is_empty() => return Err(err("empty expect line").into()),
-            "expect" => expect.push(value.to_string()),
+            "expect" => steps.push(Step::Expect(value.to_string())),
+            "send" if value.is_empty() => return Err(err("empty send line").into()),
+            "send" => {
+                // Until the guest's uart has started, OVMF reads COM1, and
+                // uart's FIFO reset drops whatever arrived before it.
+                if !steps.iter().any(|s| matches!(s, Step::Expect(_))) {
+                    return Err(err("a `send:` needs an `expect:` above it").into());
+                }
+                steps.push(Step::Send(unescape(value).map_err(|e| err(&e))?));
+            }
+            "forbid" if value.is_empty() => return Err(err("empty forbid line").into()),
+            "forbid" => forbid.push(value.to_string()),
             other => return Err(err(&format!("unknown key {other:?}")).into()),
         }
     }
     let exit = exit.ok_or_else(|| format!("{name}.scenario: missing `exit:`"))?;
-    if expect.is_empty() {
+    if !steps.iter().any(|s| matches!(s, Step::Expect(_))) {
         return Err(format!("{name}.scenario: needs at least one `expect:`").into());
+    }
+    if exit == Exit::Timeout && timeout.is_none() {
+        return Err(format!("{name}.scenario: `exit: timeout` needs a `timeout:`").into());
     }
     Ok(Scenario {
         name: name.to_string(),
         cmdline,
+        kernel,
         qemu_args,
         exit,
-        timeout,
-        expect,
+        timeout: timeout.unwrap_or(MAX_TIMEOUT),
+        steps,
+        forbid,
     })
+}
+
+/// Decodes a `send:` value: `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`
+/// stand for their bytes, a `\` before anything else is an error, and every
+/// other character stands for its UTF-8 bytes.
+pub fn unescape(text: &str) -> std::result::Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+            continue;
+        }
+        out.push(match chars.next() {
+            Some('r') => b'\r',
+            Some('n') => b'\n',
+            Some('t') => b'\t',
+            Some('e') => 0x1B,
+            Some('\\') => b'\\',
+            Some('x') => {
+                let digit = |c: Option<char>| c.and_then(|c| c.to_digit(16));
+                match (digit(chars.next()), digit(chars.next())) {
+                    (Some(hi), Some(lo)) => (hi << 4 | lo) as u8,
+                    _ => return Err(r"`\x` needs two hex digits".into()),
+                }
+            }
+            Some(c) => return Err(format!("unknown escape `\\{c}`")),
+            None => return Err(r"a `\` ends the text".into()),
+        });
+    }
+    Ok(out)
 }
 
 /// Loads every `*.scenario` in `dir`, sorted by name.
@@ -176,37 +264,52 @@ pub fn clean(raw: &[u8]) -> String {
     out
 }
 
-/// Tracks how far through the expected text the output has got. Each
-/// expectation must appear after the previous one: on a later line, or
-/// further along the same line.
+/// Tracks how far through the steps the output has got. Each expectation
+/// must appear after the previous one: on a later line, or further along
+/// the same line. A send is released as soon as every expectation before
+/// it has matched, and the expectations after it match only from the next
+/// line on: the rest of the line that released it was printed before the
+/// guest could have read the text.
 pub struct Matcher<'a> {
-    expect: &'a [String],
+    steps: &'a [Step],
     next: usize,
 }
 
 impl<'a> Matcher<'a> {
-    pub fn new(expect: &'a [String]) -> Self {
-        Self { expect, next: 0 }
+    pub fn new(steps: &'a [Step]) -> Self {
+        Self { steps, next: 0 }
     }
 
-    /// Feeds one serial line.
-    pub fn feed(&mut self, line: &str) {
+    /// Feeds one serial line. Returns the text of each send it released,
+    /// in order.
+    pub fn feed(&mut self, line: &str) -> Vec<&'a [u8]> {
         let mut rest = line;
-        while let Some(e) = self.expect.get(self.next) {
-            let Some(at) = rest.find(e.as_str()) else {
-                break;
-            };
-            rest = &rest[at + e.len()..];
+        let mut sends = Vec::new();
+        while let Some(step) = self.steps.get(self.next) {
+            match step {
+                Step::Expect(_) if !sends.is_empty() => break,
+                Step::Expect(e) => {
+                    let Some(at) = rest.find(e.as_str()) else {
+                        break;
+                    };
+                    rest = &rest[at + e.len()..];
+                }
+                Step::Send(text) => sends.push(text.as_slice()),
+            }
             self.next += 1;
         }
+        sends
     }
 
     pub fn done(&self) -> bool {
-        self.next == self.expect.len()
+        self.next == self.steps.len()
     }
 
     pub fn waiting_for(&self) -> Option<&'a str> {
-        self.expect.get(self.next).map(String::as_str)
+        self.steps[self.next..].iter().find_map(|s| match s {
+            Step::Expect(e) => Some(e.as_str()),
+            Step::Send(_) => None,
+        })
     }
 }
 
@@ -250,15 +353,19 @@ pub fn run_all(scenarios: &[Scenario], art: &Artifacts, dir: &Path) -> Vec<Outco
 /// Boots one scenario. Returns whether it passed and a printable report.
 fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)> {
     let cmdline = (!sc.cmdline.is_empty()).then_some(sc.cmdline.as_str());
-    let disk = image::build_disk(dir, art, cmdline)?;
+    let disk = image::build_disk(dir, art, sc.kernel, cmdline)?;
+    // COM1's input is QEMU's stdin: a pipe for a scenario that sends, and
+    // otherwise nothing.
+    let sends = sc.steps.iter().any(|s| matches!(s, Step::Send(_)));
     let start = Instant::now();
     let mut child = qemu::base_command(&disk)?
         .args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
         .args(&sc.qemu_args)
-        .stdin(Stdio::null())
+        .stdin(if sends { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    let mut stdin = child.stdin.take();
 
     let (tx, rx) = mpsc::channel();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
@@ -278,8 +385,16 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
         s
     });
 
-    let mut matcher = Matcher::new(&sc.expect);
+    let mut matcher = Matcher::new(&sc.steps);
     let mut transcript = Vec::new();
+    let mut record = |line: String| {
+        if transcript.len() < MAX_LOG_LINES {
+            transcript.push(line);
+        }
+    };
+    // The first serial line with forbidden text, and the text.
+    let mut forbidden: Option<(&str, String)> = None;
+    let mut send_error = None;
     let deadline = start + sc.timeout;
     let mut timed_out = false;
     loop {
@@ -293,9 +408,23 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
         };
         match line {
             Ok(line) => {
-                matcher.feed(&line);
-                if transcript.len() < MAX_LOG_LINES {
-                    transcript.push(line);
+                if forbidden.is_none()
+                    && let Some(f) = sc.forbid.iter().find(|f| line.contains(f.as_str()))
+                {
+                    forbidden = Some((f.as_str(), line.clone()));
+                }
+                let released = matcher.feed(&line);
+                record(line);
+                for text in released {
+                    // `sends` made the pipe for every scenario with a send.
+                    let pipe = stdin.as_mut().unwrap();
+                    if let Err(e) = pipe.write_all(text).and_then(|()| pipe.flush()) {
+                        send_error.get_or_insert(format!(
+                            "could not send \"{}\": {e}",
+                            text.escape_ascii()
+                        ));
+                    }
+                    record(format!("xtask: sent \"{}\"", text.escape_ascii()));
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -307,57 +436,66 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
         }
     }
     let status = child.wait()?;
+    drop(stdin);
     let elapsed = start.elapsed().as_secs_f32();
     let stderr = stderr.join().unwrap_or_default();
 
     let log = dir.join("serial.log");
     fs::write(&log, transcript.join("\n") + "\n")?;
 
-    let failure = if timed_out {
-        Some(format!(
-            "timed out after {} s{}",
-            sc.timeout.as_secs(),
-            matcher
-                .waiting_for()
-                .map(|w| format!(" waiting for {w:?}"))
-                .unwrap_or_default()
-        ))
-    } else if !matcher.done() {
-        let missing = matcher.waiting_for().unwrap_or_default();
-        Some(format!(
-            "never printed {missing:?}; {}",
+    let mut why = Vec::new();
+    if let Some((text, line)) = &forbidden {
+        why.push(format!("printed forbidden {text:?} in {line:?}"));
+    }
+    why.extend(send_error);
+    let secs = sc.timeout.as_secs();
+    let waiting = matcher
+        .waiting_for()
+        .map(|w| format!(" waiting for {w:?}"))
+        .unwrap_or_default();
+    match (sc.exit.status(), timed_out) {
+        (None, true) if matcher.done() => {}
+        (None, true) => why.push(format!("ran until the {secs} s timeout{waiting}")),
+        (None, false) => why.push(format!(
+            "expected the guest to run until the {secs} s timeout, but {}",
             qemu::describe_exit(status.code())
-        ))
-    } else if status.code() != Some(sc.exit.status()) {
-        Some(format!(
+        )),
+        (Some(_), true) => why.push(format!("timed out after {secs} s{waiting}")),
+        (Some(_), false) if !matcher.done() => why.push(format!(
+            "never printed {:?}; {}",
+            matcher.waiting_for().unwrap_or_default(),
+            qemu::describe_exit(status.code())
+        )),
+        (Some(expected), false) if status.code() != Some(expected) => why.push(format!(
             "expected exit {:?}, but {}",
             sc.exit,
             qemu::describe_exit(status.code())
-        ))
-    } else {
-        None
-    };
+        )),
+        (Some(_), false) => {}
+    }
 
     let mut report = String::new();
-    match &failure {
-        None => {
-            // 64 MiB per scenario adds up to gigabytes per run; a failure
-            // keeps its image beside the log, to boot again by hand.
-            fs::remove_file(&disk)?;
-            writeln!(report, "PASS {} ({elapsed:.1} s)", sc.name)?
+    if why.is_empty() {
+        // 64 MiB per scenario adds up to gigabytes per run; a failure
+        // keeps its image beside the log, to boot again by hand.
+        fs::remove_file(&disk)?;
+        writeln!(report, "PASS {} ({elapsed:.1} s)", sc.name)?
+    } else {
+        writeln!(
+            report,
+            "FAIL {} ({elapsed:.1} s): {}",
+            sc.name,
+            why.join("; ")
+        )?;
+        writeln!(report, "  last serial lines (full log: {}):", rel(&log))?;
+        for line in &transcript[transcript.len().saturating_sub(TAIL_LINES)..] {
+            writeln!(report, "  | {line}")?;
         }
-        Some(why) => {
-            writeln!(report, "FAIL {} ({elapsed:.1} s): {why}", sc.name)?;
-            writeln!(report, "  last serial lines (full log: {}):", rel(&log))?;
-            for line in &transcript[transcript.len().saturating_sub(TAIL_LINES)..] {
-                writeln!(report, "  | {line}")?;
-            }
-            for line in stderr.lines() {
-                writeln!(report, "  qemu: {line}")?;
-            }
+        for line in stderr.lines() {
+            writeln!(report, "  qemu: {line}")?;
         }
     }
-    Ok((failure.is_none(), report))
+    Ok((why.is_empty(), report))
 }
 
 #[cfg(test)]
@@ -372,6 +510,14 @@ expect: microL4 kernel
 expect: TEST PASS   # the kernel's success marker
 ";
 
+    fn expect(e: &str) -> Step {
+        Step::Expect(e.into())
+    }
+
+    fn send(s: &[u8]) -> Step {
+        Step::Send(s.into())
+    }
+
     #[test]
     fn parses_a_scenario() {
         let s = parse("hello", HELLO).unwrap();
@@ -380,10 +526,12 @@ expect: TEST PASS   # the kernel's success marker
             Scenario {
                 name: "hello".into(),
                 cmdline: "test=hello".into(),
+                kernel: Kernel::Selftest,
                 qemu_args: vec![],
                 exit: Exit::Success,
                 timeout: MAX_TIMEOUT,
-                expect: vec!["microL4 kernel".into(), "TEST PASS".into()],
+                steps: vec![expect("microL4 kernel"), expect("TEST PASS")],
+                forbid: vec![],
             }
         );
     }
@@ -391,7 +539,7 @@ expect: TEST PASS   # the kernel's success marker
     #[test]
     fn hash_inside_expect_text_is_kept() {
         let s = parse("x", "exit: failure\nexpect: issue#12 seen\ntimeout: 5\n").unwrap();
-        assert_eq!(s.expect, vec!["issue#12 seen"]);
+        assert_eq!(s.steps, vec![expect("issue#12 seen")]);
         assert_eq!(s.timeout, Duration::from_secs(5));
         assert_eq!(s.cmdline, "");
     }
@@ -400,10 +548,87 @@ expect: TEST PASS   # the kernel's success marker
     fn qemu_args_split_and_accumulate() {
         let s = parse(
             "x",
-            "exit: failure\nqemu_args: -cpu qemu64  # old CPU\nqemu_args: -machine hpet=off\nexpect: x\n",
+            "exit: failure\nqemu_args: -cpu qemu64  # old CPU\nqemu_args: -global ioapic.version=0x11\nexpect: x\n",
         )
         .unwrap();
-        assert_eq!(s.qemu_args, ["-cpu", "qemu64", "-machine", "hpet=off"]);
+        assert_eq!(
+            s.qemu_args,
+            ["-cpu", "qemu64", "-global", "ioapic.version=0x11"]
+        );
+    }
+
+    #[test]
+    fn parses_the_m7_directives() {
+        let s = parse(
+            "release",
+            "\
+kernel: release
+cmdline: test=release
+exit: success
+expect: release: type a line
+send: release input\\r   # 14 bytes
+send: \\x20#\\x23
+expect: release: read \"release input\"
+forbid: microL4 kernel
+forbid: KERNEL PANIC     # what a debug kernel would print
+",
+        )
+        .unwrap();
+        assert_eq!(s.kernel, Kernel::Release);
+        assert_eq!(
+            s.steps,
+            vec![
+                expect("release: type a line"),
+                send(b"release input\r"),
+                send(b" ##"),
+                expect("release: read \"release input\""),
+            ]
+        );
+        assert_eq!(s.forbid, ["microL4 kernel", "KERNEL PANIC"]);
+        assert_eq!(
+            parse("x", "kernel: selftest\nexit: success\nexpect: x\n")
+                .unwrap()
+                .kernel,
+            Kernel::Selftest
+        );
+    }
+
+    #[test]
+    fn exit_timeout_needs_a_timeout() {
+        let s = parse("x", "exit: timeout\ntimeout: 20\nexpect: x\n").unwrap();
+        assert_eq!(
+            (s.exit, s.timeout),
+            (Exit::Timeout, Duration::from_secs(20))
+        );
+        let e = parse("x", "exit: timeout\nexpect: x\n").unwrap_err();
+        assert!(e.to_string().contains("needs a `timeout:`"), "{e}");
+    }
+
+    #[test]
+    fn decodes_send_escapes() {
+        for (text, bytes) in [
+            ("plain", &b"plain"[..]),
+            (r"\r\n\t\e\\", b"\r\n\t\x1b\\"),
+            (r"\x143to b\r", b"\x143to b\r"),
+            (r"\x142hellp\x7fo\x15hi a\r", b"\x142hellp\x7fo\x15hi a\r"),
+            (r"\x00\xff\xAb", b"\x00\xff\xab"),
+            ("é", "é".as_bytes()),
+            ("", b""),
+        ] {
+            assert_eq!(unescape(text).unwrap(), bytes, "{text:?}");
+        }
+        for (text, why) in [
+            (r"\q", r"unknown escape `\q`"),
+            (r#"\""#, r#"unknown escape `\"`"#),
+            (r"\é", r"unknown escape `\é`"),
+            (r"\x1", "two hex digits"),
+            (r"\x1g", "two hex digits"),
+            (r"\xé0", "two hex digits"),
+            (r"ab\", r"a `\` ends the text"),
+        ] {
+            let e = unescape(text).unwrap_err();
+            assert!(e.contains(why), "{text:?} gave {e:?}, wanted {why:?}");
+        }
     }
 
     #[test]
@@ -421,6 +646,25 @@ expect: TEST PASS   # the kernel's success marker
             ("exit: success\nexpect:\n", "empty expect"),
             ("exit: success\nexpect: x\nretries: 3\n", "unknown key"),
             ("exit: success\nno colon here\n", "key: value"),
+            (
+                "exit: success\nsend: x\nexpect: x\n",
+                "needs an `expect:` above",
+            ),
+            (
+                "exit: success\nforbid: x\nsend: x\n",
+                "needs an `expect:` above",
+            ),
+            (
+                "exit: success\nexpect: x\nsend:   # nothing\n",
+                "empty send",
+            ),
+            ("exit: success\nexpect: x\nsend: \\q\n", "3: unknown escape"),
+            ("exit: success\nexpect: x\nforbid:\n", "empty forbid"),
+            (
+                "kernel: debug\nexit: success\nexpect: x\n",
+                "kernel must be",
+            ),
+            ("exit: success\nexpect: x\nqemu: -s\n", "go in `qemu_args:`"),
         ] {
             let e = parse("t", text).unwrap_err().to_string();
             assert!(e.contains(why), "{text:?} gave {e:?}, wanted {why:?}");
@@ -429,9 +673,9 @@ expect: TEST PASS   # the kernel's success marker
 
     #[test]
     fn matcher_needs_lines_in_order() {
-        let expect = vec!["one".to_string(), "two".to_string()];
-        let mut m = Matcher::new(&expect);
-        m.feed("two");
+        let steps = vec![expect("one"), expect("two")];
+        let mut m = Matcher::new(&steps);
+        assert!(m.feed("two").is_empty());
         assert_eq!(m.waiting_for(), Some("one"));
         m.feed("this is one");
         m.feed("noise");
@@ -443,8 +687,8 @@ expect: TEST PASS   # the kernel's success marker
 
     #[test]
     fn matcher_consumes_each_match() {
-        let expect = vec!["a".to_string(), "a".to_string()];
-        let mut m = Matcher::new(&expect);
+        let steps = vec![expect("a"), expect("a")];
+        let mut m = Matcher::new(&steps);
         m.feed("a");
         assert!(!m.done());
         m.feed("a");
@@ -453,14 +697,60 @@ expect: TEST PASS   # the kernel's success marker
 
     #[test]
     fn matcher_finds_several_in_order_on_one_line() {
-        let expect = vec!["PANIC at".to_string(), "deliberate".to_string()];
-        let mut m = Matcher::new(&expect);
+        let steps = vec![expect("PANIC at"), expect("deliberate")];
+        let mut m = Matcher::new(&steps);
         m.feed("KERNEL PANIC at main.rs:54: deliberate panic");
         assert!(m.done());
 
-        let mut m = Matcher::new(&expect);
+        let mut m = Matcher::new(&steps);
         m.feed("deliberate, then PANIC at");
         assert_eq!(m.waiting_for(), Some("deliberate"));
+    }
+
+    #[test]
+    fn matcher_releases_each_send_after_the_expects_above_it() {
+        let steps = vec![
+            expect("console: input next"),
+            send(b"\x143to b\r"),
+            expect("focus 3 (b)"),
+            expect("b: read \"to b\""),
+            send(b"\x142"),
+            send(b"hi a\r"),
+            expect("a: read \"hi a\""),
+        ];
+        let mut m = Matcher::new(&steps);
+        assert!(m.feed("root: starting").is_empty());
+        assert!(m.feed("focus 3 (b)").is_empty(), "too early");
+        assert_eq!(m.waiting_for(), Some("console: input next"));
+        assert_eq!(m.feed("console: input next"), [b"\x143to b\r"]);
+        assert_eq!(m.waiting_for(), Some("focus 3 (b)"));
+        assert!(m.feed("[console] focus 3 (b)").is_empty());
+        // Consecutive sends go together, in order.
+        assert_eq!(m.feed("b: read \"to b\""), [&b"\x142"[..], b"hi a\r"]);
+        assert!(!m.done());
+        assert!(m.feed("a: read \"hi a\"").is_empty());
+        assert!(m.done());
+        assert!(m.feed("console: input next").is_empty(), "sent once");
+    }
+
+    #[test]
+    fn matcher_matches_after_a_send_only_from_the_next_line() {
+        let steps = vec![expect("prompt"), send(b"x\r"), expect("got")];
+        let mut m = Matcher::new(&steps);
+        // "got" was printed before the text was written.
+        assert_eq!(m.feed("prompt; got nothing yet"), [b"x\r"]);
+        assert_eq!(m.waiting_for(), Some("got"));
+        m.feed("got x");
+        assert!(m.done());
+    }
+
+    #[test]
+    fn matcher_releases_trailing_sends_with_the_last_expect() {
+        let steps = vec![expect("ready"), send(b"bye\r")];
+        let mut m = Matcher::new(&steps);
+        assert_eq!(m.feed("ready"), [b"bye\r"]);
+        assert!(m.done());
+        assert_eq!(m.waiting_for(), None);
     }
 
     #[test]

@@ -4,10 +4,20 @@
 //! The user crates come first: `user/root` is built, stripped and checked
 //! into `target/xtask/rootimage/<profile>/root.elf` (`rootimage`), and the
 //! kernel embeds that file in `.rootimage` through `include_bytes!` of the
-//! path in `MICROL4_ROOT_IMAGE`. Then the kernel, whose image xtask checks
-//! against `KERNEL_IMAGE_MAX`, and the loader.
+//! path in `MICROL4_ROOT_IMAGE`. Then the kernels, each checked against
+//! `KERNEL_IMAGE_MAX`, and the loader.
+//!
+//! There are two kernels ([`Kernel`]): the selftest kernel every image has
+//! used since M0, and from M7 the release kernel, built without features,
+//! which has no `debug` and so no UART code (ADR 0021). Cargo links both to
+//! `target/x86_64-unknown-none/<profile>/kernel`, so the release kernel is
+//! built first and copied out to
+//! `target/xtask/release-kernel/<profile>/kernel.elf`; the file in place
+//! stays the selftest kernel's. Cargo keeps both builds, so switching
+//! between them recompiles nothing.
 
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -24,10 +34,6 @@ pub const LOADER_TARGET: &str = "x86_64-unknown-uefi";
 /// User programs build for the kernel's target, so they use no SSE either
 /// (`docs/design.md`, "The kernel never touches SSE; the user target").
 pub const USER_TARGET: &str = "x86_64-unknown-none";
-/// The kernel features every image is built with: the self-tests, which
-/// scenarios pick with `test=`, and with them `debug` (ADR 0021). M7 adds a
-/// build without `debug`.
-pub const KERNEL_FEATURES: &str = "selftest";
 /// The user crates, linted by `cargo xtask clippy`.
 pub const USER_CRATES: &[&str] = &["libsys", "root"];
 /// The variable whose path the kernel's `include_bytes!` embeds.
@@ -53,8 +59,43 @@ impl Profile {
     }
 }
 
+/// Which kernel an image boots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kernel {
+    /// Built with `selftest`, and with it `debug`: the self-tests that
+    /// scenarios pick with `test=`, the boot summary and the debug system
+    /// calls. Every image's kernel unless it asks for the other.
+    Selftest,
+    /// Built without features: no `debug`, so no UART code, no kernel
+    /// output and no debug system calls, and no `selftest`, so every
+    /// `test=` goes to the root task (`docs/design.md`, "A release kernel
+    /// without UART code").
+    Release,
+}
+
+impl Kernel {
+    /// The kernel a scenario's `kernel:` or `--kernel` names.
+    pub fn parse(name: &str) -> Option<Kernel> {
+        match name {
+            "selftest" => Some(Kernel::Selftest),
+            "release" => Some(Kernel::Release),
+            _ => None,
+        }
+    }
+
+    /// The cargo arguments that pick its features.
+    fn features(self) -> &'static [&'static str] {
+        match self {
+            Kernel::Selftest => &["--features", "selftest"],
+            Kernel::Release => &["--no-default-features"],
+        }
+    }
+}
+
 pub struct Artifacts {
-    pub kernel: PathBuf,
+    /// The kernels [`build`] was asked for.
+    selftest: Option<PathBuf>,
+    release: Option<PathBuf>,
     pub loader: PathBuf,
     /// The root task as linked, with symbols, for a debugger.
     pub root: PathBuf,
@@ -64,24 +105,56 @@ pub struct Artifacts {
     pub packed: Packed,
 }
 
-pub fn build(profile: Profile) -> Result<Artifacts> {
+impl Artifacts {
+    /// The ELF of `kernel`, which [`build`] must have been asked for.
+    pub fn kernel(&self, kernel: Kernel) -> Result<&Path> {
+        match kernel {
+            Kernel::Selftest => self.selftest.as_deref(),
+            Kernel::Release => self.release.as_deref(),
+        }
+        .ok_or_else(|| format!("the {kernel:?} kernel was not built").into())
+    }
+}
+
+/// Builds the user crates, the root image, each of `kernels` and the
+/// loader.
+pub fn build(profile: Profile, kernels: &[Kernel]) -> Result<Artifacts> {
     let (root, root_image, packed) = build_root(profile)?;
-    let mut kernel = cargo_for("build", KERNEL_TARGET, &["kernel"], profile)?;
-    kernel
-        .args(["--features", KERNEL_FEATURES])
-        .env(ROOT_IMAGE_ENV, &root_image);
-    run(&mut kernel)?;
+    let out = |target: &str, file: &str| target_dir().join(target).join(profile.dir()).join(file);
+    let (mut selftest, mut release) = (None, None);
+    // The release kernel first: it is copied out, and the file cargo leaves
+    // in place is then the selftest kernel's.
+    for kernel in [Kernel::Release, Kernel::Selftest] {
+        if !kernels.contains(&kernel) {
+            continue;
+        }
+        run(cargo_for("build", KERNEL_TARGET, &["kernel"], profile)?
+            .args(kernel.features())
+            .env(ROOT_IMAGE_ENV, &root_image))?;
+        let built = out(KERNEL_TARGET, "kernel");
+        check_kernel_size(&built, &packed)?;
+        match kernel {
+            Kernel::Selftest => selftest = Some(built),
+            Kernel::Release => {
+                let copy = xtask_dir()
+                    .join("release-kernel")
+                    .join(profile.dir())
+                    .join("kernel.elf");
+                fs::create_dir_all(copy.parent().unwrap())?;
+                fs::copy(&built, &copy)?;
+                release = Some(copy);
+            }
+        }
+    }
     run(&mut cargo_for(
         "build",
         LOADER_TARGET,
         &["loader"],
         profile,
     )?)?;
-    let out = |target: &str, file: &str| target_dir().join(target).join(profile.dir()).join(file);
-    let kernel = out(KERNEL_TARGET, "kernel");
-    check_kernel_size(&kernel, &packed)?;
     Ok(Artifacts {
-        kernel,
+        selftest,
+        release,
         loader: out(LOADER_TARGET, "loader.efi"),
         root,
         root_image,
@@ -159,11 +232,12 @@ pub fn clippy() -> Result<()> {
     // needs to compile.
     run(user_cargo("clippy", USER_CRATES, Profile::Dev)?.args(["--", "-D", "warnings"]))?;
     let (_, root_image, _) = build_root(Profile::Dev)?;
-    // The kernel twice, so that every `cfg` compiles both ways: as images
-    // are built, and with no features at all.
+    // The kernel three times, so that every `cfg` compiles each way: as the
+    // two kernels are built, and with `debug` but no self-tests.
     for features in [
-        &["--features", KERNEL_FEATURES][..],
-        &["--no-default-features"],
+        Kernel::Selftest.features(),
+        Kernel::Release.features(),
+        &["--no-default-features", "--features", "debug"],
     ] {
         run(
             cargo_for("clippy", KERNEL_TARGET, &["kernel"], Profile::Dev)?
@@ -231,18 +305,20 @@ fn has_prebuilt_std(target: &str) -> Result<bool> {
     if std::env::var_os("XTASK_FORCE_BUILD_STD").is_some_and(|v| v == "1") {
         return Ok(false);
     }
-    // Ask the compiler cargo will use: `$RUSTC` if set, else the rustup
-    // proxy, which honours the toolchain cargo was invoked with.
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    let sysroot = crate::output(Command::new(rustc).args(["--print", "sysroot"]))?;
-    let lib = Path::new(sysroot.trim())
-        .join("lib/rustlib")
-        .join(target)
-        .join("lib");
-    let Ok(entries) = std::fs::read_dir(&lib) else {
+    let lib = rustlib()?.join(target).join("lib");
+    let Ok(entries) = fs::read_dir(&lib) else {
         return Ok(false);
     };
     Ok(entries
         .flatten()
         .any(|e| e.file_name().to_string_lossy().starts_with("libcore-")))
+}
+
+/// `lib/rustlib` in the sysroot of the compiler cargo uses: `$RUSTC` if
+/// set, else the rustup proxy, which honours the toolchain cargo was
+/// invoked with.
+pub fn rustlib() -> Result<PathBuf> {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let sysroot = crate::output(Command::new(rustc).args(["--print", "sysroot"]))?;
+    Ok(Path::new(sysroot.trim()).join("lib/rustlib"))
 }

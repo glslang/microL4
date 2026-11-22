@@ -6,7 +6,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::compile::Artifacts;
+use crate::compile::{Artifacts, Kernel};
 use crate::{Result, output};
 
 const DISK_BYTES: u64 = 64 << 20;
@@ -21,8 +21,15 @@ const TOOLS: &[(&str, &str)] = &[
     ("qemu-img", "qemu-utils"),
 ];
 
-/// Builds `dir/disk.img`. `cmdline`, if any, goes in `\cmdline.txt`.
-pub fn build_disk(dir: &Path, art: &Artifacts, cmdline: Option<&str>) -> Result<PathBuf> {
+/// Builds `dir/disk.img` with `kernel` as `\kernel.elf`. `cmdline`, if any,
+/// goes in `\cmdline.txt`.
+pub fn build_disk(
+    dir: &Path,
+    art: &Artifacts,
+    kernel: Kernel,
+    cmdline: Option<&str>,
+) -> Result<PathBuf> {
+    let kernel = art.kernel(kernel)?;
     check_tools()?;
     fs::create_dir_all(dir)?;
     let disk = dir.join("disk.img");
@@ -65,7 +72,7 @@ pub fn build_disk(dir: &Path, art: &Artifacts, cmdline: Option<&str>) -> Result<
         Command::new("mcopy")
             .arg("-i")
             .arg(&esp)
-            .arg(&art.kernel)
+            .arg(kernel)
             .arg("::/kernel.elf"),
     )?;
     if let Some(text) = cmdline {
