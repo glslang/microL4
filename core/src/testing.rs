@@ -739,7 +739,7 @@ impl FakeIoApic {
 
 /// An I/O port access [`FakeDevices`] recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PortAccess {
+pub struct PortRecord {
     pub port: u16,
     pub width: Width,
     /// `None` for a read; the value written for a write.
@@ -765,7 +765,7 @@ pub struct FakeDevices {
     pub node: FakeMemory,
     pub ports: PortBitmap,
     /// Every port access, in order.
-    pub port_log: Vec<PortAccess>,
+    pub port_log: Vec<PortRecord>,
     /// What a read of a port returns: the last value written to it, else
     /// [`FakeDevices::FLOATING`].
     pub port_values: BTreeMap<u16, u32>,
@@ -893,19 +893,21 @@ impl FakeDevices {
         self.lapic_irr.extend(sent);
     }
 
-    fn port_in(&mut self, port: u16, width: Width) -> u32 {
-        self.port_log.push(PortAccess {
+    fn port_in(&mut self, access: ioport::PortAccess) -> u32 {
+        let port = access.port();
+        self.port_log.push(PortRecord {
             port,
-            width,
+            width: access.width(),
             written: None,
         });
         *self.port_values.get(&port).unwrap_or(&Self::FLOATING)
     }
 
-    fn port_out(&mut self, port: u16, width: Width, value: u32) {
-        self.port_log.push(PortAccess {
+    fn port_out(&mut self, access: ioport::PortAccess, value: u32) {
+        let port = access.port();
+        self.port_log.push(PortRecord {
             port,
-            width,
+            width: access.width(),
             written: Some(value),
         });
         self.port_values.insert(port, value);
@@ -949,12 +951,12 @@ impl IoPorts for TestKernel {
         &mut self.dev.ports
     }
 
-    fn port_in(&mut self, port: u16, width: Width) -> u32 {
-        self.dev.port_in(port, width)
+    fn port_in(&mut self, access: ioport::PortAccess) -> u32 {
+        self.dev.port_in(access)
     }
 
-    fn port_out(&mut self, port: u16, width: Width, value: u32) {
-        self.dev.port_out(port, width, value)
+    fn port_out(&mut self, access: ioport::PortAccess, value: u32) {
+        self.dev.port_out(access, value)
     }
 }
 
@@ -989,11 +991,11 @@ impl IoPorts for IpcTestKernel {
         self.0.port_bitmap_mut()
     }
 
-    fn port_in(&mut self, port: u16, width: Width) -> u32 {
-        self.0.port_in(port, width)
+    fn port_in(&mut self, access: ioport::PortAccess) -> u32 {
+        self.0.port_in(access)
     }
 
-    fn port_out(&mut self, port: u16, width: Width, value: u32) {
-        self.0.port_out(port, width, value)
+    fn port_out(&mut self, access: ioport::PortAccess, value: u32) {
+        self.0.port_out(access, value)
     }
 }

@@ -19,7 +19,7 @@ use crate::ipc::tests::*;
 use crate::ipc::{MessageInfo, word};
 use crate::slot::{Slot, SlotMemory};
 use crate::syscall::Outcome;
-use crate::testing::{FakeDevices, PortAccess};
+use crate::testing::{FakeDevices, PortRecord};
 
 /// Root slots: IOPortControl, a root; slots 21 to 31 are free.
 const S_CONTROL: u64 = 20;
@@ -99,7 +99,7 @@ fn marks_exactly(w: &World, ranges: &[(u16, u16)]) -> bool {
 }
 
 /// The root slots, the bitmap and the port accesses so far.
-fn snapshot(w: &World) -> (Vec<Slot>, PortBitmap, Vec<PortAccess>) {
+fn snapshot(w: &World) -> (Vec<Slot>, PortBitmap, Vec<PortRecord>) {
     (
         (0..32).map(|i| w.k.load(rs(i))).collect(),
         w.k.dev.ports.clone(),
@@ -438,7 +438,7 @@ fn in_reads_zero_extended_within_the_range_width_included() {
     let last = w.k.dev.port_log.last().copied().unwrap();
     assert_eq!(
         last,
-        PortAccess {
+        PortRecord {
             port: 0x3F8,
             width: Width::Dword,
             written: None

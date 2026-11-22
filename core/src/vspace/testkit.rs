@@ -476,11 +476,11 @@ impl crate::ioport::IoPorts for Space {
         unreachable!("no I/O port in a paging test")
     }
 
-    fn port_in(&mut self, _: u16, _: crate::ioport::Width) -> u32 {
+    fn port_in(&mut self, _: crate::ioport::PortAccess) -> u32 {
         unreachable!("no I/O port in a paging test")
     }
 
-    fn port_out(&mut self, _: u16, _: crate::ioport::Width, _: u32) {
+    fn port_out(&mut self, _: crate::ioport::PortAccess, _: u32) {
         unreachable!("no I/O port in a paging test")
     }
 }
