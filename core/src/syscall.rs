@@ -39,10 +39,12 @@ use crate::cap::{Cap, TCB_SLOT_CALLER, TCB_SLOT_CSPACE};
 use crate::cspace;
 use crate::error::{LookupFailure, SyscallError};
 use crate::invoke::{self, ExtraCap, InvokeError, Message};
+use crate::ioport::IoPorts;
 use crate::ipc::{
     self, DoubleFault, EndpointCap, IpcEnv, MSG_MAX_EXTRA_CAPS, MSG_MAX_LENGTH, MSG_REG_COUNT,
     MessageInfo, NotificationCap, word,
 };
+use crate::irq::Interrupts;
 use crate::regs::{Fault, Regs};
 use crate::sched::{self, Scheduling};
 use crate::slot::SlotAddr;
@@ -83,7 +85,10 @@ pub enum DebugCall {
 /// (`fault_ip` on the `syscall`, `next_ip` after it). `debug` says whether
 /// the kernel was built with the `debug` feature. The current thread must
 /// be `Running`.
-pub fn handle_syscall<E: IpcEnv + PagingStore + ?Sized>(e: &mut E, debug: bool) -> Outcome {
+pub fn handle_syscall<E: IpcEnv + PagingStore + Interrupts + IoPorts + ?Sized>(
+    e: &mut E,
+    debug: bool,
+) -> Outcome {
     let t = caller(e);
     let regs = e.regs(t);
     let Some(syscall) = Syscall::from_number(regs.rdx, debug) else {
@@ -191,7 +196,7 @@ fn cap_fault<E: IpcEnv + ?Sized>(
 
 /// `Call` (`call`), `Send` (`blocking`) or `NBSend` by `t` (seL4
 /// `handleInvocation`).
-fn invocation<E: IpcEnv + PagingStore + ?Sized>(
+fn invocation<E: IpcEnv + PagingStore + Interrupts + IoPorts + ?Sized>(
     e: &mut E,
     t: TcbRef,
     call: bool,

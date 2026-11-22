@@ -17,6 +17,8 @@
 //!   `CNode_SaveCaller`, `CNode_CancelBadgedSends` and the notification
 //!   binding included, and [`Error`] is the error a failed one returns,
 //!   decoded.
+//! - [`device`] performs the IRQControl, IRQHandler, IOPortControl and
+//!   IOPort invocations (M7).
 //! - [`objects`] hands out the root task's free slots and picks the untyped
 //!   its objects are retyped from.
 //! - [`print!`] and [`println!`] write through `DebugPutChar`; the panic
@@ -38,6 +40,7 @@ extern crate std;
 
 pub mod cpu;
 mod debug;
+pub mod device;
 pub mod error;
 pub mod invoke;
 pub mod notification;

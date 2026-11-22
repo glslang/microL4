@@ -113,6 +113,12 @@ fn acknowledge_stale() -> u32 {
     n
 }
 
+/// This CPU's local APIC ID: the destination of every issued I/O APIC
+/// pin.
+pub fn id() -> u8 {
+    (read(a::ID) >> 24) as u8
+}
+
 /// Signals the end of the interrupt in service.
 pub fn eoi() {
     write(a::EOI, 0);

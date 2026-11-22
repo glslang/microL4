@@ -508,12 +508,23 @@ fn a_label_outside_the_type_or_unassigned_is_illegal_before_the_length() {
     check(rs(S_UT), &unassigned);
     check(rs(S_ROOT), &[RETYPE]);
     check(rs(S_ROOT), &unassigned);
-    // Every other type, for now: an endpoint, a PageTable, IRQControl.
-    for s in [rs(20), rs(25), rs(26), rs(27), ls(1)] {
+    // Every other type: an endpoint, a PageTable.
+    for s in [rs(20), rs(25), rs(26), ls(1)] {
         check(s, &[RETYPE]);
         check(s, &cnode_labels);
         check(s, &unassigned);
     }
+    // IRQControl decodes GetISA and GetIOAPIC from M7, and nothing else:
+    // GetMSI and GetSint wait for M9, and IRQHandler's labels are another
+    // type's (`crate::irq`'s tests cover the rest of the range).
+    check(rs(27), &[RETYPE]);
+    check(rs(27), &cnode_labels);
+    let others = [0x62, 0x63, 0x64, 0x67, 0x68, 0x69, 0x6A, 0x70];
+    check(rs(27), &others);
+    check(
+        rs(27),
+        &unassigned.map(|l| if l == 0x60 { 0x6F } else { l }),
+    );
 }
 
 #[test]

@@ -815,6 +815,46 @@ mod vspace_test {
         }
     }
 
+    impl l4core::irq::Interrupts for Wired {
+        fn irq_table(&self) -> &l4core::irq::IrqTable {
+            self.0.irq_table()
+        }
+
+        fn irq_table_mut(&mut self) -> &mut l4core::irq::IrqTable {
+            self.0.irq_table_mut()
+        }
+
+        fn routing(&self) -> &l4core::irq::Routing {
+            self.0.routing()
+        }
+
+        fn irq_node(&self) -> SlotAddr {
+            self.0.irq_node()
+        }
+
+        fn irq_action(&mut self, action: l4core::irq::Action) -> bool {
+            self.0.irq_action(action)
+        }
+    }
+
+    impl l4core::ioport::IoPorts for Wired {
+        fn port_bitmap(&self) -> &l4core::ioport::PortBitmap {
+            self.0.port_bitmap()
+        }
+
+        fn port_bitmap_mut(&mut self) -> &mut l4core::ioport::PortBitmap {
+            self.0.port_bitmap_mut()
+        }
+
+        fn port_in(&mut self, port: u16, width: l4core::ioport::Width) -> u32 {
+            self.0.port_in(port, width)
+        }
+
+        fn port_out(&mut self, port: u16, width: l4core::ioport::Width, value: u32) {
+            self.0.port_out(port, width, value)
+        }
+    }
+
     fn wired() -> Wired {
         Wired(Objects::begin())
     }

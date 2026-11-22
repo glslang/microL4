@@ -33,6 +33,7 @@ use core::ops::Range;
 
 use l4core::acpi::Platform;
 use l4core::handoff::{Handoff, MemoryRegion, PHYS_MAP_BASE};
+use l4core::irq::Routing;
 use l4core::window::{DeviceWindow, MAX_IOAPICS};
 
 use crate::boot::BootState;
@@ -124,7 +125,12 @@ pub fn init(boot: &'static BootState) -> &'static BootFacts {
     let platform = acpi::platform();
     apic::init();
     pic::init(platform.madt.pcat_compat());
-    let ioapic_pins = ioapic::init(platform);
+    let ioapics = ioapic::init(platform, apic::id());
+    objects::init_interrupts(Routing::from_platform(
+        platform,
+        &ioapics.pins,
+        &ioapics.versions,
+    ));
     let hpet = hpet::init(platform);
     let calibration = timer::init(hv, hpet);
 
@@ -133,7 +139,7 @@ pub fn init(boot: &'static BootState) -> &'static BootFacts {
         phys_addr_bits: cpu::phys_addr_bits(),
         tsc_hz: calibration.tsc_hz,
         platform,
-        ioapic_pins,
+        ioapic_pins: ioapics.pins,
         device_window: window,
         locked_hypercall_page: hv.locked_hypercall_page,
         hypervisor_vendor: hypervisor().vendor(),

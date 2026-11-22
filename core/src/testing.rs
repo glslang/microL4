@@ -3,11 +3,16 @@
 //! Built for `cargo test` and with the `testing` feature, which `model/`
 //! uses. The kernel never enables it.
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS};
+use crate::acpi::IsaRoute;
+use crate::apic;
+use crate::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS, SLOT_SIZE};
+use crate::ioport::{self, IoPorts, PortBitmap, Width};
 use crate::ipc::IpcEnv;
+use crate::irq::{self, Action, IRQS, Interrupts, IoApicDesc, IrqTable, Routing, RteWrite};
 use crate::kernel::{Kernel, Preempted};
 use crate::sched::{Scheduler, Scheduling};
 use crate::slot::{Slot, SlotAddr, SlotMemory};
@@ -183,6 +188,10 @@ pub struct TestKernel {
     pub by_call: bool,
     /// What [`Threads::synic_pages`] answers.
     pub synic: [u64; 2],
+    /// The IRQ table, the IRQ node, the port bitmap and models of the
+    /// I/O APICs and the local APIC, for [`Interrupts`] and [`IoPorts`].
+    /// No I/O APIC unless a test adds them ([`FakeDevices::q35`]).
+    pub dev: FakeDevices,
 }
 
 impl TestKernel {
@@ -197,6 +206,7 @@ impl TestKernel {
             thread_events: Vec::new(),
             by_call: true,
             synic: [0; 2],
+            dev: FakeDevices::new(),
         }
     }
 
@@ -217,13 +227,22 @@ impl TestKernel {
     }
 }
 
+/// Slots of fake memory, and of the IRQ node at [`IRQ_NODE_BASE`].
 impl SlotMemory for TestKernel {
     fn load(&self, at: SlotAddr) -> Slot {
-        self.mem.load(at)
+        if FakeDevices::in_node(at) {
+            self.dev.node.load(at)
+        } else {
+            self.mem.load(at)
+        }
     }
 
     fn store(&mut self, at: SlotAddr, slot: Slot) {
-        self.mem.store(at, slot)
+        if FakeDevices::in_node(at) {
+            self.dev.node.store(at, slot)
+        } else {
+            self.mem.store(at, slot)
+        }
     }
 }
 
@@ -354,16 +373,20 @@ fn endpoint_field(ep: EpRef, offset: u64) -> u64 {
     ep.get() + offset
 }
 
-/// A [`TestKernel`] whose hooks do what the kernel's do for threads and
-/// IPC, for tests of [`crate::ipc`] and [`crate::syscall`]:
+/// A [`TestKernel`] whose hooks do what the kernel's do for threads, IPC,
+/// interrupts and I/O ports, for tests of [`crate::ipc`],
+/// [`crate::syscall`], [`crate::irq`] and [`crate::ioport`]:
 ///
 /// - [`Threads::cancel_ipc`] is [`crate::ipc::cancel_ipc`], and
 ///   [`Threads::cancel_badged_sends`] [`crate::ipc::cancel_badged_sends`],
 ///   each after recording the call as [`TestKernel`] does;
 /// - [`Kernel::finalise`] unbinds and suspends a TCB when its last
-///   capability goes ([`crate::tcb::finalise`]) and releases an endpoint's
-///   or a notification's queue ([`crate::ipc::finalise`]), after recording
-///   the call as [`TestKernel`] does;
+///   capability goes ([`crate::tcb::finalise`]), releases an endpoint's
+///   or a notification's queue ([`crate::ipc::finalise`]), and finalises
+///   an IRQHandler ([`crate::irq::finalise`]) or an IOPort
+///   ([`crate::ioport::finalise`]), after recording the call as
+///   [`TestKernel`] does; [`Kernel::after_delete`] frees their IRQ or
+///   range;
 /// - [`Threads::invoked_by_call`] is [`crate::syscall::invoked_by_call`];
 /// - [`IpcEnv`] reads and writes fake memory.
 ///
@@ -410,11 +433,20 @@ impl Kernel for IpcTestKernel {
             crate::tcb::finalise(self, t);
         }
         crate::ipc::finalise(self, cap, last);
-        cleanup
+        match cap.cap_type() {
+            CapType::IrqHandler => irq::finalise(self, cap, last),
+            CapType::IoPort => ioport::finalise(cap, last),
+            _ => cleanup,
+        }
     }
 
     fn after_delete(&mut self, cleanup: Cap) {
-        self.0.after_delete(cleanup)
+        self.0.after_delete(cleanup);
+        match cleanup.cap_type() {
+            CapType::IrqHandler => irq::after_delete(self, cleanup),
+            CapType::IoPort => ioport::after_delete(self, cleanup),
+            _ => {}
+        }
     }
 
     fn moved(&mut self, cap: Cap, from: SlotAddr, to: SlotAddr) {
@@ -526,5 +558,442 @@ impl IpcEnv for IpcTestKernel {
 
     fn read_buffer_word(&self, paddr: u64) -> u64 {
         self.0.mem.read(paddr)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interrupts and I/O ports
+// ---------------------------------------------------------------------------
+
+/// Where the test kernels keep the IRQ node: far above every test's fake
+/// memory, in memory of its own.
+pub const IRQ_NODE_BASE: u64 = 0xF000_0000;
+
+/// The read-only bits of a redirection entry's low word: delivery status
+/// and Remote IRR.
+const RTE_READ_ONLY: u32 = 1 << 12 | apic::REDIRECTION_REMOTE_IRR;
+
+/// A model of an I/O APIC, as QEMU 8.2's `hw/intc/ioapic.c` behaves (from
+/// memory): its redirection entries, its input lines and its latched edge
+/// requests.
+///
+/// - A level pin sends its vector while its line is high, it is unmasked
+///   and Remote IRR is clear, and sets Remote IRR; an EOI for the vector,
+///   broadcast by the local APIC or written to the EOI register (version
+///   `0x20` only), clears Remote IRR in level entries with that vector.
+/// - An edge pin latches a request each time its line is raised while it
+///   is unmasked, as QEMU does whether or not the line was already high,
+///   and drops one raised while it is masked (the 82093AA's rule); a
+///   latched request is sent once.
+/// - Writing an entry keeps its read-only bits, and an entry written
+///   edge-triggered loses Remote IRR (`ioapic_fix_edge_remote_irr`).
+/// - With `stuck_remote_irr`, no write and no EOI clears Remote IRR: the
+///   hardware ADR 0027's paths would fail on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FakeIoApic {
+    pub version: u8,
+    /// Each pin's entry: low and high word.
+    pub entries: Vec<(u32, u32)>,
+    /// Each pin's input line.
+    pub line: Vec<bool>,
+    /// Each edge pin's latched request.
+    latched: Vec<bool>,
+    pub stuck_remote_irr: bool,
+    /// Edge requests dropped because the pin was masked.
+    pub dropped_edges: u64,
+    /// Writes that unmasked a level entry with Remote IRR set, which the
+    /// kernel must never make.
+    pub unmasked_with_remote_irr: u64,
+}
+
+impl FakeIoApic {
+    /// `pins` pins, each masked, edge-triggered and with vector 0, its line
+    /// low.
+    pub fn new(version: u8, pins: u16) -> FakeIoApic {
+        let n = usize::from(pins);
+        FakeIoApic {
+            version,
+            entries: vec![(apic::REDIRECTION_MASKED, 0); n],
+            line: vec![false; n],
+            latched: vec![false; n],
+            stuck_remote_irr: false,
+            dropped_edges: 0,
+            unmasked_with_remote_irr: 0,
+        }
+    }
+
+    /// Pin `pin`'s entry's low word.
+    pub fn low(&self, pin: u16) -> u32 {
+        self.entries[usize::from(pin)].0
+    }
+
+    fn level(low: u32) -> bool {
+        low & apic::REDIRECTION_LEVEL != 0
+    }
+
+    fn masked(low: u32) -> bool {
+        low & apic::REDIRECTION_MASKED != 0
+    }
+
+    /// Writes pin `pin`'s low word, keeping its read-only bits; returns
+    /// the vector it then sends, if any.
+    pub fn write_low(&mut self, pin: u16, value: u32) -> Option<u8> {
+        let i = usize::from(pin);
+        let old = self.entries[i].0;
+        let mut new = (value & !RTE_READ_ONLY) | (old & RTE_READ_ONLY);
+        if !Self::level(new) && !self.stuck_remote_irr {
+            new &= !apic::REDIRECTION_REMOTE_IRR;
+        }
+        if Self::masked(old) && !Self::masked(new) && Self::level(new) && apic::remote_irr(new) {
+            self.unmasked_with_remote_irr += 1;
+        }
+        self.entries[i].0 = new;
+        self.service(pin)
+    }
+
+    /// Writes pin `pin`'s high word.
+    pub fn write_high(&mut self, pin: u16, value: u32) {
+        self.entries[usize::from(pin)].1 = value;
+    }
+
+    /// An EOI for `vector`: Remote IRR clears in every level entry with
+    /// it, which then sends again if its line is still high. Returns the
+    /// vectors sent.
+    pub fn eoi(&mut self, vector: u8) -> Vec<u8> {
+        let mut sent = Vec::new();
+        for pin in 0..self.entries.len() as u16 {
+            let low = self.low(pin);
+            if low & apic::REDIRECTION_VECTOR == u32::from(vector)
+                && Self::level(low)
+                && apic::remote_irr(low)
+                && !self.stuck_remote_irr
+            {
+                self.entries[usize::from(pin)].0 = low & !apic::REDIRECTION_REMOTE_IRR;
+                sent.extend(self.service(pin));
+            }
+        }
+        sent
+    }
+
+    /// A write of `vector` to the EOI register, which only version `0x20`
+    /// and later have.
+    pub fn eoi_register(&mut self, vector: u8) -> Vec<u8> {
+        if self.version >= apic::IOAPIC_EOI_VERSION {
+            self.eoi(vector)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Drives pin `pin`'s line: raising it requests an interrupt (dropped
+    /// on a masked edge pin). Returns the vector sent, if any.
+    pub fn set_line(&mut self, pin: u16, high: bool) -> Option<u8> {
+        let i = usize::from(pin);
+        self.line[i] = high;
+        let low = self.low(pin);
+        if !high {
+            return None;
+        }
+        if Self::level(low) {
+            return self.service(pin);
+        }
+        if Self::masked(low) {
+            self.dropped_edges += 1;
+            return None;
+        }
+        self.latched[i] = true;
+        self.service(pin)
+    }
+
+    /// Leaves pin `pin` as a delivery whose EOI never came does: level,
+    /// masked, `vector`, Remote IRR set.
+    pub fn strand(&mut self, pin: u16, vector: u8) {
+        self.entries[usize::from(pin)].0 = u32::from(vector)
+            | apic::REDIRECTION_LEVEL
+            | apic::REDIRECTION_MASKED
+            | apic::REDIRECTION_REMOTE_IRR;
+    }
+
+    /// Sends pin `pin`'s vector if the pin may.
+    fn service(&mut self, pin: u16) -> Option<u8> {
+        let i = usize::from(pin);
+        let low = self.low(pin);
+        if Self::masked(low) {
+            return None;
+        }
+        let vector = (low & apic::REDIRECTION_VECTOR) as u8;
+        if Self::level(low) {
+            if !self.line[i] || apic::remote_irr(low) {
+                return None;
+            }
+            self.entries[i].0 = low | apic::REDIRECTION_REMOTE_IRR;
+        } else {
+            if !self.latched[i] {
+                return None;
+            }
+            self.latched[i] = false;
+        }
+        Some(vector)
+    }
+}
+
+/// An I/O port access [`FakeDevices`] recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortAccess {
+    pub port: u16,
+    pub width: Width,
+    /// `None` for a read; the value written for a write.
+    pub written: Option<u32>,
+}
+
+/// The interrupt and port state of a test kernel, and models of its
+/// devices: the IRQ table, the routes, the IRQ node, the I/O APICs
+/// ([`FakeIoApic`]), the local APIC's IRR, the port bitmap and the ports.
+#[derive(Clone, Debug)]
+pub struct FakeDevices {
+    pub table: IrqTable,
+    pub routing: Routing,
+    pub ioapics: Vec<FakeIoApic>,
+    /// The local APIC's IRR: vectors the I/O APICs sent and the CPU has
+    /// not taken.
+    pub lapic_irr: BTreeSet<u8>,
+    /// The boot CPU's local APIC ID, for the destination words.
+    pub apic_id: u8,
+    /// Every action performed, in order.
+    pub actions: Vec<Action>,
+    /// The IRQ node's slots, at [`IRQ_NODE_BASE`].
+    pub node: FakeMemory,
+    pub ports: PortBitmap,
+    /// Every port access, in order.
+    pub port_log: Vec<PortAccess>,
+    /// What a read of a port returns: the last value written to it, else
+    /// [`FakeDevices::FLOATING`].
+    pub port_values: BTreeMap<u16, u32>,
+}
+
+impl FakeDevices {
+    /// What a port no test wrote reads as, wider than any width, so tests
+    /// see the zero-extension.
+    pub const FLOATING: u32 = 0xDEAD_BEEF;
+
+    /// No I/O APIC, no route, nothing issued.
+    pub fn new() -> FakeDevices {
+        FakeDevices {
+            table: IrqTable::new(),
+            routing: Routing::NONE,
+            ioapics: Vec::new(),
+            lapic_irr: BTreeSet::new(),
+            apic_id: 0,
+            actions: Vec::new(),
+            node: FakeMemory::new(IRQ_NODE_BASE, IRQS as u64 * SLOT_SIZE),
+            ports: PortBitmap::new(),
+            port_log: Vec::new(),
+            port_values: BTreeMap::new(),
+        }
+    }
+
+    /// QEMU's q35 with one I/O APIC of `version` and 24 pins, GSI 0 to 23,
+    /// and its MADT's overrides: ISA IRQ 0 to GSI 2 (so IRQ 2 has no
+    /// route), and IRQs 5, 9, 10 and 11 level-triggered, active high
+    /// (`docs/design.md`, "Local APIC, PIC and I/O APIC (M3)").
+    pub fn q35(version: u8) -> FakeDevices {
+        let mut d = FakeDevices::new();
+        d.ioapics.push(FakeIoApic::new(version, 24));
+        d.routing.ioapics[0] = Some(IoApicDesc {
+            gsi_base: 0,
+            pins: 24,
+            version,
+        });
+        for (n, route) in d.routing.isa.iter_mut().enumerate() {
+            let n = n as u32;
+            *route = match n {
+                0 => Some(IsaRoute {
+                    gsi: 2,
+                    level: false,
+                    active_low: false,
+                }),
+                2 => None,
+                _ => Some(IsaRoute {
+                    gsi: n,
+                    level: matches!(n, 5 | 9 | 10 | 11),
+                    active_low: false,
+                }),
+            };
+        }
+        d
+    }
+
+    /// Whether `at` is a slot of the IRQ node.
+    pub fn in_node(at: SlotAddr) -> bool {
+        (IRQ_NODE_BASE..IRQ_NODE_BASE + IRQS as u64 * SLOT_SIZE).contains(&at.get())
+    }
+
+    /// Performs `action` on its pin's model I/O APIC, as the kernel's
+    /// `ioapic.rs` does: reads the entry, then makes [`Action::writes`].
+    pub fn perform(&mut self, action: Action) -> bool {
+        self.actions.push(action);
+        let pin = action.pin();
+        let apic_id = self.apic_id;
+        let io = &mut self.ioapics[usize::from(pin.ioapic)];
+        let low = io.low(pin.pin);
+        if let Action::CheckRemoteIrr(_) = action {
+            return apic::remote_irr(low);
+        }
+        let mut sent = Vec::new();
+        for w in action.writes(low, apic_id).into_iter().flatten() {
+            match w {
+                RteWrite::Low(v) => sent.extend(io.write_low(pin.pin, v)),
+                RteWrite::High(v) => io.write_high(pin.pin, v),
+                RteWrite::Eoi(v) => sent.extend(io.eoi_register(v as u8)),
+            }
+        }
+        self.lapic_irr.extend(sent);
+        false
+    }
+
+    /// Drives the line of the pin that serves `gsi`, which must exist.
+    pub fn set_line(&mut self, gsi: u32, high: bool) {
+        let (pin, _) = self
+            .routing
+            .pin(u64::from(gsi))
+            .expect("a GSI an I/O APIC serves");
+        let sent = self.ioapics[usize::from(pin.ioapic)].set_line(pin.pin, high);
+        self.lapic_irr.extend(sent);
+    }
+
+    /// The model I/O APIC and the pin on it that serve `gsi`.
+    pub fn pin(&self, gsi: u32) -> (&FakeIoApic, u16) {
+        let (pin, _) = self
+            .routing
+            .pin(u64::from(gsi))
+            .expect("a GSI an I/O APIC serves");
+        (&self.ioapics[usize::from(pin.ioapic)], pin.pin)
+    }
+
+    /// The model I/O APIC and the pin on it that serve `gsi`, to change.
+    pub fn pin_mut(&mut self, gsi: u32) -> (&mut FakeIoApic, u16) {
+        let (pin, _) = self
+            .routing
+            .pin(u64::from(gsi))
+            .expect("a GSI an I/O APIC serves");
+        (&mut self.ioapics[usize::from(pin.ioapic)], pin.pin)
+    }
+
+    /// The CPU takes the highest vector the local APIC holds, if any.
+    pub fn take(&mut self) -> Option<u8> {
+        self.lapic_irr.pop_last()
+    }
+
+    /// The kernel's EOI for `vector`, broadcast to every I/O APIC.
+    pub fn eoi(&mut self, vector: u8) {
+        let mut sent = Vec::new();
+        for io in &mut self.ioapics {
+            sent.extend(io.eoi(vector));
+        }
+        self.lapic_irr.extend(sent);
+    }
+
+    fn port_in(&mut self, port: u16, width: Width) -> u32 {
+        self.port_log.push(PortAccess {
+            port,
+            width,
+            written: None,
+        });
+        *self.port_values.get(&port).unwrap_or(&Self::FLOATING)
+    }
+
+    fn port_out(&mut self, port: u16, width: Width, value: u32) {
+        self.port_log.push(PortAccess {
+            port,
+            width,
+            written: Some(value),
+        });
+        self.port_values.insert(port, value);
+    }
+}
+
+impl Default for FakeDevices {
+    fn default() -> FakeDevices {
+        FakeDevices::new()
+    }
+}
+
+impl Interrupts for TestKernel {
+    fn irq_table(&self) -> &IrqTable {
+        &self.dev.table
+    }
+
+    fn irq_table_mut(&mut self) -> &mut IrqTable {
+        &mut self.dev.table
+    }
+
+    fn routing(&self) -> &Routing {
+        &self.dev.routing
+    }
+
+    fn irq_node(&self) -> SlotAddr {
+        SlotAddr::new(IRQ_NODE_BASE).expect("a slot address")
+    }
+
+    fn irq_action(&mut self, action: Action) -> bool {
+        self.dev.perform(action)
+    }
+}
+
+impl IoPorts for TestKernel {
+    fn port_bitmap(&self) -> &PortBitmap {
+        &self.dev.ports
+    }
+
+    fn port_bitmap_mut(&mut self) -> &mut PortBitmap {
+        &mut self.dev.ports
+    }
+
+    fn port_in(&mut self, port: u16, width: Width) -> u32 {
+        self.dev.port_in(port, width)
+    }
+
+    fn port_out(&mut self, port: u16, width: Width, value: u32) {
+        self.dev.port_out(port, width, value)
+    }
+}
+
+impl Interrupts for IpcTestKernel {
+    fn irq_table(&self) -> &IrqTable {
+        self.0.irq_table()
+    }
+
+    fn irq_table_mut(&mut self) -> &mut IrqTable {
+        self.0.irq_table_mut()
+    }
+
+    fn routing(&self) -> &Routing {
+        self.0.routing()
+    }
+
+    fn irq_node(&self) -> SlotAddr {
+        self.0.irq_node()
+    }
+
+    fn irq_action(&mut self, action: Action) -> bool {
+        self.0.irq_action(action)
+    }
+}
+
+impl IoPorts for IpcTestKernel {
+    fn port_bitmap(&self) -> &PortBitmap {
+        self.0.port_bitmap()
+    }
+
+    fn port_bitmap_mut(&mut self) -> &mut PortBitmap {
+        self.0.port_bitmap_mut()
+    }
+
+    fn port_in(&mut self, port: u16, width: Width) -> u32 {
+        self.0.port_in(port, width)
+    }
+
+    fn port_out(&mut self, port: u16, width: Width, value: u32) {
+        self.0.port_out(port, width, value)
     }
 }

@@ -444,6 +444,47 @@ impl Threads for Space {
     }
 }
 
+/// No paging test issues an interrupt or a port range.
+impl crate::irq::Interrupts for Space {
+    fn irq_table(&self) -> &crate::irq::IrqTable {
+        unreachable!("no interrupt in a paging test")
+    }
+
+    fn irq_table_mut(&mut self) -> &mut crate::irq::IrqTable {
+        unreachable!("no interrupt in a paging test")
+    }
+
+    fn routing(&self) -> &crate::irq::Routing {
+        unreachable!("no interrupt in a paging test")
+    }
+
+    fn irq_node(&self) -> SlotAddr {
+        unreachable!("no interrupt in a paging test")
+    }
+
+    fn irq_action(&mut self, _: crate::irq::Action) -> bool {
+        unreachable!("no interrupt in a paging test")
+    }
+}
+
+impl crate::ioport::IoPorts for Space {
+    fn port_bitmap(&self) -> &crate::ioport::PortBitmap {
+        unreachable!("no I/O port in a paging test")
+    }
+
+    fn port_bitmap_mut(&mut self) -> &mut crate::ioport::PortBitmap {
+        unreachable!("no I/O port in a paging test")
+    }
+
+    fn port_in(&mut self, _: u16, _: crate::ioport::Width) -> u32 {
+        unreachable!("no I/O port in a paging test")
+    }
+
+    fn port_out(&mut self, _: u16, _: crate::ioport::Width, _: u32) {
+        unreachable!("no I/O port in a paging test")
+    }
+}
+
 impl Kernel for Space {
     fn finalise(&mut self, cap: Cap, last: bool) -> Option<Cap> {
         self.events.push(Event::Finalise { cap, last });

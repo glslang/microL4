@@ -26,6 +26,15 @@
 //!   interrupts. With `selftest` it also counts polls, times the longest
 //!   stretch between two, and can be told to report a preemption with no
 //!   interrupt pending.
+//! - From M7, `Objects` also implements `Interrupts` and `IoPorts`: the
+//!   IRQ table and the port bitmap live in a static only `Objects`
+//!   reaches, as the scheduler does; the IRQ node is 192 slots in the
+//!   kernel image's `.bss`, reached like every other slot through the
+//!   direct map at its physical address; I/O APIC actions go to
+//!   [`super::ioapic`], port accesses to [`super::io`]. An IRQHandler's last
+//!   capability deletes its IRQ node slot's capability and, once its slot
+//!   is empty, masks the pin and frees the IRQ; an IOPort's frees its range
+//!   (`l4core::irq`, `l4core::ioport`).
 
 use core::cell::UnsafeCell;
 use core::ops::Range;
@@ -34,7 +43,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use l4core::bootinfo::{BOOTINFO_SIZE, BootInfo};
 use l4core::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS, SLOT_SIZE, TCB_BITS};
+use l4core::handoff::KERNEL_VIRT_BASE;
+use l4core::ioport::{self, IoPorts, PortBitmap, Width};
 use l4core::ipc::{self, IpcEnv};
+use l4core::irq::{self, Action, IRQS, Interrupts, IrqTable, Routing};
 use l4core::kernel::{Kernel, Preempted};
 use l4core::objmem::ObjectMemory;
 use l4core::sched::{Scheduler, Scheduling};
@@ -42,7 +54,7 @@ use l4core::slot::{Slot, SlotAddr, SlotMemory};
 use l4core::syscall;
 use l4core::tcb::{self, EpRef, NtfnRef, REGS_OFFSET, TcbRef, Tcbs, Threads, XSAVE_OFFSET};
 
-use super::{BootFacts, StaticCell, apic, entry, fpu, paging, phys_to_virt, thread};
+use super::{BootFacts, StaticCell, apic, entry, fpu, io, ioapic, paging, phys_to_virt, thread};
 use crate::boot::BootState;
 
 #[cfg(feature = "debug")]
@@ -56,10 +68,17 @@ static MEMORY: StaticCell<ObjectMemory> = StaticCell::new();
 
 /// Computes the memory kernel objects may occupy: the `USABLE`, `LOADER`
 /// and `ACPI_RECLAIMABLE` memory of the map from 1 MiB to the direct map's
-/// end, without the kernel image and a hypercall page the firmware locked.
-/// Called once, at the end of step 5, when that memory is free.
+/// end, without the kernel image and a hypercall page the firmware locked;
+/// and the IRQ node's physical address. Called once, at the end of step 5,
+/// when that memory is free.
 pub fn init(boot: &BootState, facts: &BootFacts) {
     let image = facts.kernel_image.clone();
+    let node = &raw const IRQ_NODE as u64 - KERNEL_VIRT_BASE + image.start;
+    assert!(
+        node.is_multiple_of(SLOT_SIZE) && node + IRQ_NODE_BYTES <= image.end,
+        "the IRQ node at {node:#x} is not 32-byte aligned slots in the kernel image"
+    );
+    IRQ_NODE_PHYS.init(node);
     let memory = match facts.locked_hypercall_page {
         Some(page) => {
             let holes = [image, page..page + 4096];
@@ -99,6 +118,61 @@ struct SchedulerCell(UnsafeCell<Scheduler>);
 unsafe impl Sync for SchedulerCell {}
 
 static SCHEDULER: SchedulerCell = SchedulerCell(UnsafeCell::new(Scheduler::new()));
+
+/// The IRQ table and the bitmap of issued ports (`docs/abi.md`, "Static
+/// kernel memory reserved at boot for interrupts, I/O ports and Hyper-V").
+struct Devices {
+    table: IrqTable,
+    ports: PortBitmap,
+}
+
+struct DevicesCell(UnsafeCell<Devices>);
+
+// SAFETY: as for `SchedulerCell`: one core, interrupts off in kernel code,
+// and `Objects`' `Interrupts` and `IoPorts` methods are the only way to
+// the cell, each reference tied to the borrow of the `Objects` it came
+// through.
+unsafe impl Sync for DevicesCell {}
+
+static DEVICES: DevicesCell = DevicesCell(UnsafeCell::new(Devices {
+    table: IrqTable::new(),
+    ports: PortBitmap::new(),
+}));
+
+/// The routes step 5 found, for `GetISA` and `GetIOAPIC`.
+static ROUTING: StaticCell<Routing> = StaticCell::new();
+
+/// Records the routes step 5 found. Once.
+pub fn init_interrupts(routing: Routing) {
+    ROUTING.init(routing);
+}
+
+/// The IRQ node: one 32-byte slot per IRQ, zero (empty) at boot, in the
+/// kernel image's `.bss`. Nothing names it but its address: `Objects`
+/// reads and writes its slots through the direct map at
+/// [`IRQ_NODE_PHYS`], by value, as every slot.
+#[repr(C, align(32))]
+struct IrqNode(UnsafeCell<[[u64; 4]; IRQS]>);
+
+// SAFETY: no reference into the node is ever made; its address is taken
+// once, and `Objects` reaches its slots only by value through raw pointers
+// at their physical address, on one core with interrupts off.
+unsafe impl Sync for IrqNode {}
+
+static IRQ_NODE: IrqNode = IrqNode(UnsafeCell::new([[0; 4]; IRQS]));
+const IRQ_NODE_BYTES: u64 = IRQS as u64 * SLOT_SIZE;
+/// The IRQ node's physical address, from `init`.
+static IRQ_NODE_PHYS: StaticCell<u64> = StaticCell::new();
+
+/// Whether `len` bytes at `paddr` lie in the IRQ node.
+fn in_irq_node(paddr: u64, len: u64) -> bool {
+    IRQ_NODE_PHYS.get().is_some_and(|&n| {
+        paddr >= n
+            && paddr
+                .checked_add(len)
+                .is_some_and(|end| end <= n + IRQ_NODE_BYTES)
+    })
+}
 
 /// Boot step 9: BootInfo's two frames at physical `paddr`, in the boot
 /// region step 6 zeroed, as one `BootInfo` for boot to fill. The first call
@@ -163,6 +237,17 @@ impl Objects {
         #[cfg(feature = "selftest")]
         polls::begin();
         Objects { memory }
+    }
+
+    /// Debug builds: the slot `at` is in memory kernel objects may occupy
+    /// or in the IRQ node.
+    fn check_slot(&self, at: SlotAddr) {
+        debug_assert!(
+            in_irq_node(at.get(), SLOT_SIZE) || object_memory(self.memory, at.get(), SLOT_SIZE),
+            "slot {:#x} is neither in the IRQ node nor RAM for kernel objects: outside the direct map, \
+             outside USABLE, LOADER and ACPI_RECLAIMABLE memory above 1 MiB, or in the kernel image",
+            at.get()
+        );
     }
 
     /// Debug builds: `len` bytes at `paddr` are memory kernel objects may
@@ -246,26 +331,30 @@ impl Objects {
 
 impl SlotMemory for Objects {
     fn load(&self, at: SlotAddr) -> Slot {
-        self.check(at.get(), SLOT_SIZE, "slot");
+        self.check_slot(at);
         // SAFETY: core's invariants make every `SlotAddr` a slot of a CNode
-        // or TCB whose memory has not been reset (from M7 also an IRQ-node
-        // slot): 32-byte aligned, in a RAM untyped or the boot region below
-        // the direct map's end, so mapped RW at `PHYS_MAP_BASE + addr`. It
-        // is write-back there, as no RAM untyped and no boot region lies in
-        // a 2 MiB page the direct map maps uncached; a plain access would be
-        // correct uncached too. Debug builds check the memory map, not the
-        // cache type. Slot memory is plain words, so any contents are a
-        // valid `[u64; 4]`, and no Rust reference to it exists: only this
-        // type reads and writes it, by value.
+        // or TCB whose memory has not been reset, or an IRQ-node slot:
+        // 32-byte aligned, in a RAM untyped or the boot region below the
+        // direct map's end, or in `IRQ_NODE` in the kernel image's `.bss`,
+        // which is RAM the direct map covers too, so mapped RW at
+        // `PHYS_MAP_BASE + addr` (`test=paging` checks that a write
+        // through the direct map reaches `.bss`). It is write-back there,
+        // as no RAM untyped, boot region or kernel image lies in a 2 MiB
+        // page the direct map maps uncached; a plain access would be
+        // correct uncached too. Debug builds check the memory map or the
+        // node's range, not the cache type. Slot memory is plain words, so
+        // any contents are a valid `[u64; 4]`, and no Rust reference to it
+        // exists: only this type reads and writes it, by value, and
+        // `IRQ_NODE` is an `UnsafeCell` nothing else touches.
         let words = unsafe { ptr::read(phys_to_virt(at.get()) as *const [u64; 4]) };
         Slot::from_words(words)
     }
 
     fn store(&mut self, at: SlotAddr, slot: Slot) {
-        self.check(at.get(), SLOT_SIZE, "slot");
-        // SAFETY: as in `load`. The slot is outside the kernel image, so the
-        // write changes no kernel code or static data, and nothing holds a
-        // reference to it.
+        self.check_slot(at);
+        // SAFETY: as in `load`. The slot is outside the kernel image, or one
+        // of `IRQ_NODE`'s, so the write changes no kernel code and no other
+        // static data, and nothing holds a reference to it.
         unsafe { ptr::write(phys_to_virt(at.get()) as *mut [u64; 4], slot.to_words()) };
     }
 }
@@ -394,9 +483,84 @@ impl IpcEnv for Objects {
     }
 }
 
+/// The IRQ table, the routes, the IRQ node and the I/O APICs, for
+/// `l4core::irq`.
+impl Interrupts for Objects {
+    fn irq_table(&self) -> &IrqTable {
+        // SAFETY: see `DevicesCell`: the reference is tied to this borrow
+        // of `self`, and no `&mut` from `irq_table_mut` or
+        // `port_bitmap_mut` can be live while it is, since those need
+        // `&mut self`; the kernel uses one `Objects` at a time.
+        unsafe { &(*DEVICES.0.get()).table }
+    }
+
+    fn irq_table_mut(&mut self) -> &mut IrqTable {
+        // SAFETY: as in `irq_table`; `&mut self` makes this the only
+        // reference into the cell through this `Objects`, and the bitmap is
+        // a different field.
+        unsafe { &mut (*DEVICES.0.get()).table }
+    }
+
+    fn routing(&self) -> &Routing {
+        ROUTING.get().expect("the routes are recorded at step 5")
+    }
+
+    fn irq_node(&self) -> SlotAddr {
+        let node = *IRQ_NODE_PHYS
+            .get()
+            .expect("the IRQ node is placed at step 5");
+        SlotAddr::new(node).expect("init checked the IRQ node's alignment")
+    }
+
+    fn irq_action(&mut self, action: Action) -> bool {
+        ioapic::perform(action)
+    }
+}
+
+/// The port bitmap, and the port instructions in [`super::io`], for
+/// `l4core::ioport`.
+impl IoPorts for Objects {
+    fn port_bitmap(&self) -> &PortBitmap {
+        // SAFETY: as in `irq_table`.
+        unsafe { &(*DEVICES.0.get()).ports }
+    }
+
+    fn port_bitmap_mut(&mut self) -> &mut PortBitmap {
+        // SAFETY: as in `irq_table_mut`.
+        unsafe { &mut (*DEVICES.0.get()).ports }
+    }
+
+    fn port_in(&mut self, port: u16, width: Width) -> u32 {
+        // SAFETY: `l4core::ioport` checked that the invoked IOPort
+        // capability's range covers every byte of the access, and no range
+        // ever holds the ports the kernel keeps (PIC and IMCR), so the
+        // access reaches only a device the root task gave its holder; `in`
+        // touches no memory. A device's DMA or a port that resets the
+        // machine is the trust the root task places in that holder
+        // (`docs/design.md`, "Ports the kernel uses").
+        unsafe {
+            match width {
+                Width::Byte => u32::from(io::inb(port)),
+                Width::Word => u32::from(io::inw(port)),
+                Width::Dword => io::inl(port),
+            }
+        }
+    }
+
+    fn port_out(&mut self, port: u16, width: Width, value: u32) {
+        // SAFETY: as in `port_in`; `out` touches no memory.
+        unsafe {
+            match width {
+                Width::Byte => io::outb(port, value as u8),
+                Width::Word => io::outw(port, value as u16),
+                Width::Dword => io::outl(port, value),
+            }
+        }
+    }
+}
+
 impl Kernel for Objects {
     fn finalise(&mut self, cap: Cap, last: bool) -> Option<Cap> {
-        let _ = last;
         match cap.cap_type() {
             // Nothing, ever: an object's memory returns when its untyped is
             // reset, and the control capabilities and the Hypervisor
@@ -438,11 +602,13 @@ impl Kernel for Objects {
             | CapType::PageDirectory
             | CapType::Pdpt
             | CapType::Pml4 => paging::finalise(self, cap, last),
-            // M7: an IRQHandler is masked and unbound, and returns itself as
-            // the cleanup, so that `after_delete` frees the IRQ once its slot
-            // is empty; an IOPort's range is freed the same way. Neither
-            // exists before M7.
-            CapType::IrqHandler | CapType::IoPort => {}
+            // An IRQHandler's last capability deletes its IRQ node slot's
+            // capability (which may finalise the notification) and returns
+            // itself as the cleanup, so that `after_delete` masks the pin and
+            // frees the IRQ once its slot is empty; an IOPort's last returns
+            // itself, so that its range is freed the same way.
+            CapType::IrqHandler => return irq::finalise(self, cap, last),
+            CapType::IoPort => return ioport::finalise(cap, last),
             // core turns these into Zombies or nothing itself.
             CapType::Null | CapType::CNode | CapType::Zombie => {
                 unreachable!("core finalises no {:?} capability", cap.cap_type())
@@ -452,9 +618,14 @@ impl Kernel for Objects {
     }
 
     fn after_delete(&mut self, cleanup: Cap) {
-        // M7: frees the IRQ of an IRQHandler, or the range of an IOPort,
-        // whose slot is now empty. `finalise` returns no cleanup before M7.
-        let _ = cleanup;
+        // The slot of an IRQHandler's or IOPort's last capability is empty:
+        // the pin is masked, keeping its vector and trigger, and the IRQ
+        // freed; or the range is freed.
+        match cleanup.cap_type() {
+            CapType::IrqHandler => irq::after_delete(self, cleanup),
+            CapType::IoPort => ioport::after_delete(self, cleanup),
+            _ => {}
+        }
     }
 
     fn moved(&mut self, cap: Cap, from: SlotAddr, to: SlotAddr) {
