@@ -269,9 +269,9 @@ impl Ipc {
     /// that CNode, as a CNode invocation's slot argument does. The kernel
     /// copies only into an empty slot, and reads these words once per
     /// message that may carry a capability. `None` writes 0 to all three:
-    /// `CPtr` 0 reaches the null slot of the root task's CSpace, and of any
-    /// CSpace that leaves slot 0 empty, which is no CNode, so nothing is
-    /// copied (capabilities to the endpoint are still unwrapped).
+    /// a `receive_depth` of 0 names no slot, whatever slot 0 holds
+    /// (`docs/abi.md`, "Capability transfer"), so nothing is copied
+    /// (capabilities to the endpoint are still unwrapped).
     pub fn set_receive_slot(self, slot: Option<Slot>) {
         let s = slot.unwrap_or(Slot::new(0, 0, 0));
         self.set_word(word::RECEIVE_CNODE, s.root);
