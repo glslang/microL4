@@ -1,14 +1,13 @@
 //! The M7 red team's attack on the terminal
-//! (`docs/redteam/m7-console-escapes.md`): a client's output reaches the
+//! (`docs/redteam/m7-console-escapes.md`): a client's output reached the
 //! wire byte for byte, control bytes and escape sequences included, so on a
-//! VT100-compatible terminal one client can move the cursor into lines
+//! VT100-compatible terminal one client could move the cursor into lines
 //! console showed for others, erase them and forge console's own status
-//! line.
-//!
-//! [`a_client_cannot_rewrite_console_s_status_line`] states the guarantee
-//! and fails on today's console; it is ignored so that the default run
-//! passes. Run it with `cargo test -p console -- --ignored`.
+//! line. console now shows a client's control bytes as visible escapes
+//! ([`crate::shown`]); these tests run the attack against it over a small
+//! VT100 screen model.
 
+use std::format;
 use std::string::String;
 use std::vec::Vec;
 
@@ -72,13 +71,13 @@ fn the_screen_model_moves_up_and_erases() {
     assert_eq!(screen("ab\r\ncd\x1b[1A\x1b[2K\rxy\r\n"), ["xy", "cd"]);
 }
 
-/// The attack, as console behaves today: client 2 ("evil") has focus, as
-/// console's status line says; it moves up over that line, erases it and
-/// writes a forged one naming client 1 ("root"), then reads with root's
-/// prompt. The screen shows only the forgery, and the user's next line
-/// goes to client 2.
+/// The attack: client 2 ("evil") has focus, as console's status line
+/// says; it tries to move up over that line, erase it and write a forged
+/// one naming client 1 ("root"), then reads with root's prompt. Its escape
+/// sequences reach the terminal as visible text, the real status line
+/// stays, and the forgery is plainly client 2's line, escapes and all.
 #[test]
-fn a_client_s_escape_sequences_reach_the_terminal_unchanged() {
+fn a_client_s_escape_sequences_are_shown_not_obeyed() {
     let mut t = T::new();
     let mut wire = String::new();
     t.term.attach(0, b"root");
@@ -87,7 +86,7 @@ fn a_client_s_escape_sequences_reach_the_terminal_unchanged() {
     wire += &t.typed(b"\x142");
     assert_eq!(t.term.focus(), 1);
     let out = t.write(1, "\x1b[1A\x1b[2K[console] focus 1 (root)\nroot# ");
-    assert!(out.contains("\x1b[1A\x1b[2K"), "console passed {out:?}");
+    assert_eq!(out, "^[[1A^[[2K[console] focus 1 (root)\r\n");
     wire += &out;
     wire += &t.read(1).2;
     wire += &t.typed(b"hunter2\r");
@@ -95,7 +94,8 @@ fn a_client_s_escape_sequences_reach_the_terminal_unchanged() {
         screen(&wire),
         [
             "root: ready",
-            "[console] focus 1 (root)",
+            "[console] focus 2 (evil)",
+            "^[[1A^[[2K[console] focus 1 (root)",
             "root# hunter2",
             ""
         ]
@@ -103,10 +103,34 @@ fn a_client_s_escape_sequences_reach_the_terminal_unchanged() {
     assert_eq!(t.delivered, [(1, "hunter2".into())]);
 }
 
+/// Every other way a client's bytes reach the terminal: its prompt, its
+/// held bytes flushed or at 512, and its name in a status line. Each
+/// tries to erase the line above; none can.
+#[test]
+fn no_client_byte_moves_the_cursor_up() {
+    let up = "\x1b[1A\x1b[2K\rX";
+    let mut t = T::new();
+    let mut wire = String::new();
+    t.term.attach(1, format!("{up}evil").as_bytes());
+    wire += &t.write(0, "keep me\n");
+    wire += &t.typed(b"\x142");
+    wire += &t.write(1, up);
+    wire += &t.read(1).2;
+    wire += &t.write(2, up);
+    wire += &t.flush(2);
+    wire += &t.write(3, &up.repeat(80));
+    let rows = screen(&wire);
+    assert_eq!(
+        rows[..2],
+        ["keep me", "[console] focus 2 (^[[1A^[[2K^MXevil)"]
+    );
+    assert!(rows[2].starts_with("^[[1A^[[2K^MX"), "{rows:?}");
+    assert!(!wire.contains('\x1b'), "{wire:?}");
+}
+
 /// The guarantee: console's own status line, once shown, stays on the
 /// screen; no client's output can erase or forge it.
 #[test]
-#[ignore = "M7 red-team finding, docs/redteam/m7-console-escapes.md: fails until console filters client control bytes"]
 fn a_client_cannot_rewrite_console_s_status_line() {
     let mut t = T::new();
     let mut wire = String::new();
