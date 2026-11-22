@@ -1,8 +1,10 @@
 //! The debug system calls (`docs/abi.md`, "Debug system calls"), the
-//! console they give, and the panic handler. They exist only in a kernel
-//! built with `debug`, where they change no register but `rcx` and `r11`.
-//! In any other kernel each raises an `UnknownSyscall` fault, and a fault
-//! handler that replies to one must leave the registers as they were.
+//! console they give, the `print!` macros and the panic handler. The calls
+//! exist only in a kernel built with `debug`, where they change no register
+//! but `rcx` and `r11`. In any other kernel each raises an `UnknownSyscall`
+//! fault, and a fault handler that replies to one must leave the registers
+//! as they were. `print!` goes where [`crate::output`] says: `DebugPutChar`
+//! until a program names a console.
 
 use core::fmt::{self, Write};
 #[cfg(target_os = "none")]
@@ -48,13 +50,8 @@ impl Write for Console {
     }
 }
 
-#[doc(hidden)]
-pub fn _print(args: fmt::Arguments<'_>) {
-    // Console's `write_str` never fails.
-    let _ = Console.write_fmt(args);
-}
-
-/// Prints to COM1 through `DebugPutChar`.
+/// Prints through `DebugPutChar`, or through the console client
+/// [`crate::output::use_console`] named.
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
@@ -62,7 +59,7 @@ macro_rules! print {
     };
 }
 
-/// Prints a line to COM1 through `DebugPutChar`.
+/// Prints a line, as [`print!`] does.
 #[macro_export]
 macro_rules! println {
     () => {
@@ -74,21 +71,25 @@ macro_rules! println {
 }
 
 // Only on the user target: a host build, for the unit tests, has std's.
+// It prints where `print!` goes and ends the run with `output::exit(1)`,
+// through the exit port if the program set one.
 #[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    // A panic while printing a panic would recurse forever; stop instead.
+    // A panic while printing a panic would recurse forever; stop instead,
+    // without the console's Sync, which may be what panicked.
     static PANICKING: AtomicBool = AtomicBool::new(false);
-    if !PANICKING.swap(true, Ordering::Relaxed) {
-        match info.location() {
-            Some(loc) => crate::println!(
-                "USER PANIC at {}:{}: {}",
-                loc.file(),
-                loc.line(),
-                info.message()
-            ),
-            None => crate::println!("USER PANIC: {}", info.message()),
-        }
+    if PANICKING.swap(true, Ordering::Relaxed) {
+        crate::output::exit_now(1)
     }
-    debug_halt(1)
+    match info.location() {
+        Some(loc) => crate::println!(
+            "USER PANIC at {}:{}: {}",
+            loc.file(),
+            loc.line(),
+            info.message()
+        ),
+        None => crate::println!("USER PANIC: {}", info.message()),
+    }
+    crate::output::exit(1)
 }

@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["core", "kernel", "loader", "model", "user/libsys", "user/root", "xtask"]
+members = [
+    "core",
+    "kernel",
+    "loader",
+    "model",
+    "user/console",
+    "user/libsys",
+    "user/root",
+    "user/uart",
+    "xtask",
+]
 # Plain `cargo build` and `cargo test` only touch the host crates. The kernel,
 # the loader and the user crates need their own targets and flags, so build
 # them through `cargo xtask`.

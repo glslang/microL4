@@ -1,5 +1,6 @@
 //! The verdicts of `test=threads` and `test=fault`, from what the threads
-//! recorded and the messages they received; M6's tests have a module each.
+//! recorded and the messages they received; M6's and M7's tests have a
+//! module each.
 
 use core::fmt;
 
@@ -8,6 +9,7 @@ use libsys::fault_label::VM_FAULT;
 
 pub mod badge;
 pub mod captransfer;
+pub mod console;
 pub mod ipcntfn;
 pub mod pingpong;
 

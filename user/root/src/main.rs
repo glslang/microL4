@@ -30,17 +30,26 @@
 //! - `test=ioport`: IOPortControl and IOPort: issue, overlaps, accesses
 //!   at the ends of a range, In's reply, copies and deletion ([`ioport`]);
 //! - `test=irq`: IRQControl and IRQHandler with COM1's THRE interrupt:
-//!   the edge and level rules, `Clear`, deletion and revoke ([`irq`]).
+//!   the edge and level rules, `Clear`, deletion and revoke ([`irq`]);
+//! - `test=console`: two clients write interleaved lines through the
+//!   `console` and `uart` servers, which run in address spaces of their
+//!   own, and input the harness types reaches the right client
+//!   ([`console`], [`servers`]);
+//! - `test=release`: the same servers on a kernel without `debug`, where
+//!   the root task makes no debug system call and ends the run through
+//!   `isa-debug-exit` ([`release`]).
 //!
-//! Every test ends the run with `DebugHalt`: 0 after `TEST PASS`, 1 after a
-//! `TEST FAIL` line. With no `test=` the root task halts with 0 after the
-//! summary.
+//! Every test ends the run with `libsys::exit`: status 0 after `TEST
+//! PASS`, 1 after a `TEST FAIL` line, through `DebugHalt` unless the test
+//! set an exit port. With no `test=` the root task halts with 0 after the
+//! summary. `test=release` prints its summary only once console runs.
 
 #![no_std]
 #![no_main]
 
 mod badge;
 mod captransfer;
+mod console;
 mod fault;
 mod ioport;
 mod ipcntfn;
@@ -48,6 +57,8 @@ mod irq;
 mod isolation;
 mod pingpong;
 mod redteam;
+mod release;
+mod servers;
 mod spawn;
 mod threads;
 mod tlb;
@@ -59,18 +70,24 @@ use libsys::{BootInfo, Ipc, Message, MessageInfo, call, cmdline, println};
 libsys::entry!(main);
 
 /// Prints `TEST FAIL: ` and the message, and ends the run with
-/// `DebugHalt(1)`.
+/// `libsys::exit(1)`: `DebugHalt(1)`, or the exit port if the test set
+/// one.
 macro_rules! fail {
     ($($arg:tt)*) => {{
         libsys::println!("TEST FAIL: {}", format_args!($($arg)*));
-        libsys::debug_halt(1)
+        libsys::exit(1)
     }};
 }
 pub(crate) use fail;
 
 fn main(bi: &'static BootInfo) -> ! {
-    summary(bi);
-    match cmdline::value(bi.cmdline(), "test") {
+    let test = cmdline::value(bi.cmdline(), "test");
+    // A kernel without `debug` has no DebugPutChar: test=release prints
+    // only once console runs.
+    if test != Some("release") {
+        summary(bi);
+    }
+    match test {
         None => {
             println!("root: no test= on the command line; nothing more to do");
             libsys::debug_halt(0)
@@ -90,13 +107,15 @@ fn main(bi: &'static BootInfo) -> ! {
         Some("ipcntfn") => ipcntfn::run(bi),
         Some("ioport") => ioport::run(bi),
         Some("irq") => irq::run(bi),
+        Some("console") => console::run(bi),
+        Some("release") => release::run(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
     }
 }
 
 /// Names the root task and prints what BootInfo says.
-fn summary(bi: &BootInfo) {
+pub(crate) fn summary(bi: &BootInfo) {
     println!(
         "root: microL4 root task, BootInfo at {:#x}, version {}",
         bi as *const BootInfo as u64, bi.version

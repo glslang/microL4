@@ -1,0 +1,36 @@
+# M7's "the release kernel contains no UART code", from the inside
+# (user/root/src/release.rs; docs/design.md, "Scenarios" and "A release
+# kernel without UART code"): the kernel built without features boots,
+# prints nothing, and everything on COM1 after the loader comes from uart.
+# xtask's disassembly check covers the kernel's code. The root task makes
+# no debug system call; it issues COM1, IRQ 4 and, under QEMU,
+# isa-debug-exit's 0xF4-0xF7, sets its exit port, starts watch, uart and
+# console, attaches as client 1 and prints through console: its summary;
+# that a probe thread's DebugPutChar, DebugHalt, DebugDumpScheduler and
+# reserved numbers 19 and 31 each raised UnknownSyscall with the number in
+# MR18 (root answers each with the probe's registers and ip + 2); the line
+# the harness types, which reaches client 1 since focus starts there;
+# uart's Stats; TEST PASS. Then a Sync, and IOPort_Out32(0xF4, 0x10) ends
+# the run with success. A kernel with debug would print the lines
+# forbidden below.
+kernel: release
+cmdline: test=release
+exit: success
+expect: loader: microL4 loader
+expect: root: microL4 root task
+expect: root: cmdline "test=release"
+expect: root: image frames: slots
+expect: root: empty: slots
+expect: release: watch (priority 255), uart (priority 200) with the COM1 IOPort and IRQ 4, console (priority 150); exit port 0xf4-0xf7
+expect: release: a probe thread's DebugPutChar, DebugHalt, DebugDumpScheduler and reserved numbers 19 and 31 each raised UnknownSyscall with the number in MR18
+expect: release: type a line
+send: release input\r
+expect: release: read "release input"
+expect: release: uart:
+expect: , 14 bytes received,
+expect: , 0 overruns, 0 line errors,
+expect: TEST PASS
+forbid: microL4 kernel
+forbid: bootinfo:
+forbid: DEBUG HALT
+forbid: KERNEL PANIC

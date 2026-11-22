@@ -1,0 +1,15 @@
+[package]
+name = "uart"
+description = "microL4's COM1 driver: the 16550 logic, host-tested against a device model, and the server loop the root task runs in a VSpace of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+libsys = { path = "../libsys" }
