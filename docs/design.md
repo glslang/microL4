@@ -748,7 +748,7 @@ loaded from an ELF image embedded in the kernel, in ring 3 (M5).
 | 2 | M3 | CPU feature check: refuse to boot if a required feature is missing ([CPU features](#cpu-features)). `Handoff::validate`; panic if the kernel image, the handoff or its memory map ends above the kernel's direct map, `min(phys_map_size, 64 GiB)`, which the loader's 64 GiB allocation bound prevents ([ADR 0006](adr/0006-direct-map-bound.md)); then the handoff and its memory map (at most 256 regions, else panic) are copied into the static `BootState` (the kernel's own `.bss`; no CPU or firmware state changes before the feature check). No code reads `LOADER` memory after this, except the kernel image |
 | 3 | M3, M5 | GDT, TSS, IDT ([Privilege levels](#privilege-levels)) and CR4.MCE; `IA32_GS_BASE` = the per-CPU area; DR7 = `0x400`, its reset value, no breakpoint enabled. The firmware's GDT, IDT and stack are now dead. From M5, the syscall MSRs ([Descriptor tables and MSRs](#descriptor-tables-and-msrs), `entry::init`), then CR0, CR4 and XCR0 for x87 and SSE ([Control registers and XCR0 (M5)](#control-registers-and-xcr0-m5), `fpu::init`), so the entry is ready long before anything runs in ring 3 |
 | 4 | M3 | ACPI is parsed through the loader's direct map: the kernel device pages (the local APIC, at most four I/O APICs, the HPET), the ISA overrides and the ECAM ranges ([ACPI and the timer](#acpi-and-the-timer)). Then the kernel's page tables are built in `.bss`, with the kernel device window at `KERNEL_DEVICE_BASE`, and replace the loader's in the order [The kernel half](#the-kernel-half) gives (EFER.NXE and CR0.WP checked, `IA32_PAT`, the tables, CR4.SMEP, SMAP, PGE and UMIP, then CR3); the 1:1 map is gone |
-| 5 | M3 | Hyper-V's leftovers go first, since a synthetic timer the firmware left armed can interrupt, and the time-unhalted timer can raise an NMI ([Firmware leftovers](#firmware-leftovers-m3)); M3 records a hypercall page the firmware locked. Then the local APIC, with LINT0 masked before the PIC is reprogrammed, the PIC, the I/O APICs and the HPET are set up, and the local APIC timer and the TSC are calibrated in the same windows, giving `tsc_hz` ([Local APIC, PIC and I/O APIC (M3)](#local-apic-pic-and-io-apic-m3), [The timer](#the-timer)). The kernel device pages, the MSI window and a locked Hyper-V hypercall page are what step 6's plan keeps in `BootPlan.kernel_reserved`. Only now are `USABLE`, `LOADER` and `ACPI_RECLAIMABLE` pages free |
+| 5 | M3, M7 | Hyper-V's leftovers go first, since a synthetic timer the firmware left armed can interrupt, and the time-unhalted timer can raise an NMI ([Firmware leftovers](#firmware-leftovers-m3)); M3 records a hypercall page the firmware locked. Then the local APIC, with LINT0 masked before the PIC is reprogrammed, the PIC, the I/O APICs and the HPET are set up, and the local APIC timer and the TSC are calibrated in the same windows, giving `tsc_hz` ([Local APIC, PIC and I/O APIC (M3)](#local-apic-pic-and-io-apic-m3), [The timer](#the-timer)). The kernel device pages, the MSI window and a locked Hyper-V hypercall page are what step 6's plan keeps in `BootPlan.kernel_reserved`. From M7 the step also records the interrupt routes, each I/O APIC's pin count and version with the ISA routes (`l4core::irq::Routing`, `objects::init_interrupts`), and at its end the IRQ node's physical address (`objects::init`). Only now are `USABLE`, `LOADER` and `ACPI_RECLAIMABLE` pages free |
 | 6 | M4, M5 | `.rootimage`'s ELF is checked (`l4core::boot::image::RootImage::check`) and `l4core::boot::plan` sizes the boot region for its needs; the kernel allocates and zeroes it |
 | 7 | M4 | The root CNode is made in the boot region and the fixed capabilities written |
 | 8 | M5 | The root ELF is copied from `.rootimage` into image frames; its VSpace, IPC buffer and TCB are built. `.rootimage` is unmapped from the kernel window, ending with a CR4.PGE toggle ([The kernel half](#the-kernel-half)) |
@@ -1547,7 +1547,7 @@ in `Untyped_Retype`.
 | 11 | IRQControl | none; one at boot | | 0 | [Interrupts](#interrupts) |
 | 12 | IRQHandler | none; from IRQControl | | the IRQ | [Interrupts](#interrupts) |
 | 13 | IOPortControl | none; one at boot | | 0 | [I/O ports](#io-ports) |
-| 14 | IOPort | none; from IOPortControl | | the port range | [I/O ports](#io-ports) |
+| 14 | IOPort | none; from IOPortControl | | the port range: `first` in bits 0 to 15, `last` in bits 16 to 31 | [I/O ports](#io-ports) |
 | 15 | Hypervisor | none; one at boot on Hyper-V | | `restricted`, `connection`, `post`, `signal`; see [The Hypervisor capability](#the-hypervisor-capability-m9) | [Hyper-V interface](#hyper-v-interface) |
 | 16 | Reply | none; the master at TCB retype (the root task's at boot), the others by `Call` or fault delivery | names a TCB | bit 0: master | [Reply capabilities](#reply-capabilities) |
 | 17 | Zombie | none; kernel-internal | names the CNode or TCB being destroyed | bits 0 to 47: slots left to clear; bit 63: 1 for a TCB | [Deletion and finalisation](#deletion-and-finalisation) |
@@ -1656,11 +1656,13 @@ computed once at the end of step 5: the `USABLE`, `LOADER` and
 `[1 MiB, direct map end)`, without the kernel image and a hypercall page the
 firmware locked, as sorted ranges, so each check is one binary search. From
 boot step 8 they also accept `.rootimage`'s reclaimed pages, which lie in the
-kernel image. The IRQ node lies in the kernel image too, so M7 must add its
-static range for slot addresses.
+kernel image. The IRQ node, 192 slots in the kernel image's `.bss`, lies in
+the kernel image too, so from M7 the slot check (`Objects::check_slot`) also
+accepts its range, from the physical address `objects::init` computes at the
+end of step 5.
 
-M4 left the hooks inert. From M5 they are live, and each arm not yet filled
-names its milestone:
+M4 left the hooks inert. M5 made them live, and M6 and M7 filled the rest;
+each row names the milestone that filled it where that was not M5:
 
 | Hook | Capability | What it does (M5 to M7) |
 | --- | --- | --- |
@@ -1670,17 +1672,19 @@ names its milestone:
 | `finalise` | Endpoint or Notification, last; Reply | `ipc::finalise`: an endpoint's queue is released with `cancel_all_ipc`; a notification is unbound, then its waiters are released with `cancel_all_signals` (M6); a reply capability needs nothing |
 | `finalise` | Frame, paging structure, PML4 | `arch::paging::finalise`: a mapped Frame or structure is unmapped, and a PML4's last capability empties its user half, loading the kernel PML4 first if CR3 holds it |
 | `moved` | Frame, paging structure | `arch::paging::moved`: a mapped capability's back-reference follows it |
-| `finalise` | IRQHandler, last (M7) | `core::irq` deletes the IRQ node slot's capability, as seL4's `deletingIRQHandler` (the notification's own `finalise` runs if that was its last capability); returns the IRQHandler as the cleanup |
-| `after_delete` | IRQHandler (M7) | `core::irq` masks the source and frees the entry and its vector, as seL4's `deletedIRQHandler` ([Deletion](#deletion-2)); the kernel executes the mask |
-| `finalise` | IOPort, last (M7) | returns the IOPort as the cleanup, as seL4's `Arch_finaliseCap` |
-| `after_delete` | IOPort (M7) | `core::ioport` clears its range in the bitmap, as seL4's `Arch_postCapDeletion` |
+| `finalise` | IRQHandler, last (M7) | `l4core::irq::finalise` deletes the IRQ node slot's capability, as seL4's `deletingIRQHandler` (the notification's own `finalise` runs if that was its last capability); returns the IRQHandler as the cleanup |
+| `after_delete` | IRQHandler (M7) | `l4core::irq::after_delete` masks the source and frees the entry and its vector, as seL4's `deletedIRQHandler` ([Deletion](#deletion-2)); the kernel executes the mask (`arch::ioapic::perform`) |
+| `finalise` | IOPort, last (M7) | `l4core::ioport::finalise` returns the IOPort as the cleanup, as seL4's `Arch_finaliseCap` |
+| `after_delete` | IOPort (M7) | `l4core::ioport::after_delete` clears its range in the bitmap, as seL4's `Arch_postCapDeletion` |
 
-`finalise` returns no cleanup for any type before M7. For an Untyped,
+`finalise` returns a cleanup only for the last IRQHandler or IOPort
+capability, and `after_delete` acts only on those two. For an Untyped,
 IRQControl, IOPortControl or Hypervisor capability, which `core/` passes with
-`last` set on every deletion, it never does anything. Before M7 IRQHandlers
-and IOPorts keep inert arms, and `after_delete` does nothing.
+`last` set on every deletion, `finalise` never does anything.
 `arch::Objects` also implements `Tcbs`, `Scheduling`, `Threads`, `IpcEnv`
-and `PagingStore`. The scheduler lives in a static that only `Objects`
+and `PagingStore`, and from M7 `Interrupts` and `IoPorts`
+([Interrupts](#where-the-code-lives-3), [I/O ports](#where-the-code-lives-4)).
+The scheduler lives in a static that only `Objects`
 reaches, which is sound while kernel code uses one `Objects` at a time for
 scheduler calls. `preempt` reads the IRR; with `selftest` it also counts
 polls, times the stretches between them and can report a preemption with
@@ -1770,15 +1774,15 @@ Hypervisor capabilities.
 | A capability never outlives its object: an object's memory is reused only when the untyped covering it is reset, which needs it to have no descendants, and every capability to an object in that region, except a reply capability (next row), is a descendant | `l4core` retype, insert and delete; proptest against `model/` with object liveness | M2 |
 | Reply capabilities, the one exception (a master is a derivation root), never outlive their TCB: TCB finalisation deletes the outstanding reply capability (suspend, `cancel_ipc`) and the Zombie deletes the master before the TCB's last capability's slot empties | the TCB `finalise` hook's `tcb::finalise`, whose `tcb::suspend` calls `ipc::cancel_ipc`; host tests `suspending_a_caller_deletes_the_reply_capability_to_it` and `a_handler_that_deletes_the_faulting_thread_leaves_nothing_naming_it`; `test=fault`; from M6 the IPC model's proptest (`model/tests/ipc_random.rs`), which deletes TCBs whatever their state, a `Call` included, and its scenario `a_saved_reply_goes_when_its_caller_is_suspended_and_survives_its_holder` | M2, M5, M6 |
 | No kernel object lies at physical address 0 | `l4core::boot::page_class` makes no untyped below 1 MiB, which `check_untyped` checks in host tests and `test=bootinfo`; `core/` handles are `NonZeroU64` | M2, M4 |
-| No kernel reference (queue, binding, mapping) survives the last capability to its target | `finalise` hooks called by `core/` delete (M5: TCBs, Endpoints, Frames and paging structures; M6: Notifications and TCB bindings, above); proptest counts finalisations; each subsystem's tests, M5's in `core/src/{tcb,ipc,syscall}/tests.rs` and the `vspace` proptest, M6's in `core/src/ipc/notification/tests.rs` (`deleting_a_notification_restarts_its_waiters_in_order_and_unbinds_it`, `deleting_a_bound_tcb_unbinds_its_notification`) and the IPC model's proptest, which deletes endpoints, notifications and TCBs | M2, M5 to M7, M9 |
+| No kernel reference (queue, binding, mapping) survives the last capability to its target | `finalise` hooks called by `core/` delete (M5: TCBs, Endpoints, Frames and paging structures; M6: Notifications and TCB bindings, above); proptest counts finalisations; each subsystem's tests, M5's in `core/src/{tcb,ipc,syscall}/tests.rs` and the `vspace` proptest, M6's in `core/src/ipc/notification/tests.rs` (`deleting_a_notification_restarts_its_waiters_in_order_and_unbinds_it`, `deleting_a_bound_tcb_unbinds_its_notification`) and the IPC model's proptest, which deletes endpoints, notifications and TCBs; M7's in `core/src/irq/tests.rs` (`deleting_the_last_handler_unbinds_masks_keeping_vector_and_trigger_and_frees_the_irq`, `deleting_the_handler_deletes_the_irq_nodes_capability_and_may_finalise_its_notification`, `revoking_irq_control_deletes_every_handler`) and `core/src/ioport/tests.rs` (`a_range_is_free_again_only_once_its_last_capability_is_deleted`, `the_hooks_free_only_the_last_capabilitys_range`), and the IRQ table's and the port bitmap's proptests, which delete, copy and revoke at random; `test=irq` and `test=ioport` | M2, M5 to M7, M9 |
 | A back-reference never names an empty slot | `finalise` runs before unlink and zeroing, and the paging `finalise` unmaps through the slot its capability still occupies; the `vspace` proptest with mapped capabilities ([Address spaces](#address-spaces)) | M2, M5 |
 | The last capability to an object is finalised exactly once, before its slot empties | `is_final` and the Zombie algorithm; proptest with random preemption | M2 |
 | Every TCB, Endpoint, Notification, CNode and paging structure lies in RAM inside the direct map, below 64 GiB | retype refuses kernel objects from device untyped; RAM untyped only below the direct map's end, `min(phys_map_size, 64 GiB)` (`page_class`, checked by `check_untyped` in host tests and `test=bootinfo`); in debug builds `arch::Objects` checks every slot and zeroed range against `ObjectMemory` | M2, M4 |
-| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, the current thread, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch::Objects` check every slot address against `l4core::objmem::ObjectMemory` (M4), which M7 widens to the IRQ node; `l4core::vspace::paging` uses a back-reference only after checking that its slot holds the capability whose record names that entry (M5) | M2, M4, M5, M7 |
+| Only `core/` writes slots, and every `SlotAddr`, including each back-reference word, is a slot of a CNode or TCB whose memory has not been reset, or an IRQ-node slot | `SlotAddr` built only from capabilities, the current thread, IRQ numbers, links and back-references (L2, L3 in [Address spaces](#back-references-instead-of-asids)); fake memory panics on stray access; debug asserts in `arch::Objects` check every slot address against `l4core::objmem::ObjectMemory` (M4), which M7 widens to the IRQ node (`Objects::check_slot`); an IRQ-node `SlotAddr` comes only from an IRQ number below 192 (`l4core::irq::node_slot`), and the test kernels keep the node in fake memory of its own (`l4core::testing::IRQ_NODE_BASE`), so a stray one panics there too (M7); `l4core::vspace::paging` uses a back-reference only after checking that its slot holds the capability whose record names that entry (M5) | M2, M4, M5, M7 |
 | Capabilities are created only by boot, retype, IRQControl and IOPortControl invocations, `Call` and fault delivery (reply capabilities), and deletion (Zombies); every other capability is derived from one its holder has | the only callers of `insert_root` and `insert_derived`; red-team brief 1 | M2, M10 |
 | Destroying a CNode or TCB is preemptible, recurses at most two levels, and keeps every invariant at each step | Zombie algorithm; proptest with random preemption points over nested and cyclic containers, including deleting a slot inside the container its own deletion destroys | M2 |
 | No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; the TCB `finalise` hook suspends the thread before `core/` clears its slots; proptest | M2, M5 |
-| The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container; proptest | M2, M7 |
+| The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container: the node is `IRQ_NODE` in the kernel image's `.bss` (`arch/x86_64/objects.rs`), and in the test kernels memory of its own at `IRQ_NODE_BASE`, which no CNode or TCB covers; M2's proptest, whose root CNode holds an IRQHandler; no M7 test destroys a CNode or TCB that holds a handler | M2, M7 |
 | Every relocation of a capability to another slot calls `moved(cap, old_slot, new_slot)` before the next preemption point, so back-references stay exact | one `l4core::cdt` move and one swap function, used by Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; `arch::paging::moved` rewrites the back-reference; proptest over nested CNode deletion with a mapped capability in slot 0 of the nested CNode, rotates and swaps of mapped capabilities, and untyped revoke, at random preemption points (the `vspace` proptest from M5); host test `moves_rotates_and_swaps_rewrite_back_references`; `CNode_SaveCaller` moves with `cdt::move_slot` (M6; host test `save_caller_moves_the_reply_capability_below_its_callers_master`); red-team brief 4 | M2, M5, M6, M10 |
 
 ### Compared with seL4
@@ -2191,7 +2195,7 @@ install. M9: Hypervisor narrowing.
 | The list is consistent: `prev(next(a)) = a`, `low <= depth <= 4095`, empty slots have no links | `core/` operations; proptest checks every slot after every step, through the decoder too (`random_messages_keep_every_slot_consistent`); debug asserts | M2, M4 |
 | No capability survives a completed revoke of an ancestor, whatever IPC, preemption or deletion is in progress, unless it is a partial revoke ([Slot operations](#slot-operations)) | single-step revoke with restart; a capability received by IPC is a descendant of the sender's (host test `a_received_copy_is_a_descendant_that_revoke_reaches`; `test=captransfer`, where the client's revoke of its frame takes the server's copy and its mapping), and a revoke of a badged original before `CNode_CancelBadgedSends` leaves the released senders nothing to send with (host test `revoking_first_retires_the_badge`, `test=badge`) (M6); red-team brief 2 | M2, M5, M6, M10 |
 | `depth` never exceeds 4095 and never wraps, so no capability leaves its ancestors' runs | one child-insert function in `l4core::cdt` checks the limit; proptest drives a chain to 4095 by copy and delete; red-team brief 1 | M2, M10 |
-| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5; host test `installs_stop_at_the_depth_limit`) and `IRQHandler_SetNotification` (M7); IPC transfer stops at that capability (M6; host test `a_copy_refused_at_the_depth_limit_ends_the_transfer`); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
+| Every path that installs a derived copy reports a refused child insert, and none assumes it succeeds | `IllegalOperation` from CNode Copy and Mint and `Untyped_Retype` (M4), the TCB installs (M5; host test `installs_stop_at_the_depth_limit`) and `IRQHandler_SetNotification` (M7; `cdt::child_too_deep` before any change, host test `irq_handler_errors_in_order` with a notification capability at depth 4095); IPC transfer stops at that capability (M6; host test `a_copy_refused_at_the_depth_limit_ends_the_transfer`); tests at depth 4095 per path, for Copy, Mint and Retype through `l4core::invoke`, with the depth set directly and reached by 4,094 decoded copy-and-delete steps | M4 to M7 |
 
 ### Compared with seL4
 
@@ -3553,7 +3557,7 @@ is bounded by the TCBs that exist. `cancel_ipc` on a
 | `TCB_BindNotification` and `TCB_UnbindNotification` | `l4core::tcb::invocation`, over `Threads`; TCB finalisation unbinds through `tcb::finalise` | M6 |
 | The notification words in the kernel | `arch::Objects` (`Threads::notification_word`, `set_notification_word`), by value through raw pointers into the direct map | M6 |
 | Signal, wait and poll, and telling a signal from a message | `libsys::notification` (`signal`, `wait`, `poll`, `Event::classify`); `tcb_bind_notification` and `tcb_unbind_notification` in `libsys::invoke` | M6 |
-| The kernel's signal for an interrupt; for a SynIC event | M7; M9 | M7, M9 |
+| The kernel's signal for an interrupt; for a SynIC event | `l4core::irq::deliver`, which calls `signal` with the IRQ node capability's badge ([Delivery](#delivery-1)); M9 | M7, M9 |
 
 The notification words are on `Threads`, not `IpcEnv`, because
 `TCB_BindNotification` is decoded over `Threads` ([`core/` and
@@ -3589,7 +3593,7 @@ signal at once.
 | While a notification is bound, only its bound thread waits on it | `TCB_BindNotification` refuses a notification with waiters (`tcb::invocation::decode`; host tests `bind_errors_in_order` and `bind_notification_errors_in_order`); the dispatcher's `ipc::may_wait` check (host test `a_bound_thread_may_wait_on_its_notification_and_no_other_thread_may`); `check_notifications`; the notification proptest, whose sequences include waits by another thread on a bound notification; `test=ipcntfn`, where binding a second thread to N is `IllegalOperation`; red-team brief 1 | M6, M10 |
 | A bound thread is never `BlockedOnReceive` while its notification is `Active` | `signal` and `bind_notification` deliver at once, and an endpoint receive takes a pending signal first (`complete_bound_signal`); `check_notifications`; host tests `a_signal_wakes_a_bound_thread_out_of_an_endpoint_receive`, `binding_delivers_a_pending_signal_to_a_thread_in_an_endpoint_receive` and `a_bound_thread_receiving_on_an_endpoint_takes_a_pending_signal_first`; the notification proptest and the IPC model's; `test=ipcntfn`, which binds its server while it waits on an endpoint with a signal pending, and the signal arrives at once | M6 |
 | No signalled bit is lost: each is returned to exactly one waiter or bound receiver, or is still pending, until the notification is deleted | the notification proptest and the IPC model's, which compare every notification word and every thread's `rdi` and `rsi` with the model's after every step; host test `signals_with_nobody_waiting_or_their_badges_into_the_word`; `test=ipcntfn`, where a shared sequence number shows each signaller's bit reached the server after its last signal | M6 |
-| A signal never blocks or fails, so interrupt delivery never waits on user space | `ipc::signal` has no blocking path and no error; the kernel's own signal takes the same path (host test `the_kernel_signals_through_the_same_path`, and the `Interrupt` action of the IPC model's proptest); IRQ scenario (M7) | M6, M7 |
+| A signal never blocks or fails, so interrupt delivery never waits on user space | `ipc::signal` has no blocking path and no error; the kernel's own signal takes the same path (host test `the_kernel_signals_through_the_same_path`, and the `Interrupt` action of the IPC model's proptest); from M7 `l4core::irq::deliver` signals the same way (host tests `a_signal_from_an_interrupt_wakes_the_waiter_and_preempts_only_for_a_higher_priority` and `an_interrupt_in_the_idle_thread_runs_the_woken_thread`, the IRQ table's proptest); `test=irq`, whose interrupts signal a notification the root task polls, and `test=console`, where uart waits on its notification | M6, M7 |
 
 ### Compared with seL4
 
@@ -3695,8 +3699,10 @@ in service when the local APIC was reset (leaving x2APIC through the disabled
 state clears ISR; SDM, from memory), say. So on issue the kernel first masks
 the pin's entry, keeping vector, trigger and polarity, and reads it back. If
 Remote IRR is set, it clears it as Linux's `clear_IO_APIC_pin` and
-`__eoi_ioapic_pin` do (`arch/x86/kernel/apic/io_apic.c`, from memory; check in
-M7): it writes the entry level-triggered, still masked and with its old
+`__eoi_ioapic_pin` do (`arch/x86/kernel/apic/io_apic.c`, from memory; M7 did
+not read Linux's source, but on QEMU both paths below clear a stranded Remote
+IRR, as the `irq_stale` and `irq_stale_0x11` scenarios show):
+it writes the entry level-triggered, still masked and with its old
 vector, since an EOI clears Remote IRR only on a level entry (QEMU's
 `ioapic_eoi_broadcast` checks the trigger, from memory); then, on an I/O APIC
 of version `0x20` or later (QEMU's), it writes the old vector to the EOI
@@ -3729,13 +3735,16 @@ route is checked at the M3 Hyper-V check.
 
 ### The IRQ table
 
-Fixed kernel memory, indexed by IRQ number 0-191: `source` (`Free`,
-`IoApic { gsi, level, active_low }`, `Msi` or `Sint(n)`), `pending` (an edge
-pin delivered since the last Ack), `masked` (the kernel masked the pin and
-waits for Ack), and an IRQ node slot holding the bound notification
-capability or nothing. IRQ node slots are ordinary 32-byte slots in kernel
-static memory, in the derivation list and reached by the same slot handles as
-CNode slots; no `CPtr` names them and the Zombie code never visits them.
+Fixed kernel memory, indexed by IRQ number 0-191: `source` (`Free` or
+`IoApic { gsi, pin, level, active_low }`; M9 adds `Msi` and `Sint(n)`),
+`pending` (an edge pin delivered since the last Ack), `masked` (the kernel
+masked the pin and waits for Ack), and an IRQ node slot holding the bound
+notification capability or nothing; two counters for debug output beside it,
+`lost` (deliveries with no notification bound) and `stale` (deliveries to a
+free entry). IRQ node slots are ordinary 32-byte slots, 192 of them (6 KiB)
+in the kernel image's `.bss`, in the derivation list and reached by the same
+slot handles as CNode slots; no `CPtr` names them and the Zombie code never
+visits them.
 A bound capability sits where `CNode_Copy` of the capability passed to
 `SetNotification` would put it (derived from an original, else a sibling of a
 copy), as seL4's `cteInsert` into `intStateIRQNode` does
@@ -3783,8 +3792,9 @@ kernel masked it; for MSI and SINTs it does nothing.
 A level line re-fires at every EOI while asserted, so it stays masked until
 the driver has serviced its device. An edge pin stays open for the first edge
 after an Ack, so no edge that follows an Ack is lost, even on an I/O APIC that
-drops edges on a masked pin (82093AA datasheet, from memory; QEMU latches
-them). A second edge before Ack masks the pin, so a device the driver cannot
+drops edges on a masked pin (82093AA datasheet, from memory), as QEMU 8.2's
+does: in `test=irq` an edge raised while the pin is masked signals nothing,
+then or at the next Ack. A second edge before Ack masks the pin, so a device the driver cannot
 or will not quiet (the PIT at its highest rate, say) costs at most three
 interrupts per Ack (two, plus one the local APIC may already hold when the
 mask lands), and interrupt load follows the driver's own scheduling.
@@ -3805,13 +3815,21 @@ interrupt between issue and binding signalled nothing.
 
 On vector `v` in `0x30`-`0xEF`, with the interrupted thread's registers saved:
 take entry `v - 0x30`; if it is `Free`, drop the interrupt (a stale MSI, or a
-source deleted while pending); for a level pin, mask it and set `masked`; for
-an edge pin, if `pending` is set mask it and set `masked`, then set `pending`;
-if the IRQ node slot holds a notification capability, signal that notification
-with the capability's badge (the semantics of [Signal](#signal)), else bump a
-debug counter; EOI; return through the scheduler. The work is constant and
-reads no user memory. An interrupt with no notification is lost, but the pin's
-state still advances, so the driver's Ack is still needed.
+source deleted while pending) and count it in `stale`; for a level pin, mask
+it and set `masked`; for an edge pin, if `pending` is set mask it and set
+`masked`, then set `pending`; if the IRQ node slot holds a notification
+capability, signal that notification with the capability's badge (the
+semantics of [Signal](#signal)), else count it in `lost`; EOI; return through
+the scheduler, which runs the woken thread at once only if it outranks the one
+interrupted. The work is constant and reads no user memory. An interrupt with
+no notification is lost, but the pin's state still advances, so the driver's
+Ack is still needed.
+
+The steps up to the signal are `l4core::irq::deliver`; the EOI is not one of
+its actions but the interrupt path's own, after `deliver` returns
+(`arch::irq::handle`, as `l4core::apic::needs_eoi` decides for every vector),
+so a delivery's mask lands before its EOI and the EOI is written once whatever
+`deliver` did.
 
 ### Deletion
 
@@ -3853,34 +3871,61 @@ any vector with any delivery mode, including NMI, INIT and `#MC`'s vector, and
 stop the machine. Both are accepted for drivers the root task trusts, and
 recorded for M10 brief 7.
 
-`core/src/irq.rs` (M7) holds the IRQ table, vector allocator, ISA routes, the
-issue, bind, Ack, Clear, delete and deliver transitions, and message decoding.
-It returns hardware actions (`MaskRte`, `UnmaskRte`, `CheckRemoteIrr`,
-`ClearRemoteIrr`, which picks the EOI register or the trigger toggle by the
-I/O APIC's version, `ProgramRte`, `ProgramSint`, `MaskSint`, `Eoi`) and
-touches no hardware; host tests and a proptest against a set-based model
-cover it. From M3, `l4core::apic` holds the local APIC, I/O APIC and PIC registers, the values
-the kernel writes at boot and the EOI rule, and `l4core::acpi` the ISA
-routes (`Platform::isa_route`).
-`kernel/src/arch/x86_64/` (`idt.rs`, `apic.rs`, `ioapic.rs`, `pic.rs`, and
-`irq.rs` for the interrupt path, from M3) executes the actions through the
-device window.
+### Where the code lives
+
+| Part | Where | Milestone |
+| --- | --- | --- |
+| The IRQ table (`IrqTable`, `Entry`, `Source`), IRQ numbers and vectors (`vector`, `irq_of_vector`), the routes (`Routing`: each I/O APIC's GSI base, pin count and version, and the ISA routes through the MADT's overrides), the IRQ node's slots (`node_slot`) | `l4core::irq` (`core/src/irq.rs`) | M7 |
+| `invoke_control` (`GetISA`, `GetIOAPIC`), `invoke_handler` (`Ack`, `SetNotification`, `Clear`), `deliver`, and `finalise` and `after_delete`, the IRQHandler arms of the kernel's hooks; `check`, the invariants below as a function | the same | M7 |
+| The I/O APIC accesses, as values: `Action` (`MaskRte`, `UnmaskRte`, `CheckRemoteIrr`, `ClearRemoteIrr` with the `ClearPath` the I/O APIC's version picks, `ProgramRte`), and `Action::writes`, the register writes each makes to an entry that reads a given low word. There is no EOI action ([Delivery](#delivery-1)); M9 adds the SINT actions | the same | M7 |
+| What `core::irq` needs from the kernel beyond slots, threads and IPC: the `Interrupts` trait (`irq_table`, `irq_table_mut`, `routing`, `irq_node`, `irq_action`), which `l4core::invoke::invoke` and the system-call dispatch require beside `Kernel`, `Threads` and `PagingStore` | the same | M7 |
+| The local APIC, I/O APIC and PIC registers, the values boot writes, `redirection_entry` and `remote_irr`, and the EOI rule (`needs_eoi`); the ISA routes (`Platform::isa_route`) | `l4core::apic`; `l4core::acpi` | M3 |
+| `Objects`' `Interrupts`: the IRQ table in a static only `Objects` reaches (with the port bitmap), as the scheduler is; the IRQ node, `IRQ_NODE`, 192 zeroed slots in `.bss`, reached by value through the direct map at the physical address `objects::init` computes; `init_interrupts`, which records the routes at step 5 | `kernel/src/arch/x86_64/objects.rs` | M7 |
+| `ioapic::perform`: one action, as a read of the entry's low word and then `Action::writes`'s writes; boot's masking of every pin, keeping its vector | `kernel/src/arch/x86_64/ioapic.rs` | M3, M7 |
+| The interrupt path: `deliver` for a device vector, then the EOI, then the caller's scheduler | `kernel/src/arch/x86_64/irq.rs`, with `idt.rs`, `apic.rs` and `pic.rs` | M3, M7 |
+| `test=irq_stale`: strands a level pin's Remote IRR with the HPET's last comparator, then issues the pin through `l4core::invoke` | `kernel/src/arch/x86_64/irq_stale.rs`, with `selftest` only | M7 |
+| The invocations from user space: `irq_control_get_isa` (which decodes the route it returns into `IsaIrq`), `irq_control_get_ioapic`, `irq_handler_ack`, `irq_handler_set_notification` and `irq_handler_clear`, each message built by a host-tested `device::Request` | `libsys::device` | M7 |
+
+`core/src/irq/tests.rs` checks each rule of this section through system calls
+on a test kernel with models of the local APIC and of QEMU 8.2's I/O APIC
+(`l4core::testing::FakeIoApic`, from memory of `hw/intc/ioapic.c`: level pins
+with Remote IRR, cleared by an EOI broadcast or, from version `0x20`, the EOI
+register; edges dropped on a masked pin; an entry written edge-triggered
+loses Remote IRR; and a mode where nothing clears it), with the scheduler's,
+IPC's, the notifications' and the IRQ table's invariants (`check`) at every
+kernel exit, and a count of writes that unmasked a pin with Remote IRR set,
+which must stay 0: the routes of the q35 and Hyper-V MADT dumps, each
+action's writes, every invocation's errors in order, both ways of clearing a
+stale Remote IRR, the edge and level rules, delivery's wake-ups, deletion and
+revoke; `check_finds_broken_tables` shows the checker catches each breach.
+Its proptest, `random_irq_operations_and_interrupts_match_the_model`
+(`core/src/irq/tests/model.rs`, 512 cases of up to 80 steps, at I/O APIC
+version `0x20` or `0x11`), runs random issues, copies, deletions and revokes
+of IRQControl, Acks, `SetNotification`s, `Clear`s, polls, stranded Remote
+IRRs and line changes, some falling inside the next kernel entry, against a
+model of the table written from this section, and compares the table,
+bindings and notification words after every step;
+`random_sequences_reach_every_path` checks that the sequences reach every
+path. On QEMU `test=irq` runs the edge and level rules, `Clear`, deletion
+and revoke from ring 3 with COM1's THRE interrupt, and `test=irq_stale`
+both Remote IRR paths, with QEMU's I/O APIC at version `0x20` and, in the
+`irq_stale_0x11` scenario, at `0x11`.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Each interrupt source (GSI, SINT, MSI vector) has at most one issued IRQHandler, copies aside | `core::irq` source check, proptest against the model | M7, M9 |
-| Each vector in `0x30`-`0xEF` belongs to at most one source; no other vector is issued | `core::irq` allocator, proptest | M7 |
-| An IRQ node slot holds only a notification capability with the Write right and never names a deleted notification | checks in `SetNotification`; IRQ node slots in the derivation list; model test of revoke | M7 |
-| Deleting the last IRQHandler masks its source, empties its IRQ node slot and frees its vector | finalise path, `core::irq` tests, QEMU scenario | M7 |
-| Between two Acks an I/O APIC pin delivers at most three interrupts: two, plus one the local APIC already holds when the mask lands | `core::irq` state machine, proptest, QEMU scenario with the PIT at its highest rate | M7 |
-| No pin is unmasked with Remote IRR set | `core::irq` actions, read-back in `ioapic.rs`, QEMU scenario that deletes a handler with a level interrupt pending; a self-test that leaves a level pin's Remote IRR stale (its entry's vector changed between delivery and EOI, say) and then issues the pin, with QEMU's I/O APIC at version `0x20` and at `0x11` (`-global ioapic.version=0x11` through `qemu_args:`; QEMU accepts only those two, from memory) | M7 |
-| Every fixed interrupt is EOI'd exactly once: `0x30`-`0xFE` always, `0x20`-`0x2F` only when its ISR bit is set, `0xFF` never | common interrupt exit, timer and device scenarios | M3, M7 |
+| Each interrupt source (GSI, SINT, MSI vector) has at most one issued IRQHandler, copies aside | `l4core::irq`'s issue refuses a GSI that has an entry (`IrqTable::holder`) with `RevokeFirst`; `irq::check` ("a GSI has two entries"); host tests `irq_control_errors_in_order` and `a_refused_issue_never_touches_an_issued_pin`; the IRQ table's proptest, whose model issues a GSI once; `test=irq`, where `GetISA(4)` again and `GetIOAPIC(4)` are `RevokeFirst`. SINTs and MSI vectors: M9 | M7, M9 |
+| Each vector in `0x30`-`0xEF` belongs to at most one source; no other vector is issued | an entry's vector is its index plus `0x30` (`irq::vector`, host test `irq_n_is_vector_0x30_plus_n`), and an issue takes the lowest free entry (`IrqTable::lowest_free`) or fails with `RevokeFirst` (host test `with_every_vector_taken_an_issue_is_revoke_first`); the IRQ table's proptest, whose model allocates the same way | M7 |
+| An IRQ node slot holds only a notification capability with the Write right and never names a deleted notification | `SetNotification`'s checks before any change (host test `irq_handler_errors_in_order`); `irq::check` at every kernel exit of the host tests and the proptest; the bound capability is a derivation-list child or sibling like any copy (host test `set_notification_copies_the_capability_into_the_irq_node_as_cnode_copy_would`), so it keeps its notification alive and goes with the handler (host tests `rebinding_the_last_capability_to_a_notification_finalises_it`, `deleting_the_handler_deletes_the_irq_nodes_capability_and_may_finalise_its_notification`). No M7 test revokes the untyped of a bound notification; that case rests on the derivation list's own tests (M2) | M7 |
+| Deleting the last IRQHandler masks its source, empties its IRQ node slot and frees its vector | `irq::finalise` and `irq::after_delete` through the kernel's hooks; host tests `deleting_the_last_handler_unbinds_masks_keeping_vector_and_trigger_and_frees_the_irq`, `revoking_irq_control_deletes_every_handler` and `a_freed_vector_reissued_elsewhere_never_hears_the_old_pin`; the IRQ table's proptest, which checks after every step that every pin without an entry is masked; `test=irq`, where a deleted ISA IRQ 4 is issued again as IRQ 0, a copy keeps it issued and revoking IRQControl deletes both handlers | M7 |
+| Between two Acks an I/O APIC pin delivers at most three interrupts: two, plus one the local APIC already holds when the mask lands | `irq::deliver`'s `pending` and `masked`; host tests `an_edge_pin_stays_open_for_the_first_edge_and_masks_on_the_second_before_ack`, `the_local_apic_may_hold_a_third_interrupt_when_the_mask_lands` and `a_level_pin_is_masked_on_delivery_and_refires_at_ack_while_asserted`; the IRQ table's proptest, which fails an edge pin's fourth interrupt or a level pin's second between two Acks (its random sequences reach two; the third only in the host test); `test=irq`, where a fourth edge with no Ack signals nothing. No scenario drives the PIT at its highest rate: not built in M7 | M7 |
+| No pin is unmasked with Remote IRR set | issue's `MaskRte`, `CheckRemoteIrr`, `ClearRemoteIrr` and `CheckRemoteIrr` again before `ProgramRte`, each starting with a read of the entry in `ioapic::perform`; `FakeIoApic` counts every write that unmasks a level entry with Remote IRR set, which must stay 0 after every step of the host tests and the proptest, whose sequences strand Remote IRRs; host tests `issue_clears_a_stale_remote_irr_through_the_eoi_register_from_version_0x20`, `below_version_0x20_issue_clears_a_stale_remote_irr_by_toggling_the_trigger`, `a_remote_irr_that_stays_set_is_revoke_first_and_the_pin_stays_masked` and `a_level_interrupt_pending_at_deletion_is_dropped_and_its_eoi_clears_remote_irr`; `test=irq`, which deletes a level handler with its line high and issues the pin again; `test=irq_stale`, which strands a level pin's Remote IRR (its entry's vector changed between delivery and EOI) and then issues the pin, with QEMU's I/O APIC at version `0x20` and, in the `irq_stale_0x11` scenario, at `0x11` (`-global ioapic.version=0x11` through `qemu_args:`; QEMU accepts only those two, from memory) | M7 |
+| Every fixed interrupt is EOI'd exactly once: `0x30`-`0xFE` always, `0x20`-`0x2F` only when its ISR bit is set, `0xFF` never | `l4core::apic::needs_eoi` (host test `every_fixed_interrupt_is_eoied_once`), asked once per interrupt by `arch::irq::handle`, after `deliver` for a device vector, which writes no EOI itself; the `ticks` scenario and, from M7, `irq` and `console`, whose device interrupts keep arriving | M3, M7 |
 | User code cannot enter an interrupt handler with `int n` | DPL 0 on every gate but `#BP`; red-team brief 5 | M3, M10 |
 | No interrupt arrives before the IDT is loaded; pins stay masked until issued; the PIC, LINT0 and LINT1 stay masked | M3 init order, QEMU scenario | M3 |
 | A vector that cannot occur (9, 15, 17, 20 to 31) panics from either ring and never makes the kernel misread a frame | no-error-code gates and panic path; red-team brief 7 | M3, M10 |
-| Handling an interrupt takes constant time and reads no user memory | review of the delivery path | M7 |
+| Handling an interrupt takes constant time and reads no user memory | `irq::deliver` reads one entry and one IRQ node slot and makes at most one mask action and one `ipc::signal`, which never blocks and wakes at most one thread; `arch::irq::handle` adds only the EOI; review | M7 |
 
 ### Compared with seL4
 
@@ -3893,6 +3938,7 @@ device window.
 | Deleting the handler sets the pin's mask bit and keeps its vector (`deletedIRQHandler`, `src/object/interrupt.c`; `ioapic_mask`, `ioapic.c`) | The same | A level interrupt pending at the deletion is EOI'd against the kept vector, so its Remote IRR clears |
 | Remote IRR is never read. Boot writes every pin masked, edge-triggered, vector 0 (`single_ioapic_init`, `ioapic.c`), which clears it where a switch to edge does (QEMU); issue writes the pin's entry without looking (`ioapic_map_pin_to_vector`), so a level pin with a stale one stays silent | Boot keeps each pin's vector and trigger; issue clears a stale Remote IRR (the EOI register from version `0x20`, Linux's trigger toggle below it) and refuses the pin with `RevokeFirst` if it stays set ([ADR 0027](adr/0027-stale-remote-irr.md)) | A level pin must not be handed out dead; Hyper-V's I/O APIC is version `0x11`, with no EOI register |
 | The destination slot is looked up before `GetIOAPIC`'s I/O APIC, pin, level and polarity are checked (`Arch_decodeIRQControlInvocation`) | Arguments, then the source and vector, then the destination slot | One order for every invocation in the range ([Conventions](abi.md#conventions-1)) |
+| `lookupTargetSlot` checks the destination's root before its depth (`lookupSlotForCNodeOp`, `src/kernel/cspace.c`), so a root that is not a CNode with a depth of 0 is `FailedLookup` (`InvalidRoot`) | The depth first: that case is `RangeError(1, 64)` (`l4core::invoke::destination`, for IRQControl and IOPortControl alike; host test `irq_control_errors_in_order`, its case "depth 0, a root that is no CNode") | The order [Conventions](abi.md#conventions-1) lists, as `Untyped_Retype` checks `node_depth` before the root ([Memory and retype](#memory-and-retype)) |
 | PIC mode with `IRQControl_Get` for ISA IRQs (`Arch_checkIRQ`) | I/O APIC only; PIC always masked | Both platforms have an I/O APIC |
 | `GetMSI` takes PCI bus, device, function and handle | Takes no source; returns address and data | Unchecked without an IOMMU; spares drivers the APIC ID |
 | IOSpace and IOPageTable objects drive the VT-d IOMMU, with a master IOSpace capability minted per PCI device (`io.tex`, "I/O Space") | No IOMMU objects; a driver that can program DMA or MSI is trusted with the machine | Neither target gives the guest an IOMMU by default (q35 without `intel-iommu`; Hyper-V, from memory); PLAN.md records DMA as a known limitation (M10 brief 7) |
@@ -3911,8 +3957,11 @@ thread ever runs with IOPL above 0 or with an I/O permission bitmap.
 ### Objects and checks
 
 IOPortControl is one capability, in the root task's slot 7 from M4; as in seL4
-(`Arch_deriveCap`) it cannot be copied or minted. IOPort `{ first, last }` can
-be copied, but mint cannot narrow it; a narrower range is a separate `Issue`.
+(`Arch_deriveCap`) it cannot be copied or minted. IOPort `{ first, last }`,
+with `first` in bits 0 to 15 of its `data` word and `last` in bits 16 to 31
+(`l4core::ioport::port_cap`), can be copied, but mint cannot narrow it: an
+IOPort ignores mint data, so a mint is a copy, and a narrower range is a
+separate `Issue`.
 A static 65,536-bit bitmap (8 KiB) records issued ports: `Issue` sets the
 range, and deleting the last capability with the same `(first, last)` clears it
 (seL4's `Arch_postCapDeletion`). `Issue` needs `first <= last <= 0xFFFF`, no
@@ -3926,9 +3975,9 @@ reply ([System calls](abi.md#system-calls)).
 
 | Ports | Kernel use | Issuable |
 | --- | --- | --- |
-| `0x20`-`0x23` (PIC, IMCR), `0xA0`-`0xA1` (PIC) | programmed at boot only | no: they could route legacy interrupts past the LAPIC mask (IMCR from memory; check in M7) |
-| `0x3F8`-`0x3FF` (COM1) | debug builds only: panics and `DebugPutChar`; the writer bounds its wait for THRE, so a `uart` that breaks the UART cannot hang it | yes; in debug builds `uart` shares it with kernel output, as in seL4 |
-| `0xF4` (`isa-debug-exit`, QEMU) | ends the run | yes, so user-space tests can end a run in any build; scenarios still require `TEST PASS` |
+| `0x20`-`0x23` (PIC, IMCR), `0xA0`-`0xA1` (PIC) | programmed at boot only | no: they could route legacy interrupts past the LAPIC mask (IMCR from memory; M7 did not check it, [Open questions](#open-questions)) |
+| `0x3F8`-`0x3FF` (COM1) | debug builds only: `serial::init` at boot, then panics and `DebugPutChar`, which touch only THR and LSR; the writer bounds its wait for THRE, so a `uart` that breaks the UART cannot hang it | yes; in debug builds `uart` shares it with kernel output, as in seL4 |
+| `0xF4` (`isa-debug-exit`, QEMU) | `arch::exit` ends the run: `DebugHalt`, a panic, a kernel self-test's end | yes, so user-space tests can end a run in any build (`test=release` issues `0xF4`-`0xF7` and writes there with `IOPort_Out32`); scenarios still require `TEST PASS` |
 | `0x40`-`0x43`, `0x61` (PIT, speaker) | none | yes |
 | `0x64`, `0x92`, `0xCF9`, the ACPI PM1 control port | none | yes, but each can reset or power off the machine; root gives them only to trusted servers (M10 brief 7) |
 | `0xCF8`-`0xCFF` (PCI configuration) | none | yes, but it reaches every device, which is as strong as DMA; root gives it only to a trusted PCI manager (M9 uses ECAM) |
@@ -3945,21 +3994,37 @@ enforced by `WriteRegisters` and every return to user mode
 ([User register set and sanitising](#user-register-set-and-sanitising)),
 since `sysretq` loads RFLAGS from `r11`.
 
-`core/src/ioport.rs` (M7) holds the bitmap, the reserved set, the checks and
-message decoding, with host tests and a proptest against a set model;
-`arch/x86_64/io.rs` (since M0) only executes `in` and `out`, and from M7 its
-functions are `#[inline(never)]` for the release kernel's disassembly check
-([A release kernel without UART code](#a-release-kernel-without-uart-code)).
+### Where the code lives
+
+| Part | Where | Milestone |
+| --- | --- | --- |
+| The bitmap (`PortBitmap`), the kernel's ports (`RESERVED`, `reserved`), the capability's range (`port_cap`, `port_range`), `invoke_control` (`Issue`) and `invoke_port` (In and Out of 8, 16 and 32 bits), and `finalise` and `after_delete`, the IOPort arms of the kernel's hooks | `l4core::ioport` (`core/src/ioport.rs`) | M7 |
+| What `core::ioport` needs from the kernel: the `IoPorts` trait (`port_bitmap`, `port_bitmap_mut`, and `port_in` and `port_out`, which make the access the checks allowed); nothing in `core/` executes `in` or `out` | the same; `l4core::invoke::invoke` and the dispatch require it beside `Interrupts` | M7 |
+| `Objects`' `IoPorts`: the bitmap in the static that holds the IRQ table, and the accesses through `io.rs` | `kernel/src/arch/x86_64/objects.rs` | M7 |
+| The only `in` and `out` in the kernel: `inb`, `inw`, `inl`, `outb`, `outw`, `outl`, each `#[inline(never)]` and taking its port as its first argument, for the release kernel's disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)) | `kernel/src/arch/x86_64/io.rs` | M0, M7 |
+| The invocations from user space: `ioport_control_issue`, `ioport_in8` to `ioport_in32`, `ioport_out8` to `ioport_out32`, each message built by a host-tested `device::Request` | `libsys::device` | M7 |
+
+`core/src/ioport/tests.rs` checks every rule above through system calls on
+the test kernel, which records each access instead of making it: the kernel's
+ports, the bitmap across word boundaries, the capability's data word, every
+error row of `Issue`, In and Out in `docs/abi.md`'s order with nothing
+changed by a failed call, zero-extension and the low bytes of Out, and the
+hooks. Its proptest, `random_issues_copies_deletions_and_accesses_match_a_model_of_ranges`
+(256 cases of up to 60 steps), runs random issues near COM1, the PIC and
+`0xFFFF`, copies, deletions, revokes of IOPortControl and accesses of every
+width against a model of each slot's range; `random_sequences_reach_every_path`
+checks that the sequences reach every path. On QEMU `test=ioport` issues
+COM1's range from ring 3 and reads and writes COM1's scratch register.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | User code never executes `in` or `out`: user RFLAGS.IOPL is 0 and the TSS has no I/O bitmap | TSS setup (M3); RFLAGS sanitised on `WriteRegisters` (`l4core::regs::sanitise`) and every return (`l4core::entry::exit_frame`) (M5); red-team briefs 5 and 7 | M3, M5, M10 |
-| An IOPort invocation touches only ports inside its capability's range, width included, with no wrap past `0xFFFF` | `core::ioport` checks, proptest | M7 |
-| Issued ranges are pairwise disjoint and contain no kernel-reserved port | bitmap check in `Issue`, proptest | M7 |
-| A range becomes issuable again only once its last IOPort capability is deleted | finalise path, `core::ioport` test | M7 |
-| The release kernel contains no UART code | `debug` feature gate, xtask disassembly check, release-kernel scenario | M7 |
+| An IOPort invocation touches only ports inside its capability's range, width included, with no wrap past `0xFFFF` | `l4core::ioport::invoke_port` checks `port <= 0xFFFF`, `first <= port` and `port + width - 1 <= last` before `IoPorts::port_in` or `port_out`; host tests `in_reads_zero_extended_within_the_range_width_included` and `ioport_errors_in_order`; the port bitmap's proptest, which checks every access the test kernel recorded against the model's range; `test=ioport`, which reads at both ends of COM1's range, the width included, and is refused one port past either end | M7 |
+| Issued ranges are pairwise disjoint and contain no kernel-reserved port | `invoke_control` checks `reserved` and then the bitmap (`PortBitmap::any_set`) before the destination; host tests `the_kernel_keeps_the_pic_and_imcr_ports` and `issue_errors_in_order`; the port bitmap's proptest, which compares the bitmap with the model's ranges after every step; `test=ioport`, where every range overlapping COM1's is `RevokeFirst` | M7 |
+| A range becomes issuable again only once its last IOPort capability is deleted | `ioport::finalise` returns only the last capability as the cleanup, and `ioport::after_delete` clears its bits once its slot is empty; host tests `a_range_is_free_again_only_once_its_last_capability_is_deleted`, `the_hooks_free_only_the_last_capabilitys_range` and `revoking_iocontrol_frees_every_range_and_it_cannot_be_copied`; the port bitmap's proptest; `test=ioport`, where the range stays issued until its last capability goes and a revoke of IOPortControl frees it | M7 |
+| The release kernel contains no UART code | `cfg(feature = "debug")` on `serial.rs` and `kprintln!`'s writer; `cargo xtask test`'s disassembly check (`xtask/src/disasm.rs`); the `release` scenario ([A release kernel without UART code](#a-release-kernel-without-uart-code)) | M7 |
 
 ### Compared with seL4
 
@@ -4307,8 +4372,8 @@ only when a holder of an IOPort capability for it (`uart`) invokes it
 
 `kernel/Cargo.toml` has had `debug` and `selftest`, which implies `debug`,
 since M4. From M5 `debug` gates the debug system calls, which only a `debug`
-kernel decodes, and the TCB list they walk; until M7 builds a kernel without
-it, every kernel prints. `selftest` gates every `test=` arm and all test-only
+kernel decodes, and the TCB list they walk; until M7 every kernel was built
+with it and printed. `selftest` gates every `test=` arm and all test-only
 kernel code: `kernel/src/selftest.rs` and `kernel/src/rootimage.rs`, the trap,
 paging, timer, NMI-stack, ring-3 and address-space tests and the tick, resume
 and user-entry hooks in `arch`, the preemption-point statistics and injected
@@ -4318,11 +4383,17 @@ reads it from BootInfo: the kernel prints `test=<name>: not a kernel
 self-test; the root task runs it` and runs boot step 10; the root task
 fails a name it does not know. A kernel without `selftest` knows no
 test, so it passes every `test=` to the root task, saying it has no
-self-tests if it has `debug`. xtask builds the kernel with
-`--features selftest` for `test`, `run`,
-`gdb`, `image`, `build` and `acpidump` (the Hyper-V check reads COM1), and
-`cargo xtask clippy` lints it twice, with `selftest` and with no features, so
-that every `cfg` compiles both ways; M7 adds a build without `debug`. From M7,
+self-tests if it has `debug`. xtask builds two kernels (`compile::Kernel`):
+the selftest kernel, with `--features selftest`, and from M7 the release
+kernel, with `--no-default-features`, so neither `debug` nor `selftest`
+([A release kernel without UART code](#a-release-kernel-without-uart-code)).
+`test` and `build` build both; `image`, `run` and `gdb` build the one
+`--kernel selftest` (the default) or `--kernel release` names; `acpidump`
+builds the selftest kernel, since the Hyper-V check reads COM1. `cargo xtask
+clippy` lints the kernel three times, so that every `cfg` compiles each way:
+as the two kernels are built, and from M7 with `debug` alone
+(`--no-default-features --features debug`), the one configuration with the
+debug output but no self-tests. From M7,
 only with `debug` does the kernel contain `arch/x86_64/serial.rs` (the only
 file naming ports `0x3F8` to `0x3FF`), `kprintln!`'s writer, the panic
 message, the boot summary, the report of a fault with no handler ([Missing
@@ -4378,25 +4449,56 @@ tail, as seL4 keeps `ksDebugTCBs`. The walk has no preemption point, so its
 time grows with the number of TCBs, which any thread with untyped memory can
 raise, and any thread can call it in a loop; accepted, as these calls exist
 only in a debug kernel, which makes no timing promise (M5 review). Numbers 19 to 31 stay reserved; there is no
-`DebugNameThread`. A user-space test ends a QEMU run with `DebugHalt(0)` after
-printing `TEST PASS`. In debug scenarios the kernel's writer and `uart` share
-COM1: the kernel only polls LSR and writes THR, so they coexist, with lines
-possibly interleaved.
+`DebugNameThread`. A user-space test ends a QEMU run with `libsys::exit(0)`
+after printing `TEST PASS`: `DebugHalt(0)`, or, once the test has set an
+`isa-debug-exit` port as `test=release` must, `IOPort_Out32(0xF4, 0x10)`
+([`libsys`](#libsys)). In debug scenarios the kernel's writer and `uart`
+share COM1: after `serial::init` the kernel only polls LSR and writes THR, so
+they coexist, with lines possibly interleaved.
 
 ### A release kernel without UART code
 
-M7's done-when is checked three ways. The `serial` module is
-`#[cfg(feature = "debug")]`, so release code naming it does not compile.
-`cargo xtask test` builds the kernel without `debug`, disassembles it, and fails on any `in` or
-`out` outside the functions of `io.rs`, any immediate in `0x3F8` to `0x3FF`
-moved into `dx`, `edx` or `rdx`, and any `serial` symbol (`0x3FF` alone is
-also the IPC buffer's alignment mask); that also catches a port write added
-outside `serial.rs` or inlined into another function. So that each `in` and
-`out` sits under an `io.rs` symbol, those functions are `#[inline(never)]` and
-take the port in `dx` from their argument. A release kernel calls them from
+The release kernel is the kernel crate built without features
+(`--no-default-features`): neither `debug` nor `selftest`. Cargo links both
+kernels to `target/x86_64-unknown-none/<profile>/kernel`, so xtask builds the
+release kernel first and copies it to
+`target/xtask/release-kernel/<profile>/kernel.elf`, leaving the selftest
+kernel's file in place (`xtask/src/compile.rs`); Cargo keeps both builds, so
+switching between them recompiles nothing. A scenario with `kernel: release`
+boots it ([The harness](#the-harness)), and `cargo xtask image`, `run` and
+`gdb` take `--kernel release`. It prints nothing, and a panic only exits with
+failure.
+
+M7's done-when is checked three ways. The `serial` module, `kprintln!`'s
+writer and `debug::print` are `#[cfg(feature = "debug")]`, so release code
+naming them does not compile. Before any scenario, `cargo xtask test`
+disassembles the release kernel (`xtask/src/disasm.rs`, with `llvm-objdump`
+from rustup's `llvm-tools`, which `tools/setup.sh` adds, else one on `PATH`)
+and fails on any of four things:
+
+- an `in` or `out`, string forms included, outside `io.rs`'s functions (the
+  address ranges their symbols cover);
+- an immediate in `0x3F8` to `0x3FF` moved into `dx`, `edx` or `rdx` (only a
+  move into the port register counts, since `0x3FF` alone is also the IPC
+  buffer's alignment mask);
+- a `call` or jump to one of `io.rs`'s functions after the straight-line code
+  before it moved such an immediate into `dil`, `di`, `edi` or `rdi`, their
+  port argument: that is how a caller would name COM1, since the functions
+  move the port into `dx` themselves;
+- any symbol whose name contains `serial`.
+
+It also fails if the listing has fewer than 1,000 instructions or no `io.rs`
+function with an `in` and one with an `out`, so a listing it misreads cannot
+pass by finding nothing. That catches a port access added outside
+`serial.rs`, one inlined into another function, and a call of `io.rs` with a
+COM1 port. So that each `in` and `out` sits under an `io.rs` symbol, the six
+functions there (`inb`, `inw`, `inl`, `outb`, `outw`, `outl`) are
+`#[inline(never)]` and take the port as their first argument, which they move
+into `dx` themselves. A release kernel calls them from
 three places only: the IOPort invocations, `pic::init` at boot (ports `0x20`,
 `0x21`, `0xA0` and `0xA1`, when the MADT sets `PCAT_COMPAT`, as q35's does)
-and `arch::exit` (`isa-debug-exit`, after a panic). A scenario boots that
+and `arch::exit` (`isa-debug-exit`, after a panic). The `release` scenario
+([Scenarios](#scenarios)) boots that
 kernel: all output comes from `uart`, and root ends the run through an IOPort
 capability for `isa-debug-exit` (`0xF4`) made from IOPortControl, writing what
 `arch::exit` writes: `0x10` for success, which QEMU turns into exit status 33,
@@ -4411,8 +4513,8 @@ holds.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")`; xtask disassembly check (no `in` or `out` outside `io.rs`'s functions, no `0x3F8` to `0x3FF` moved into `dx`, no `serial` symbol); release scenario | M7 |
-| Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test `debug_numbers_need_a_debug_kernel`; release scenario, whose root test takes the fault from another thread | M5, M7 |
+| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")` on `serial.rs`, `kprintln!`'s writer and `debug::print`, so release code naming them does not compile (every release build, and `cargo xtask clippy`'s release configuration); `cargo xtask test`'s disassembly check, `disasm::check` (no `in` or `out` outside `io.rs`'s functions, no `0x3F8` to `0x3FF` moved into `dx`, none passed as `io.rs`'s port argument, no `serial` symbol), whose host tests in `xtask/src/disasm.rs` run each rule on listings that break it; the `release` scenario, whose `forbid:` lines catch a debug kernel's banner, BootInfo summary, `DEBUG HALT` and panic lines | M7 |
+| Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test `debug_numbers_need_a_debug_kernel`; the `release` scenario, whose root test (`user/root/src/release.rs`) has a probe thread make `DebugPutChar`, `DebugHalt`, `DebugDumpScheduler` and numbers 19 and 31, and takes each `UnknownSyscall` on endpoint D with the number in MR18 (`root::check::console`, host test `the_probes_faults_are_answered_two_bytes_on`) | M5, M7 |
 | `DebugPutChar` and `DebugDumpScheduler` change no register a thread can rely on | `l4core::syscall` returns them without writing a register, and `dispatch` writes none; host test `debug_system_calls_go_back_to_the_kernel` | M5 |
 | Debug system calls read no user memory and take no capability | `dispatch::debug_call` uses only `rdi`'s value and kernel state; review | M5 |
 | The TCB size is the same with and without `debug` | the debug list's two link words live in the TCB's debug-only tail at offset 608 in every build; `l4core::tcb`'s compile-time layout asserts | M5 |
@@ -4465,7 +4567,7 @@ its own.
 | BootInfo's two pages | none | unmapped |
 
 The paging structures are those root's own image range needs (one PDPT, PD
-and PT with M6's image). root fills each fresh data frame through a scratch
+and PT with M6's image and with M7's). root fills each fresh data frame through a scratch
 mapping in its own VSpace (a free page under its image's page table, as
 `test=tlb` maps one), unmaps it there, then maps it in the server; a frame
 capability maps once. The IPC buffer sits at root's address, so the
@@ -4476,12 +4578,15 @@ of its entry function and relies on no static root may have written. A server
 gets no arguments; its slots are fixed (below). `user/link.ld` exports the
 segment bounds (`__rodata_start`, `__data_start`, `__data_end`,
 `__libsys_stack_start`), from which, with the thread stacks' addresses,
-`root::process::plan`, host-tested, gives each image page its role and its
+`root::process::Plan`, host-tested, gives each image page its role and its
 frame capability's slot: BootInfo's `user_image_frames` has one frame per
 page a segment covers, in address order. A server costs one root slot per
 text, read-only and data page, 17 for its stack and buffer, four paging
-structures, its TCB and its CNode: about 70 of the root CNode's 4,096 with
-M6's image, and some 120 KiB of RAM.
+structures, its TCB and its CNode (`Plan::slots`): with M7's image of 118
+frames (57 text, 20 read-only and 1 data page in the dev profile), 101 of the
+root CNode's 4,096, which `test=console` prints, and about 107 KiB of RAM
+(18 fresh frames, four 8 KiB paging structures, a 2 KiB TCB and a 512-byte
+CNode).
 
 #### Capabilities
 
@@ -4503,7 +4608,7 @@ slot numbers are constants of the server's crate (`uart::slot`,
 | 3 | IOPort `0x3F8`-`0x3FF`, a copy of root's | |
 | 4 | IRQHandler of ISA IRQ 4, a copy of root's, already bound to notification NU | |
 | 5 | console's notification NC | Write, badge `RX_READY` (bit 32) |
-| 6 | endpoint F, its fault endpoint | Write, GrantReply, badge `UART` |
+| 6 | endpoint F, its fault endpoint | Write, GrantReply, badge `UART` (1, `root::process::fault_badge`) |
 | 7 | empty: a held request's reply capability | |
 
 | `console` slot | Capability | Rights, badge |
@@ -4511,7 +4616,7 @@ slot numbers are constants of the server's crate (`uart::slot`,
 | 1 | its own CNode, guard 0 of size 60 | for `CNode_SaveCaller` |
 | 2 | endpoint C, console's requests | Read |
 | 3 | endpoint U | Write, GrantReply, badge 1 (the writer) |
-| 4 | endpoint F, its fault endpoint | Write, GrantReply, badge `CONSOLE` |
+| 4 | endpoint F, its fault endpoint | Write, GrantReply, badge `CONSOLE` (2) |
 | 8 to 15 | empty: client `b`'s saved Read reply goes in slot 7 + `b` | |
 
 A client holds endpoint C with Write and GrantReply and a badge from 1 to 8,
@@ -4539,9 +4644,9 @@ harms only the service it provides.
 | the original of every object it retyped for a server | revoking stops the server and reclaims its memory |
 | endpoint C's original, and a client capability with badge 1 | root is console's client 1 |
 | endpoint U with badge 2 | `Stats` only |
-| endpoint D | client reports, and the faults of clients and of `test=release`'s probe |
+| endpoint D | client reports, and the faults of clients (badged with their client numbers, 2 and 3 in `test=console`) and of `test=release`'s probe (badge 9) |
 | endpoint F and the thread `watch` | the servers' faults ([Failures](#failures)) |
-| under QEMU, IOPort `0xF4`-`0xF7` | `isa-debug-exit`, to end a run in any kernel |
+| in `test=release` under QEMU, IOPort `0xF4`-`0xF7` | `isa-debug-exit`, to end a run in any kernel |
 
 #### Server priorities
 
@@ -4567,7 +4672,7 @@ on slot 3.
 | Step | Access | Why |
 | --- | --- | --- |
 | 1 | LCR (3) = `0x03`; IER (1) = 0 | DLAB clear, so offset 1 is IER whatever LCR held; no interrupt during setup |
-| 2 | read LSR (5) until TEMT, at most 10,000 times | bytes the loader, a debug kernel or root wrote leave before the FIFO reset |
+| 2 | read LSR (5) until TEMT, at most 10,000 times | bytes the loader, a debug kernel or root wrote leave before the FIFO reset; one a debug kernel writes between this step and step 4 is still dropped, so tests print nothing while uart starts |
 | 3 | LCR (3) = `0x80`; DLL (0) = 1; DLM (1) = 0; LCR = `0x03` | 115,200 baud, 8 data bits, no parity, 1 stop bit: the setting of the kernel's writer and of OVMF |
 | 4 | FCR (2) = `0x87` | FIFOs on and cleared, receive trigger at 8 bytes, as Linux's 8250 driver sets a 16550A (from memory) |
 | 5 | read IIR (2) | bits 6 and 7 both set: working FIFOs, burst 15; otherwise a 16450 or a 16550 with broken FIFOs: FCR = 0, burst 1 |
@@ -4608,8 +4713,8 @@ If the routine moved any byte into the ring, it signals NC once.
 next cause makes a new edge. The kernel masks an edge pin on the second
 delivery since the last Ack ([IRQControl and
 IRQHandler](#irqcontrol-and-irqhandler)), and an I/O APIC may drop an edge
-while the pin is masked; QEMU's does (from memory: `ioapic_set_irq`,
-`hw/intc/ioapic.c`, citing the 82093AA). With the Ack first, every delivery
+while the pin is masked; QEMU 8.2's does (`test=irq`; from memory,
+`ioapic_set_irq` in `hw/intc/ioapic.c` cites the 82093AA). With the Ack first, every delivery
 since the Ack came after the receive that woke uart, so if one masked the pin
 its signal is still pending: a cause that arrives after the routine's last
 IIR read either finds the pin open and makes an edge, or finds a signal
@@ -4648,7 +4753,7 @@ for what it held.
 | Item | Rule |
 | --- | --- |
 | Transmit queue | 2,048-byte ring, at least twice the largest Write |
-| Burst | 15 bytes into the 16-byte FIFO, 1 without FIFOs; the 16th place is for a debug kernel's byte (below) |
+| Burst | 15 bytes into the 16-byte FIFO, 1 without FIFOs; the 16th place is for a debug kernel's byte (below), so only a 16550 with working FIFOs shares safely with a debug kernel |
 | IER.THRI | set exactly while the queue holds bytes or a Drain is held, so an idle uart takes no THRE interrupts |
 | Write of `n` bytes | if the queue has room for all `n`, they are queued, uart writes a burst if LSR.THRE is set, and replies `n` at once; otherwise uart moves the caller's reply capability into slot 7 (`CNode_SaveCaller`), keeps the bytes, and replies through slot 7 once THRE bursts have made room for all of them. Back-pressure is a late reply |
 | Held requests | one at a time: a Write or Drain while one is held, found by `CNode_SaveCaller`'s `DeleteFirst`, gets `Busy`. console, single-threaded and the only writer, never sees it |
@@ -4670,7 +4775,11 @@ coexist:
 - The writer writes only when THRE says the FIFO is empty, so when uart
   bursts after seeing THRE the FIFO holds at most one byte the writer added
   since; 15 bytes then never overflow it, even if uart is preempted
-  mid-burst.
+  mid-burst. Without FIFOs (a 16450, or FIFOs that do not work) the holding
+  register has no spare place: a kernel byte written between uart's look at
+  THRE and its own write is replaced, so a byte can be lost (the `uart` host
+  tests give a kernel writer only to a device with FIFOs). QEMU's 16550 has
+  them; Hyper-V's is an M8 check ([Open questions](#open-questions)).
 - A kernel write to THR clears a pending THRE condition; the next THRE comes
   when that byte has drained, and uart refills then.
 - The writer's LSR reads clear LSR's error bits, so uart may miss overruns
@@ -4713,7 +4822,8 @@ bytes, eight per word, little-endian: byte `i` is bits 8(`i` mod 8) to
 on both sides. A server answers `BadLength` when `n` is over its limit or
 `length` does not match `n`, and ignores the unused bytes of the last word.
 It checks the label, then the badge, then the length, then whether it can
-hold the request. A request is never accepted in part: all `n` bytes or an
+hold the request; a request that takes no words ignores any sent, whatever
+their `length`. A request is never accepted in part: all `n` bytes or an
 error. `libsys` splits longer writes.
 
 A reply's label is 0 on success. Errors have `length` 0:
@@ -4782,9 +4892,10 @@ or typed bytes.
 | `Flush` by `c` with held bytes | the same, with the held bytes | output of `c` |
 | `Read` by `c` with a typed line waiting | as `Flush`; the line is the reply, at once | |
 | `Read` by `c` with none | `c`'s held bytes become its prompt; if `c` has focus, showing its input line | input of `c`, if focused |
-| A typed byte for the focused client `f` | showing `f`'s input line, unless the owner is input of `f`; then the byte's echo ([Input](#input)) | input of `f` |
-| Enter, a typed byte whose echo is `\r\n` | as a typed byte; the line answers `f`'s saved `Read`, or joins `f`'s waiting lines | none |
+| A printable byte, BS, DEL or Ctrl-U typed for the focused client `f` | showing `f`'s input line, unless the owner is input of `f`; then the byte's echo ([Input](#input)) | input of `f` |
+| Enter (CR, or LF not after CR) | as a printable byte; the line answers `f`'s saved `Read`, which clears `f`'s prompt, or joins `f`'s waiting lines | none |
 | Ctrl-T and a digit `n` | `\r\n` unless the owner is none; `[console] focus n (name)\r\n`, or `client n` before it has attached; then restoring | none, or input of `n` |
+| Any other typed byte: Ctrl-T itself and a non-digit after it, an LF after CR, ESC and what it skips, a dropped byte | nothing; the input line is not redrawn | unchanged |
 
 So a line of at most 512 bytes that its client does not flush midway reaches
 the wire whole, with no other byte inside it (a debug kernel's aside),
@@ -4793,6 +4904,8 @@ by line. Only a longer line can be broken, into 512-byte pieces. Echo,
 breaks, redrawn input lines and status lines go only to the terminal, never
 to a client. A prompt is what the client wrote since its last newline and had
 not flushed; a client writes its prompt and reads, with no `Flush` between.
+The prompt is shown again with every redraw of the client's input line until
+its `Read` is answered, and then cleared.
 
 #### Input
 
@@ -4809,7 +4922,8 @@ not flushed; a client writes its prompt and reads, with no `Flush` between.
 
 Focus starts on client 1. Ctrl-T and a digit focuses that client whether or
 not it has attached or is reading. Each client has its own prompt, edit
-buffer and waiting lines (up to 512 bytes of complete lines), so switching
+buffer and waiting lines (up to 512 bytes of complete lines, each counted
+with its terminator), so switching
 focus leaves a half-typed line where it was; Enter with no room for the line
 rings BEL and leaves it in the edit buffer. Each byte goes to the client
 focused when console reads it, whether or not that client is reading yet:
@@ -4835,7 +4949,10 @@ literal Ctrl-T.
 | `libsys::proto` | the byte-string encoding, the request labels of both protocols, the error labels, `MAX_BYTES` = 952 |
 | `libsys::console::Client` | a client capability: `attach`, `write` (split into messages of at most 952 bytes), `flush`, `read_line`, `sync`, and `core::fmt::Write` |
 | `libsys::uart::Client` | console's side of uart: `write`, `read`, `drain`, `stats` |
-| `libsys::output` | where `print!` and `println!` go: `DebugPutChar`, the default, or a console client capability (`use_console`, `use_debug`); `set_exit_port` names an IOPort for `isa-debug-exit`; `exit(status)` syncs the console if `print!` goes there, then writes `0x10` (status 0) or `0x11` to that port with `IOPort_Out32` if one is set, and stops, else calls `DebugHalt(status)` |
+| `libsys::CallError` | why either client's request failed: the server's refusal, the kernel's error, or a reply that is neither |
+| `libsys::output` | where `print!` and `println!` go: `DebugPutChar`, the default, or a console client capability (`use_console`, `use_debug`); `set_exit_port` names an IOPort for `isa-debug-exit`; `reset` restores both defaults; `exit(status)` syncs the console if `print!` goes there, then writes `0x10` (status 0) or `0x11` to that port with `IOPort_Out32` if one is set, and stops, else calls `DebugHalt(status)`; `exit_now` is the same without the `Sync`, for a panic while printing |
+| `libsys::device` | the IRQControl, IRQHandler, IOPortControl and IOPort invocations ([Where the code lives](#where-the-code-lives-3)) |
+| `libsys::vspace`, `libsys::image` | `Frame_Map`, `Frame_Unmap` and the paging structures' `Map`, and the segment bounds `user/link.ld` exports, for building a server's VSpace |
 | `libsys::output::Polled` | a `core::fmt::Write` on a COM1 IOPort capability that bypasses uart, for [Failures](#failures): before each byte it polls LSR until THRE, at most 100,000 times as the kernel's writer does, then writes THR (`\n` as `\r\n`); after the text it polls for TEMT within the same bound; it touches no other register |
 
 The panic handler and root's `fail!` end with `libsys::exit(1)`, so a test
@@ -4847,8 +4964,9 @@ run with failure. The output and the exit port are statics of a VSpace, and a
 CPtr names a slot of one CSpace, so:
 
 - `root` spawns the servers before it points its own output at console, and
-  each server's entry sets its output to `DebugPutChar` (a server printing
-  through console would call itself);
+  each server's entry calls `output::reset`, which sets its output to
+  `DebugPutChar` and drops the exit port its copy of root's data may name (a
+  server printing through console would call itself);
 - `watch` shares root's VSpace, whose `print!` names console once root has
   switched, so it never uses `print!`, only `Polled`;
 - threads in root's VSpace with CSpaces of their own, such as
@@ -4887,14 +5005,15 @@ fault of root or of `watch`, which have no handler and print nothing.
 
 ### The harness
 
-Three new scenario directives; a scenario without them runs exactly as
-before.
+Four new scenario directives and values (`xtask/src/scenario.rs`); a scenario
+without them runs exactly as before.
 
 | Directive | Meaning |
 | --- | --- |
-| `send: <text>` | writes `<text>` to QEMU's standard input, COM1's receive side, once every `expect:` above it has matched; consecutive `send:` lines go together, in order. Escapes: `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`; a `\` before anything else is an error. As for every value, the ends are trimmed and ` #` starts a comment, so a space or `#` there is `\x20` or `\x23` |
+| `send: <text>` | writes `<text>` to QEMU's standard input, COM1's receive side, once every `expect:` above it has matched; consecutive `send:` lines go together, in order. Escapes: `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`; a `\` before anything else is an error. As for every value, the ends are trimmed and ` #` starts a comment, so a space or `#` there is `\x20` or `\x23`. A scenario's `send:` lines total at most 4 KiB once unescaped (a parse error otherwise), far below a pipe's 64 KiB, so the blocking write to QEMU's stdin never waits past the timeout on a guest that has stopped reading |
 | `kernel: release` | boots the kernel built without features (no `debug`, no `selftest`), in the run's profile; `kernel: selftest` is the default |
-| `forbid: <text>` | no line of the transcript may contain `<text>`; checked when the run ends, and the failure names the first such line |
+| `forbid: <text>` | no line of the transcript may contain `<text>`; checked as each line arrives and reported when the run ends, naming the first such line |
+| `exit: timeout` | beside `success` and `failure`: the guest must still be running when the scenario's `timeout:`, which it then needs, ends the boot, with every `expect:` matched. For a kernel with no exit of its own; no scenario uses it now that `release` ends through `isa-debug-exit` |
 
 **Timing.** A `send:` must have an `expect:` above it (a parse error
 otherwise): until the guest's uart has started, OVMF reads COM1, where a key
@@ -4912,10 +5031,11 @@ it advances, and the main loop writes them to QEMU's stdin, which is piped
 for scenarios with a `send:` and stays `/dev/null` for the others. Matching
 stays line-based: a prompt without a newline is never seen, so a test makes
 the line before each `send:` a whole one and checks echo with host tests.
-xtask builds the release kernel beside the selftest one; since a feature
-change rebuilds in place, it goes in a target directory of its own or is
-copied out. `cargo xtask run` and `image` keep the selftest kernel; a
-`--kernel release` option is optional.
+xtask builds the release kernel beside the selftest one and copies it out to
+`target/xtask/release-kernel/<profile>/kernel.elf`, since a feature change
+rebuilds in place ([A release kernel without UART
+code](#a-release-kernel-without-uart-code)). `cargo xtask image`, `run` and
+`gdb` boot the selftest kernel unless given `--kernel release`.
 
 ### Scenarios
 
@@ -4925,7 +5045,10 @@ attaches as client 1 (`root`), points its output at console and starts
 clients `a` (badge 2) and `b` (badge 3), each with an IPC buffer in KiB 1 or 2
 of root's buffer frame (`spawn`), which attach and report on D. A client asks
 for its next step with a `Call` on D whose message reports on its last one,
-with label `0x130`, above every fault type; its fault endpoint is the same
+with label `0x130`, above every fault type: MR0 the step it did (`u64::MAX`
+for its first report, once it has attached), MR1 its status (0, or the error
+that stopped it), and MR2 on the line it read, as a byte string
+(`root::check::console::Report`); its fault endpoint is the same
 capability, D with Write, GrantReply and its client number as badge, so root
 tells a fault from a report by the label. Root answers one client at a time
 and keeps the other's reply capability saved (`CNode_SaveCaller`), so every
@@ -4935,7 +5058,7 @@ uart, never in a call to a client that may fault:
 | Part | What the clients do | What the transcript shows |
 | --- | --- | --- |
 | Interleaved lines | `a` writes `a1 alpha `, `b` writes `b1 bravo `, `a` writes `one\n`, `b` writes `one\n`; `b` writes a 300-byte line, `b2` and filler, in three writes of 100 bytes (through the IPC buffer), with `a`'s whole line `a2 short` between them; `a` writes `a3 x\na4 y\na5 ` in one write, `b` writes `b3 z\n`, `a` writes `end\n` | `a1 alpha one`, `b1 bravo one`, `a2 short`, the 300-byte `b2` line, `a3 x`, `a4 y`, `b3 z`, `a5 end`, each whole and in that order |
-| Burst | `b` writes twelve 200-byte lines back to back | `b burst 01` to `b burst 12`, whole; uart may hold some of console's writes (`Stats` MR6) |
+| Burst | `b` writes twelve 200-byte lines back to back | `b burst 01` to `b burst 12`, whole. On hardware uart may hold some of console's writes; QEMU's transmitter empties at once, so its queue never fills and `Stats` shows 0 Writes held (MR6) |
 | Input | `a` and `b` each write a prompt and `Read`; root answers both before it prints `console: input next`, then waits on D for both reports | see the steps below |
 | Totals | root asks uart's `Stats` | signals and THRE bursts (MR0, MR3) above 0, exactly the 22 bytes the harness sent, 0 overruns and line errors |
 
@@ -4993,16 +5116,17 @@ a root-task fault has no handler and no output, so it shows only as the
 
 | Part | Where | Host tests |
 | --- | --- | --- |
-| Byte strings, labels, error labels; the two clients; `print!`'s output and `exit` | `libsys::proto`, `libsys::console`, `libsys::uart`, `libsys::output` | round trips for every `n` from 0 to 952, each `length`, `BadLength` cases, the ignored high bytes; writes split at 952; `fmt::Write` |
-| The 16550 driver: registers, setup, the service routine, the rings, held requests, requests; `uart::run`, the loop | crate `uart` (`user/uart`), `no_std`, `#![forbid(unsafe_code)]`, generic over a port trait; `run` for the target only | against a 16550 model (IIR priorities, THRE cleared by an IIR read or a THR write, 16-byte FIFOs, the trigger and the timeout, OE, OUT2 and an edge-triggered line; a transmitter that takes a byte time per byte, and one that empties at once as QEMU's does) and an I/O APIC pin with the kernel's Ack rule that drops edges while masked: setup's accesses in order; random interleavings of host input, transmit progress, a kernel writer and uart's steps never lose a byte, overflow the FIFO, or leave uart blocked with a cause pending and no signal; the same model finds such a state when the loop services before it Acks, so the test can tell; on a working device the limit of 64 is never reached; held Writes released in order; Drain answered only when empty; a full ring stops and resumes reception |
+| Byte strings, labels, error labels; the two clients; `print!`'s output and `exit`; the device invocations | `libsys::proto`, `libsys::console`, `libsys::uart`, `libsys::output`, `libsys::device` | round trips for every `n` from 0 to 952, each `length`, `BadLength` cases, the ignored high bytes; writes split at 952; `fmt::Write`; `Polled` against a model port; each device invocation's message |
+| The 16550 driver: registers, setup, the service routine, the rings, held requests, requests; `uart::run`, the loop | crate `uart` (`user/uart`), `no_std`, `#![forbid(unsafe_code)]`, generic over a port trait; `run` for the target only | against a 16550 model (IIR priorities, THRE cleared by an IIR read or a THR write, 16-byte FIFOs, the trigger and the timeout, OE, OUT2 and an edge-triggered line; a transmitter that takes a byte time per byte, and one that empties at once as QEMU's does) and an I/O APIC pin with the kernel's Ack rule that drops edges while masked: setup's accesses in order; in 400 random interleavings of host input, transmit progress, a kernel writer (with FIFOs only: [Sharing COM1 with a debug kernel](#sharing-com1-with-a-debug-kernel)) and uart's steps, uart never loses a byte, overflows the FIFO, or blocks with a cause pending and no signal (`random_interleavings_lose_nothing_and_never_strand_uart`); the same model finds such a state when the loop services before it Acks, so the test can tell (`servicing_before_the_ack_strands_uart`); on a working device with input no faster than the line rate the limit of 64 is never reached; held Writes released in order; Drain answered only when empty; a full ring stops and resumes reception; a device whose IIR never clears is left after 64 reads |
 | The terminal: clients, output arbitration, line editing, focus; `console::run`, the loop | crate `console` (`user/console`), the same way | golden byte transcripts for every row of the event and input tables; a proptest of random writes at random boundaries, flushes, reads and typed bytes, focus keys included, by eight clients against a model of per-client lines, checking the invariants below |
-| Building a server's VSpace and CSpace; `watch` | `root::process` (plan, host-tested) and `user/root/src/process.rs` | the page plan of M6's image, of an image across a 2 MiB boundary, and of segments with gaps; `watch`'s failure line for each fault type |
-| The two tests | `user/root/src/console.rs`, `release.rs`; verdicts in `root::check::console` | the script, the lines each client must receive, the input byte counts |
-| The directives | `xtask/src/scenario.rs`; the release kernel in `xtask/src/compile.rs` | parsing `send:` escapes and placement, `kernel:` and `forbid:`; the matcher releasing each send after the expects above it, and consecutive sends together |
+| Building a server's VSpace and CSpace; `watch` | the plan and `watch`'s failure line in `root::process` (`user/root/src/process.rs`, in the root crate's library); the invocations and `watch` itself in `user/root/src/servers.rs`, in the program | the page plan of M6's image, of an image across a 2 MiB boundary, and of segments with gaps; no scratch page when the mapping ends on a 2 MiB boundary; `watch`'s failure line for each fault type |
+| The two tests | `user/root/src/console.rs`, `release.rs`; verdicts in `root::check::console` | the script, the reports' layout, the lines each client must receive, uart's totals, the probe's faults |
+| The directives and the release kernel | `xtask/src/scenario.rs`; the release kernel in `xtask/src/compile.rs`, its disassembly check in `xtask/src/disasm.rs` | parsing `send:` escapes and placement, the 4 KiB cap, `kernel:`, `forbid:` and `exit: timeout`; the matcher releasing each send after the expects above it, and consecutive sends together; each disassembly rule on a listing that breaks it, and on one that passes |
 
 `cargo xtask test` runs the host tests of `uart` and `console` beside
 `libsys`'s and `root`'s, and `cargo xtask clippy` lints both crates for the
-host and the target. QEMU covers what the host cannot: QEMU's 16550, IRQ 4
+host and the target. Their tests shrink under Miri (`cfg!(miri)`), but CI
+runs Miri on `l4core` only. QEMU covers what the host cannot: QEMU's 16550, IRQ 4
 through the I/O APIC to a notification, the IOPort invocations, separate
 VSpaces built from root's frames, the harness's input through COM1, and the
 release kernel.
@@ -5011,20 +5135,20 @@ release kernel.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| uart is the only holder of the COM1 IOPort and the IRQ 4 handler besides root, which keeps the originals; no server holds a TCB, VSpace, untyped, paging or Grant capability | `root::process` fills each CNode from its crate's slot table only; `test=console` and `test=release` start no other holder; review | M7 |
-| No page is writable in two VSpaces: a server maps root's text and read-only pages read-only, and its own data, stack and IPC buffer frames | `root::process::plan` host tests; review | M7 |
-| uart never blocks except in its receive on U: it sends only to reply capabilities and signals only NC; the one endpoint it could send on is its fault endpoint, which only the kernel uses | the crate's structure and slot table; review | M7 |
-| uart never writes more than 15 bytes into the FIFO per THRE seen, so even a debug kernel's byte cannot overflow it | `uart` host test with a kernel writer in the model | M7 |
-| uart never blocks with an interrupt cause pending and no signal pending, whatever the order of device events, edges dropped on a masked pin included | an Ack before every service routine, which drains until IIR is clear; root refuses a level route for IRQ 4; `uart` host test against the I/O APIC model | M7 |
-| Every byte queued for transmit is sent once and in order; every byte received, unless overrun, reaches console once and in order | `uart` host tests; `console` scenario totals | M7 |
-| IER.THRI is set exactly while the transmit queue holds bytes or a Drain is held; IER's data bit is clear only while the receive ring is full | `uart` host tests after every step | M7 |
-| console emits each client's bytes once and in order, `\n` as `\r\n`; a line of at most 512 bytes that its client does not flush midway reaches the wire with no other byte from console inside it | `console` proptest; `console` scenario | M7 |
-| Each typed line reaches exactly one client, the one focused while its bytes were read, as edited; echo, status and redrawn lines reach no client | `console` proptest and goldens; `console` scenario, where root checks each client's lines | M7 |
-| Every `Read` is answered at most once, and exactly once if its client survives and a line is typed for it | `console` proptest; `CNode_SaveCaller` refuses a second save (`Busy`) | M7 |
-| console never blocks on a client; it blocks only in calls to uart, which always reply | the crate's structure; review | M7 |
-| Priorities: uart above console above its clients | `root::process`; both scenarios print them | M7 |
-| A server fault ends the run with failure, whatever root is waiting on, and a client fault reaches root, which never waits in a call to a client | `watch`, which only receives on F; clients driven through their `Call`s on D; review | M7 |
-| In a release kernel, everything on COM1 after the loader comes from uart, or from `watch` once a server has faulted | `release` scenario's `forbid:` lines; the disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)) | M7 |
+| uart is the only holder of the COM1 IOPort and the IRQ 4 handler besides root, which keeps the originals; no server holds a TCB, VSpace, untyped, paging or Grant capability | `servers::start` (`user/root/src/servers.rs`) fills each server's CNode only from the entries it lists against the crate's slot table (`uart::slot`, `console::slot`), with the rights the tables above give; `test=console` and `test=release` start no other holder, and `test=console` prints the slots uart's copies came from; review | M7 |
+| No page is writable in two VSpaces: a server maps root's text and read-only pages read-only, and its own data, stack and IPC buffer frames | `root::process::Plan`: text and read-only pages are copies of root's frame capabilities, which `servers.rs` makes with Read only and maps R or RX, and every writable page a fresh frame (`Role::fresh`); host test `m6s_image`, which checks both for every page, and the other plan tests; review | M7 |
+| uart never blocks except in its receive on U: it sends only to reply capabilities and signals only NC; the one endpoint it could send on is its fault endpoint, which only the kernel uses | `uart::run` (`user/uart/src/run.rs`) receives with `Recv` and `ReplyRecv` on U, answers held requests with `Send` on slot 7, a reply capability, and signals only slot 5; `uart::slot` holds no other capability it could send on but F; review | M7 |
+| uart never writes more than 15 bytes into the FIFO per THRE seen, so with working FIFOs even a debug kernel's byte cannot overflow it | `Uart` writes at most its burst, 15 with working FIFOs and 1 without, after each THRE it sees; `random_interleavings_lose_nothing_and_never_strand_uart` checks the most bytes after one THRE against the burst and that the model's FIFO never overflows, with a debug kernel's writer on devices with FIFOs (without them a kernel byte can be lost: [Sharing COM1 with a debug kernel](#sharing-com1-with-a-debug-kernel)) | M7 |
+| uart never blocks with an interrupt cause pending and no signal pending, whatever the order of device events, edges dropped on a masked pin included | `Uart::on_interrupt` Acks before every service routine, which drains until IIR is clear (ADR 0028); `servers::start` refuses a level or active-low route for IRQ 4; host test `random_interleavings_lose_nothing_and_never_strand_uart`, which fails if uart waits with the line high, against a pin model that drops edges while masked, and `servicing_before_the_ack_strands_uart`, which shows the model finds the old order's stranding; the `console` and `release` scenarios' typed input | M7 |
+| Every byte queued for transmit is sent once and in order; every byte received, unless overrun, reaches console once and in order | host tests `random_interleavings_lose_nothing_and_never_strand_uart` (every byte console wrote on the wire once and in order, the kernel's beside them; every byte the host sent received, or with overruns the survivors in order), `a_write_that_does_not_fit_is_held_and_released_in_order` and `a_full_ring_stops_and_resumes_reception`; the `console` and `release` scenarios, where uart's `Stats` count exactly the 22 and 14 bytes the harness sent (`root::check::console`, host test `uarts_totals`) | M7 |
+| Whenever uart waits, IER.THRI is set exactly while the transmit queue holds bytes or a Drain is held, and IER's data bit is clear only while the receive ring is full | `Uart::wanted_ier`; `random_interleavings_lose_nothing_and_never_strand_uart` compares the model's IER with it each time uart waits; host tests `a_drain_is_answered_only_when_the_queue_and_fifo_are_empty` and `a_full_ring_stops_and_resumes_reception` | M7 |
+| console emits each client's bytes once and in order, `\n` as `\r\n`; a line of at most 512 bytes that its client does not flush midway reaches the wire with no other byte from console inside it | `Terminal::write`, `flush` and `read`; the proptest `eight_clients_against_a_model_of_their_lines` (512 cases of up to 120 operations), which checks each client's bytes on the terminal against the model's and that each whole line's bytes are consecutive; goldens `a_write_that_completes_lines_sends_them_whole`, `a_break_comes_only_after_another_clients_line` and `held_bytes_go_out_at_512`; the `console` scenario's interleaved and burst parts | M7 |
+| Each typed line reaches exactly one client, the one focused while its bytes were read, as edited; echo, status and redrawn lines reach no client | `Terminal::input` routes each byte by the focus when it is read, and only Enter hands a line to a client; the proptest, which compares every line a typed byte completes, and its client, with the model's; goldens for every row of the input table and `the_scenarios_input_reaches_the_right_clients`; the `console` scenario, where root checks each client's lines (`root::check::console`, host test `each_client_reads_its_line_and_nothing_else`) | M7 |
+| Every `Read` is answered at most once, and exactly once if its client survives and a line is typed for it | an Enter answers a saved `Read` once and clears it, and `CNode_SaveCaller` refuses a second save, which console answers with `Busy`; the proptest, which compares every `Read`'s answer (a line, saved, or `Busy`) with the model's; golden `enter_answers_the_saved_read_or_joins_the_waiting_lines` | M7 |
+| console never blocks on a client; it blocks only in calls to uart, which always reply | `console::run` (`user/console/src/run.rs`) answers clients only by `ReplyRecv` or by `Send` on a saved reply capability, and calls only uart, whose requests always get a reply (a held one later); review | M7 |
+| Priorities: uart above console above its clients | `servers.rs`'s `WATCH_PRIORITY`, `UART_PRIORITY`, `CONSOLE_PRIORITY` and `CLIENT_PRIORITY`, set with `TCB_SetSchedParams` with an equal MCP; both scenarios print them | M7 |
+| A server fault ends the run with failure, whatever root is waiting on, and a client fault reaches root, which never waits in a call to a client | `watch` (`servers.rs`), which only receives on F and ends the run through `Polled` and the exit port or `DebugHalt(1)`; its failure line, host test `watchs_line_for_each_fault`; clients driven through their `Call`s on D, their fault endpoint; review. No scenario makes a server fault | M7 |
+| In a release kernel, everything on COM1 after the loader comes from uart, or from `watch` once a server has faulted | the `release` scenario's `forbid:` lines; the disassembly check ([A release kernel without UART code](#a-release-kernel-without-uart-code)); `watch` writes only through `Polled` on root's COM1 IOPort | M7 |
 
 ### Compared with seL4
 
@@ -5076,9 +5200,9 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Should a caller whose reply capability is destroyed be woken with an error? | A server that receives again, deletes the reply or dies leaves its client blocked until someone suspends it | M6 (answered) | Answered in M6: no, as in seL4. Any error label would be indistinguishable from a reply; a client needing a timeout uses a watchdog thread holding its TCB capability. `CNode_CancelBadgedSends` leaves such a caller waiting too ([Reply capabilities](#reply-capabilities); host tests `receiving_again_before_replying_gives_up_the_reply` and `callers_already_received_keep_waiting_and_a_queued_fault_restarts`, the model's `deleting_a_saved_reply_capability_leaves_its_caller_waiting`) |
 | How does a server tell "nothing pending" from a message or signal with badge 0? | `NBRecv` returns badge 0 both for nothing and for unbadged senders | M6, `libsys` (answered) | Answered in M6: an empty `NBRecv` returns `rdi` = 0 and `rsi` = 0, so a server that polls gives every signaller a non-zero badge, and every client a non-zero badge or a message whose `MessageInfo` is not 0. `root` does both: `test=badge`'s server stops at a receive with `rdi` and `rsi` both 0, and its unbadged client sends a non-zero label; `test=ipcntfn` gives every notification capability a single bit from bit 32 up, and `libsys::Event::classify` takes a receive for a signal only when `rsi` is 0 and `rdi` has one of those bits ([Binding](#binding)) |
 | What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 (answered) | Answered in M6: reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint (`libsys::notification`); a saved reply capability vanishes when its client is suspended or deleted (`libsys::invoke::cnode_save_caller`). `cnode_cancel_badged_sends` says to revoke the badged original first |
-| Are the IMCR ports `0x22` and `0x23` real on q35 and Hyper-V? | They are kept from user space on the assumption that they can route PIC interrupts around the local APIC | M7 | Keep them reserved; reserving an absent port costs nothing |
-| What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Decided by the M7 spec check ([ADR 0027](adr/0027-stale-remote-irr.md)); check in M7. QEMU's I/O APIC is version `0x20`, Hyper-V's `0x11` (the M3 Hyper-V check). Normal operation needs nothing: the local APIC's EOI broadcast clears Remote IRR on any version, as in seL4, because a pin keeps its vector and trigger. For a stale one, issue writes the entry level-triggered and masked, then writes the old vector to the EOI register from version `0x20`, or below it switches the entry to edge-triggered and back, as Linux's `__eoi_ioapic_pin` does (from memory). Masking and unmasking leaves Remote IRR set, and the local APIC broadcasts an EOI only for a vector in service, so neither is an option. A self-test runs both paths on QEMU, whose I/O APIC takes `version=0x11` (from memory). Hyper-V's path stays unchecked: no planned driver there uses a level pin (COM1 is edge; VMBus uses SINTs) |
-| Must a driver of an edge pin Ack before it services, not after? | [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) give every driver the loop wait, service, Ack, and say that an edge lost while masked comes after a signal the driver has not yet handled; but two deliveries whose signals merge before the driver's receive mask the pin, and a cause after its last poll then loses its edge with no signal pending on an I/O APIC that drops edges while masked, as QEMU's does (from memory: `ioapic_set_irq`, `hw/intc/ioapic.c`, where [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) says QEMU latches them) | M7 (answered) | Answered in M7: yes (ADR 0028). A driver of an edge pin loops wait, Ack, service, and one of a level pin wait, service, Ack; [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) now say so. The kernel's behaviour does not change. Whether QEMU latches an edge on a masked pin or drops it, the Ack-first loop loses nothing, so the claim stays from memory. |
+| Are the IMCR ports `0x22` and `0x23` real on q35 and Hyper-V? | They are kept from user space on the assumption that they can route PIC interrupts around the local APIC | M7 (answered) | Answered in M7 without checking the ports: keep them reserved, since reserving an absent port costs nothing and no planned server needs them. `l4core::ioport::RESERVED` refuses `0x20`-`0x23` and `0xA0`-`0xA1` (host test `the_kernel_keeps_the_pic_and_imcr_ports`). Whether the IMCR exists on q35 or Hyper-V is still from memory |
+| What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 (answered) | Decided by the M7 spec check ([ADR 0027](adr/0027-stale-remote-irr.md)) and answered in M7 on QEMU: both paths clear a stranded Remote IRR, the EOI register in the `irq_stale` scenario and the trigger toggle in `irq_stale_0x11` (`-global ioapic.version=0x11`), and the host tests run both against the I/O APIC model, with `RevokeFirst` when nothing clears it. QEMU's I/O APIC is version `0x20`, Hyper-V's `0x11` (the M3 Hyper-V check). Normal operation needs nothing: the local APIC's EOI broadcast clears Remote IRR on any version, as in seL4, because a pin keeps its vector and trigger. For a stale one, issue writes the entry level-triggered and masked, then writes the old vector to the EOI register from version `0x20`, or below it switches the entry to edge-triggered and back, as Linux's `__eoi_ioapic_pin` does (from memory). Masking and unmasking leaves Remote IRR set, and the local APIC broadcasts an EOI only for a vector in service, so neither is an option. `test=irq_stale` runs both paths on QEMU, whose I/O APIC takes `version=0x11`. Hyper-V's path stays unchecked: no planned driver there uses a level pin (COM1 is edge; VMBus uses SINTs) |
+| Must a driver of an edge pin Ack before it services, not after? | [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) give every driver the loop wait, service, Ack, and say that an edge lost while masked comes after a signal the driver has not yet handled; but two deliveries whose signals merge before the driver's receive mask the pin, and a cause after its last poll then loses its edge with no signal pending on an I/O APIC that drops edges while masked, as QEMU 8.2's does (`test=irq`; [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) then said QEMU latched them) | M7 (answered) | Answered in M7: yes (ADR 0028). A driver of an edge pin loops wait, Ack, service, and one of a level pin wait, service, Ack; [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) now say so. The kernel's behaviour does not change. The Ack-first loop loses nothing whether an I/O APIC latches an edge on a masked pin or drops it; `test=irq` shows that QEMU 8.2's drops it, and the `uart` host tests show the old loop stranding uart against a model that does (`servicing_before_the_ack_strands_uart`) |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
 | Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 | Yes; raise the radix to 13 if not |
 | Does Hyper-V's COM1 behave as a 16550A for `uart`: FIFOs (IIR bits 6 and 7), the character timeout, a THRE interrupt when THRI is set with the FIFO empty, OUT2 gating the line, and a transmitter that drains with no client on the named pipe? | `uart`'s setup, its 15-byte burst and its lost-interrupt reasoning assume it ([`uart`](#uart)); a transmitter that stalls without a pipe client would hold console's writes, and every client's, for good | M8 Hyper-V check | Yes, as Linux guests' 8250 driver assumes there (from memory); without FIFOs `uart` falls back to 1-byte bursts. Boot `test=release` with a client on the pipe and type its line, then once with none |
