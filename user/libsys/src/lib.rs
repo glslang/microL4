@@ -59,8 +59,6 @@ pub mod notification;
 pub mod objects;
 pub mod output;
 pub mod proto;
-#[doc(hidden)]
-pub mod standin;
 #[cfg(target_os = "none")]
 mod start;
 pub mod syscall;

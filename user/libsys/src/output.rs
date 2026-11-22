@@ -102,7 +102,7 @@ pub fn exit(status: u64) -> ! {
 /// [`exit`] without the console's `Sync`: for a panic while printing.
 pub fn exit_now(status: u64) -> ! {
     if let Some(port) = exit_port() {
-        let _ = crate::standin::ioport_out32(port, EXIT_PORT_NUMBER, exit_value(status));
+        let _ = crate::device::ioport_out32(port, EXIT_PORT_NUMBER, exit_value(status));
         loop {
             crate::yield_now();
         }
@@ -141,11 +141,11 @@ pub struct IoPort(pub CPtr);
 
 impl PortIo for IoPort {
     fn in8(&mut self, port: u16) -> Option<u8> {
-        crate::standin::ioport_in8(self.0, port).ok()
+        crate::device::ioport_in8(self.0, port).ok()
     }
 
     fn out8(&mut self, port: u16, value: u8) -> bool {
-        crate::standin::ioport_out8(self.0, port, value).is_ok()
+        crate::device::ioport_out8(self.0, port, value).is_ok()
     }
 }
 
