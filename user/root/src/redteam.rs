@@ -13,10 +13,15 @@
 //! - `test=redteam-ipc` ([`ipc`]), the M6 red team's: a stale saved reply
 //!   capability, a reply sent twice, and a bound thread deleted while it
 //!   receives.
+//! - `test=redteam-irq` ([`irq`]), the M7 red team's: an interrupt storm
+//!   from the PIT, stealing an issued pin, vector churn, a revoked
+//!   notification under a bound handler, and a handler finalised inside a
+//!   CNode's deletion.
 //!
 //! Every test ends with `TEST PASS` and `DebugHalt(0)`, or `TEST FAIL`.
 
 mod ipc;
+mod irq;
 mod probes;
 mod vm;
 
@@ -136,6 +141,7 @@ pub fn run(bi: &BootInfo, name: &str) -> ! {
         "redteam-tlb" => vm::tlb(bi),
         "redteam-selfdelete" => vm::self_delete(bi),
         "redteam-ipc" => ipc::run(bi),
+        "redteam-irq" => irq::run(bi),
         other => fail!("unknown red-team test {other:?}"),
     }
 }
