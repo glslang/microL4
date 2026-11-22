@@ -518,7 +518,9 @@ impl Interrupts for Objects {
 }
 
 /// The port bitmap, and the port instructions in [`super::io`], for
-/// `l4core::ioport`.
+/// `l4core::ioport`. `port_in` and `port_out` are never inlined: they are
+/// the IOPort executor, one of the three places a release kernel may call
+/// [`super::io`] from, which the disassembly check finds by their symbols.
 impl IoPorts for Objects {
     fn port_bitmap(&self) -> &PortBitmap {
         // SAFETY: as in `irq_table`.
@@ -530,6 +532,7 @@ impl IoPorts for Objects {
         unsafe { &mut (*DEVICES.0.get()).ports }
     }
 
+    #[inline(never)]
     fn port_in(&mut self, port: u16, width: Width) -> u32 {
         // SAFETY: `l4core::ioport` checked that the invoked IOPort
         // capability's range covers every byte of the access, and no range
@@ -547,6 +550,7 @@ impl IoPorts for Objects {
         }
     }
 
+    #[inline(never)]
     fn port_out(&mut self, port: u16, width: Width, value: u32) {
         // SAFETY: as in `port_in`; `out` touches no memory.
         unsafe {

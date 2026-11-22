@@ -11,7 +11,10 @@ use super::io;
 /// Remaps and masks both 8259s if `pcat_compat` (the MADT flag) says they
 /// exist. Interrupts must be off and the local APIC's LINT0 masked: the
 /// first initialisation word clears the masks until the last write sets
-/// them again.
+/// them again. Never inlined: it is one of the three functions a release
+/// kernel may call [`io`] from, which the disassembly check finds by its
+/// symbol.
+#[inline(never)]
 pub fn init(pcat_compat: bool) {
     if !pcat_compat {
         kprintln!("pic: no PCAT_COMPAT; the 8259s are left alone");
