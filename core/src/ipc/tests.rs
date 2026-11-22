@@ -842,8 +842,8 @@ fn a_server_can_call_another_while_it_holds_a_reply() {
 
 #[test]
 fn send_and_call_on_a_saved_reply_capability_reply() {
-    // A reply capability moved into a CSpace slot, as M6's
-    // `CNode_SaveCaller` does.
+    // A reply capability moved into a CSpace slot, as `CNode_SaveCaller`
+    // does.
     let mut w = World::new();
     w.recv(B, S_EP0);
     w.call(A, S_EP0, 1, 0, [0; 4]);

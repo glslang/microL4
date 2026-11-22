@@ -33,10 +33,6 @@
 //! An invocation that reaches a preemption point leaves the caller
 //! `Restart`, so it re-executes its `syscall` with its arguments unchanged
 //! once the kernel has taken the interrupt.
-//!
-//! # Until M6
-//!
-//! Endpoints move no capabilities.
 
 use crate::abi::Syscall;
 use crate::cap::{Cap, TCB_SLOT_CALLER, TCB_SLOT_CSPACE};

@@ -184,9 +184,10 @@ pub fn cnode_cancel_badged_sends(slot: Slot) -> Result<(), Error> {
 /// `CNode_SaveCaller`: moves the reply capability in this thread's caller
 /// slot to `dest`, so that receiving on an endpoint again does not delete
 /// it; `dest.root` is the invoked CNode. `Send`, `NBSend` or `Call` on the
-/// saved capability then replies, once ([`crate::send`]). Errors, in this
-/// order: `DeleteFirst` if `dest` is not empty, `IllegalOperation` if the
-/// caller slot is.
+/// saved capability then replies, once ([`crate::send`]). It is deleted,
+/// unused, if its caller is suspended, resumed or deleted first, and the
+/// slot is then empty. Errors, in this order: `DeleteFirst` if `dest` is
+/// not empty, `IllegalOperation` if the caller slot is.
 pub fn cnode_save_caller(dest: Slot) -> Result<(), Error> {
     let args = [dest.index, dest.depth];
     invoke(None, dest.root, cnode_label::CNODE_SAVE_CALLER, &args, &[])?;

@@ -9,6 +9,10 @@
 //! signal through an unbadged capability is remembered but adds no bits, so
 //! a protocol that must see who signalled gives every signaller a non-zero
 //! badge.
+//!
+//! To give a badge to a new signaller, revoke the badged original first, so
+//! that no old copy can still signal with it, then [`poll`] to drain the
+//! bits the old copies left in the word, then mint the badge again.
 
 use crate::syscall::{CPtr, Message, Received, nb_recv, recv, send};
 
