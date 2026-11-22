@@ -1,0 +1,26 @@
+# M7: IRQControl and IRQHandler from ring 3, with COM1 raising its THRE
+# interrupt (user/root/src/irq.rs; docs/design.md, "IRQControl and
+# IRQHandler", "Delivery", "Deletion"; ADR 0028). The root task issues
+# ISA IRQ 4 (GSI 4, edge, active high on q35), binds a notification
+# through a capability badged 0x100000000, and toggles IER's THRI bit to
+# make edges, reading IIR to lower the line. The first edge after an Ack
+# signals; a second before Ack signals too and masks the pin; a masked pin
+# signals nothing; after an Ack the next edge signals. Clear leaves edges
+# unsignalled until a new binding. Deleted, ISA IRQ 4 is issued again,
+# then as GetIOAPIC(4, level): the line held high signals once and masks
+# the pin, an Ack while high signals again, and a handler deleted with its
+# line high and reissued delivers at the first Ack after binding. A copy
+# keeps the IRQ issued; revoking IRQControl deletes every handler. COM1's
+# IER is 0 again at the end, so the kernel's output is unaffected.
+cmdline: test=irq
+exit: success
+expect: microL4 kernel
+expect: root: microL4 root task
+expect: root: cmdline "test=irq"
+expect: irq: ok   GetISA(4) issued IRQ 0 for GSI 4, edge, active high
+expect: irq: ok   edge: the first edge after an Ack signalled 0x100000000
+expect: irq: ok   after IRQHandler_Clear an edge signalled nothing
+expect: irq: ok   level: GetIOAPIC(4, level) issued IRQ 0
+expect: irq: ok   a copy kept IRQ 4 issued after the original's deletion
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

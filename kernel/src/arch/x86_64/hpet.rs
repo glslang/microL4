@@ -129,3 +129,67 @@ pub fn init(p: &Platform) -> Option<Hpet> {
     );
     Some(hpet)
 }
+
+/// `test=irq_stale`: the HPET's last comparator as a level-triggered
+/// interrupt source, the one device whose line the kernel can raise and
+/// hold to strand an I/O APIC pin's Remote IRR.
+#[cfg(feature = "selftest")]
+pub struct LevelSource {
+    base: u64,
+    n: u8,
+}
+
+/// The HPET the ACPI table names, if it has a comparator and its main
+/// counter runs (step 5 left it so), as a [`LevelSource`].
+#[cfg(feature = "selftest")]
+pub fn level_source(p: &Platform) -> Option<LevelSource> {
+    let table = p.hpet?;
+    let base = DeviceWindow::virt(HPET_PAGE) + (table.base & 0xFFF);
+    let caps = Capabilities(read_at(base, h::GCAP_ID));
+    let n = caps
+        .comparators()
+        .min(caps.comparators_in_block())
+        .checked_sub(1)?;
+    (read_at(base, h::GEN_CONF) & h::ENABLE_CNF != 0).then_some(LevelSource { base, n })
+}
+
+#[cfg(feature = "selftest")]
+impl LevelSource {
+    fn write(&self, offset: u32, value: u64) {
+        // SAFETY: as in `read_at`, for a 64-bit register of the block. The
+        // self-test writes only this comparator's configuration and value
+        // and the status register: a level interrupt on the one I/O APIC
+        // input it picked, which it then lowers and turns off.
+        unsafe { ptr::write_volatile((self.base + u64::from(offset)) as *mut u64, value) }
+    }
+
+    /// The comparator's number.
+    pub fn comparator(&self) -> u8 {
+        self.n
+    }
+
+    /// The I/O APIC inputs it can drive, bit `i` for input `i`.
+    pub fn route_cap(&self) -> u32 {
+        h::route_cap(read_at(self.base, h::comparator_config(self.n)))
+    }
+
+    /// Raises its level-triggered interrupt on I/O APIC input `route`
+    /// `ticks` main-counter ticks from now, and holds it.
+    pub fn fire(&self, route: u8, ticks: u64) {
+        let reg = h::comparator_config(self.n);
+        let config = read_at(self.base, reg);
+        let now = read_at(self.base, h::MAIN_COUNTER);
+        self.write(h::comparator_value(self.n), now.wrapping_add(ticks));
+        self.write(reg, h::level_config(config, route));
+    }
+
+    /// Lowers its line, by clearing its status bit, and turns it off.
+    pub fn stop(&self) {
+        let reg = h::comparator_config(self.n);
+        let config = read_at(self.base, reg);
+        if let Some(quiet) = h::quiet_comparator(config) {
+            self.write(reg, quiet);
+        }
+        self.write(h::GINTR_STA, 1 << self.n);
+    }
+}

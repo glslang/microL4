@@ -120,6 +120,8 @@ fn run_test(
         "rootimage" => rootimage::test(boot, root, bi),
         "ring3" => arch::test_ring3(root, bi),
         "vspace" => arch::test_vspace(root, bi),
+        // Interrupts (M7).
+        "irq_stale" => arch::test_irq_stale(root, bi),
         other => {
             kprintln!("test={other}: not a kernel self-test; the root task runs it");
             boot::start_root_task(root)

@@ -169,3 +169,20 @@ pub fn perform(action: Action) -> bool {
     }
     false
 }
+/// `test=irq_stale`'s view of pin `pin` of I/O APIC `ioapic`: its entry's
+/// low word.
+#[cfg(feature = "selftest")]
+pub fn read_low(ioapic: u8, pin: u16) -> u32 {
+    let all = IOAPICS.get().expect("the I/O APICs are set up at step 5");
+    let io = all.ioapics[usize::from(ioapic)].expect("an I/O APIC step 5 found");
+    io.read(a::redirection_low(pin))
+}
+
+/// `test=irq_stale`: writes pin `pin`'s entry's low word directly, to
+/// strand its Remote IRR.
+#[cfg(feature = "selftest")]
+pub fn write_low(ioapic: u8, pin: u16, value: u32) {
+    let all = IOAPICS.get().expect("the I/O APICs are set up at step 5");
+    let io = all.ioapics[usize::from(ioapic)].expect("an I/O APIC step 5 found");
+    io.write(a::redirection_low(pin), value);
+}

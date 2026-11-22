@@ -26,7 +26,11 @@
 //!   `CNode_CancelBadgedSends` releases exactly one badge's queued senders
 //!   ([`badge`]);
 //! - `test=ipcntfn`: a server bound to a notification takes calls and
-//!   signals on one receive ([`ipcntfn`]).
+//!   signals on one receive ([`ipcntfn`]);
+//! - `test=ioport`: IOPortControl and IOPort: issue, overlaps, accesses
+//!   at the ends of a range, In's reply, copies and deletion ([`ioport`]);
+//! - `test=irq`: IRQControl and IRQHandler with COM1's THRE interrupt:
+//!   the edge and level rules, `Clear`, deletion and revoke ([`irq`]).
 //!
 //! Every test ends the run with `DebugHalt`: 0 after `TEST PASS`, 1 after a
 //! `TEST FAIL` line. With no `test=` the root task halts with 0 after the
@@ -38,7 +42,9 @@
 mod badge;
 mod captransfer;
 mod fault;
+mod ioport;
 mod ipcntfn;
+mod irq;
 mod isolation;
 mod pingpong;
 mod redteam;
@@ -82,6 +88,8 @@ fn main(bi: &'static BootInfo) -> ! {
         Some("captransfer") => captransfer::run(bi),
         Some("badge") => badge::run(bi),
         Some("ipcntfn") => ipcntfn::run(bi),
+        Some("ioport") => ioport::run(bi),
+        Some("irq") => irq::run(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
     }

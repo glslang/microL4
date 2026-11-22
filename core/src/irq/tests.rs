@@ -8,11 +8,9 @@
 //! the notifications' and the IRQ table's invariants are checked at every
 //! kernel exit. `model.rs` is the proptest against a model of the table.
 
-use std::sync::OnceLock;
 use std::vec::Vec;
 
 use super::*;
-use crate::acpi::dump::DumpMemory;
 use crate::cap::{Cap, CapType, Rights};
 use crate::cdt;
 use crate::error::{LookupFailure, SyscallError};
@@ -84,10 +82,14 @@ fn world(version: u8) -> World {
 }
 
 /// Every invariant: the world's and the IRQ table's, and no pin unmasked
-/// with Remote IRR set.
+/// with Remote IRR set. Under Miri, which finds nothing in this safe code
+/// that the native run does not, only the last: the walks would multiply
+/// each test's time, as `World`'s own checkpoint decides.
 fn checked(w: &World) {
-    w.check();
-    check(&w.k).unwrap();
+    if !cfg!(miri) {
+        w.check();
+        check(&w.k).unwrap();
+    }
     for io in &w.k.dev.ioapics {
         assert_eq!(
             io.unmasked_with_remote_irr, 0,
@@ -232,6 +234,7 @@ fn snapshot(w: &World) -> Snapshot {
         (0..32).map(|i| w.k.load(rs(i))).collect(),
         w.k.dev.table.clone(),
         (0..IRQS as u8)
+            .take(if cfg!(miri) { 8 } else { IRQS })
             .map(|i| w.k.load(node_slot(&w.k, i)))
             .collect(),
         w.k.dev
@@ -248,22 +251,9 @@ fn insert(w: &mut World, slot: u64, cap: Cap) {
     cdt::insert_root(&mut w.k, rs(slot), cap);
 }
 
-/// The q35 dump's platform, parsed once per test process.
-fn q35_acpi() -> &'static Platform {
-    static P: OnceLock<Platform> = OnceLock::new();
-    P.get_or_init(|| {
-        let m = DumpMemory::parse(include_str!("../../tests/acpi/q35.dump")).unwrap();
-        crate::acpi::parse(&m, m.rsdp().unwrap()).unwrap()
-    })
-}
-
-fn hyperv_acpi() -> &'static Platform {
-    static P: OnceLock<Platform> = OnceLock::new();
-    P.get_or_init(|| {
-        let m = DumpMemory::parse(include_str!("../../tests/acpi/hyperv-gen2.dump")).unwrap();
-        crate::acpi::parse(&m, m.rsdp().unwrap()).unwrap()
-    })
-}
+/// The q35 and Hyper-V dumps' platforms, parsed once per test process
+/// with the boot tests'.
+use crate::boot::tests::{hyperv_acpi, q35_acpi};
 
 // ---------------------------------------------------------------------------
 // Vectors, capabilities and routes
@@ -568,12 +558,22 @@ fn case(what: &'static str, label: u64, mrs: &[u64], caps: &[u64], err: SyscallE
 /// Runs each case in `w` as it stands: each must fail with its error and
 /// change nothing.
 fn fails(w: &mut World, cases: &[Case]) {
-    for c in cases {
+    for c in miri_subset(cases) {
         let before = snapshot(w);
         let r = invoke(w, A, c.cptr, c.label, &c.mrs, &c.caps);
         assert_eq!(r, error(c.err), "{}", c.what);
         assert!(snapshot(w) == before, "{} changed something", c.what);
     }
+}
+
+/// Every case natively; under Miri every fourth and the last, to keep
+/// its time down.
+fn miri_subset<T>(all: &[T]) -> impl Iterator<Item = &T> {
+    let step = if cfg!(miri) { 4 } else { 1 };
+    all.iter()
+        .enumerate()
+        .filter(move |(i, _)| i % step == 0 || *i == all.len() - 1)
+        .map(|(_, c)| c)
 }
 
 const ILLEGAL: SyscallError = SyscallError::IllegalOperation;
@@ -1277,7 +1277,7 @@ fn clear_while_pending_keeps_the_pending_edge_for_the_next_binding() {
 
 #[test]
 fn a_signal_from_an_interrupt_wakes_the_waiter_and_preempts_only_for_a_higher_priority() {
-    for (prio, runs) in [(200u8, true), (100, false), (50, false)] {
+    for (prio, runs) in cases(&[(200u8, true), (100, false), (50, false)]) {
         let mut w = bound(QEMU);
         w.recv(B, S_N0);
         assert_eq!(
@@ -1519,7 +1519,12 @@ fn check_finds_broken_tables() {
     let w = bound(QEMU);
     assert_eq!(check(&w.k), Ok(()));
     let bad = |f: &dyn Fn(&mut World), why: &str| {
-        let mut w = bound(QEMU);
+        let mut w = World {
+            k: w.k.clone(),
+            threads: w.threads.clone(),
+            prios: w.prios.clone(),
+            debug: w.debug,
+        };
         f(&mut w);
         assert_eq!(check(&w.k), Err(why));
     };

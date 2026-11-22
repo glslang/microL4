@@ -1,0 +1,23 @@
+# M7: IOPortControl and IOPort from ring 3 (user/root/src/ioport.rs;
+# docs/abi.md, "IOPortControl and IOPort"). The root task checks Issue's
+# errors in docs/abi.md's order, issues COM1's range 0x3F8-0x3FF and
+# finds every overlapping range RevokeFirst before the destination is
+# checked; accesses at the ends of the range, the width included, and one
+# port past either end; In's reply and Out's low bytes through COM1's
+# scratch register, and a Send that drops the reply; a copy and a mint
+# that cannot narrow the range; the range staying issued until its last
+# capability is deleted; and a revoke of IOPortControl freeing every range.
+cmdline: test=ioport
+exit: success
+expect: microL4 kernel
+expect: root: microL4 root task
+expect: root: cmdline "test=ioport"
+expect: ioport: IOPortControl in slot 7
+expect: ioport: ok   Issue's errors in order
+expect: ioport: ok   issued 0x3f8-0x3ff into slot
+expect: ioport: ok   In8 at 0x3f8 and 0x3ff, In16 at 0x3fe and In32 at 0x3fc succeed
+expect: ioport: ok   the scratch register: Out8 0xa5 then In8 0xa5; Out8 of 0xffffff3c wrote 0x3c
+expect: ioport: ok   a copy and a mint with data 0x3fa03f9 reach 0x3f8 to 0x3ff
+expect: ioport: ok   CNode_Revoke of IOPortControl deleted both IOPorts and freed their ranges
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

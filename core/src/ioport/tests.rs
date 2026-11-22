@@ -65,7 +65,10 @@ fn invoke(w: &mut World, cptr: u64, label: u64, mrs: &[u64], caps: &[u64]) -> (u
     }
     let rsi = MessageInfo::new(label, 0, caps.len() as u64, mrs.len() as u64).word();
     assert_eq!(w.syscall(A, 1, cptr, rsi, Some(regs)), Outcome::Done);
-    w.check();
+    // Under Miri the world's walk is skipped, as its own checkpoint does.
+    if !cfg!(miri) {
+        w.check();
+    }
     kernel_reply(w, A)
 }
 
@@ -104,12 +107,22 @@ fn snapshot(w: &World) -> (Vec<Slot>, PortBitmap, Vec<PortAccess>) {
     )
 }
 
+/// Every case natively; under Miri every fourth and the last, to keep
+/// its time down.
+fn miri_subset<T>(all: &[T]) -> impl Iterator<Item = &T> {
+    let step = if cfg!(miri) { 4 } else { 1 };
+    all.iter()
+        .enumerate()
+        .filter(move |(i, _)| i % step == 0 || *i == all.len() - 1)
+        .map(|(_, c)| c)
+}
+
 /// An error case: what it is, the invoked `CPtr`, the label, the message
 /// registers, the extra capabilities, and the error it must return.
 type Case<'a> = (&'a str, u64, u64, &'a [u64], &'a [u64], SyscallError);
 
 fn fails(w: &mut World, cases: &[Case<'_>]) {
-    for &(what, cptr, label, mrs, caps, err) in cases {
+    for &(what, cptr, label, mrs, caps, err) in miri_subset(cases) {
         let before = snapshot(w);
         assert_eq!(invoke(w, cptr, label, mrs, caps), error(err), "{what}");
         assert!(snapshot(w) == before, "{what} changed something");
@@ -859,6 +872,7 @@ fn run(ops: &[Op]) -> Paths {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "a statistic over many random sequences")]
 fn random_sequences_reach_every_path() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
@@ -869,7 +883,7 @@ fn random_sequences_reach_every_path() {
         },
         TestRng::deterministic_rng(RngAlgorithm::ChaCha),
     );
-    let cases = if cfg!(miri) { 4 } else { 64 };
+    let cases = 64;
     let mut t = Paths::default();
     for _ in 0..cases {
         let ops = proptest::collection::vec(op(), 40)
@@ -900,14 +914,14 @@ fn random_sequences_reach_every_path() {
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: if cfg!(miri) { 4 } else { 256 },
+        cases: if cfg!(miri) { 2 } else { 256 },
         failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
     #[test]
     fn random_issues_copies_deletions_and_accesses_match_a_model_of_ranges(
-        ops in proptest::collection::vec(op(), 1..if cfg!(miri) { 12 } else { 60 })
+        ops in proptest::collection::vec(op(), 1..if cfg!(miri) { 8 } else { 60 })
     ) {
         run(&ops);
     }

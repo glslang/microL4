@@ -16,6 +16,8 @@ mod idt;
 mod io;
 mod ioapic;
 mod irq;
+#[cfg(feature = "selftest")]
+mod irq_stale;
 mod objects;
 mod paging;
 mod pic;
@@ -53,6 +55,8 @@ pub use trap::idle;
 
 #[cfg(feature = "selftest")]
 pub use apic::test_nmi_stack;
+#[cfg(feature = "selftest")]
+pub use irq_stale::test_irq_stale;
 #[cfg(feature = "selftest")]
 pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]
