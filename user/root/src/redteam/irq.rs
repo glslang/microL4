@@ -371,7 +371,7 @@ pub fn run(bi: &BootInfo) -> ! {
         fail!("redteam: irq: W woke {woke} times from a notification nothing signalled");
     }
     println!(
-        "redteam: irq: deleting CNode K finalised the handler in it and, through its IRQ node, the notification W waited on; W was released and GSI 2 is free"
+        "redteam: irq: deleting CNode K finalised the handler in it and, through its IRQ node, the notification W waited on; W never woke and GSI 2 can be issued again"
     );
     println!("redteam: irq: every interrupt attack held");
     println!("TEST PASS");

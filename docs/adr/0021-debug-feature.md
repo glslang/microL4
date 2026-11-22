@@ -71,6 +71,13 @@ precise and, in the fix round, a rule added:
   anywhere but as a direct call's or jump's target, in code or in the kernel's
   data. Those callers are `#[inline(never)]`, the IOPort invocations' through
   `Objects`' `IoPorts::port_in` and `port_out`.
+- Fix round 2 closed the path through those two, the IOPort executor, which
+  took any port from any caller: they take an `l4core::ioport::PortAccess`
+  that only `invoke_port` builds, after its capability checks, so kernel
+  code cannot call them with a port of its own; and the check fails on a
+  call or jump to them from any function but
+  `l4core::ioport::invoke_port::<Objects>`, or on their addresses anywhere
+  but as such a call's target.
 
 The release kernel is built without features and copied to
 `target/xtask/release-kernel/<profile>/kernel.elf`; `cargo xtask test`

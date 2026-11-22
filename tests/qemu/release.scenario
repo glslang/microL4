@@ -12,8 +12,10 @@
 # the harness types, which reaches client 1 since focus starts there;
 # uart's Stats; TEST PASS. Then a Sync, and IOPort_Out32(0xF4, 0x10) ends
 # the run with success. The `next:` below puts root's first line right
-# after the loader's last, so a kernel that printed anything at all fails;
-# a kernel with debug would also print the lines forbidden below.
+# after the loader's last, so a kernel that printed anything at boot,
+# between those two lines, fails (what reaches COM1 later, mixed with
+# uart's output, is the disassembly check's to rule out); a kernel with
+# debug would also print the lines forbidden below.
 kernel: release
 cmdline: test=release
 exit: success

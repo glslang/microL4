@@ -9,7 +9,9 @@ say it cannot.
 **Where:** `xtask/src/disasm.rs`, `scan`.
 
 **Status:** fixed in the M7 fix round, commit `6f5d6ea` ("disasm: io.rs is
-reached only from its three callers"; [The fix](#the-fix)).
+reached only from its three callers"; [The fix](#the-fix)); the path
+through the IOPort executor that its re-check found, in fix round 2
+([The executor gap, and its fix](#the-executor-gap-and-its-fix)).
 
 ## What breaks
 
@@ -96,3 +98,54 @@ M7 fix round, in `xtask/src/disasm.rs` and the kernel:
   failed the same way.
 - `docs/design.md` ("A release kernel without UART code") and ADR 0021's M7
   status state the rule.
+
+## The executor gap, and its fix
+
+The fix round's re-check found a path the call-site rule left open: the
+IOPort executor, `Objects`' `IoPorts::port_in` and `port_out`, may call
+`io.rs`, and they were safe trait methods that took any port, with nothing
+checking who called them. A writer in a new kernel module, with no
+`unsafe`, that called `Objects::begin().port_out(0x3F8, Width::Byte, b)`
+after `arch::init` passed the check and wrote on COM1 from a release kernel;
+only `release`'s `next:` failed it, because it printed at boot.
+`port_out`'s SAFETY comment ("`l4core::ioport` checked the capability")
+rested on every caller of a safe public method. The listing of that writer
+is `EXECUTOR_LISTING` in `xtask/src/disasm.rs`.
+
+Fixed in M7 fix round 2, two ways:
+
+- **It does not compile.** The executor takes an
+  `l4core::ioport::PortAccess`, the port and width `invoke_port` checked,
+  whose fields and constructor are private to `l4core::ioport`: only
+  `invoke_port` builds one, after checking them against the invoked IOPort
+  capability's range. Kernel code outside `l4core` cannot build one, so a
+  call with a port of its own choosing is a compile error; two
+  `compile_fail` doctests on `PortAccess` (E0451 for the fields, E0624 for
+  the constructor) keep it so. The SAFETY comments of `port_in` and
+  `port_out` rest on the token.
+- **The check finds it.** The token proves only what `invoke_port` read
+  through its kernel's `load`: a kernel type of its own, whose `load`
+  returns a capability for COM1 that no slot holds, could run `invoke_port`
+  and pass the token on to `Objects`. So the check now also fails on a call
+  or jump to the executor (`disasm::EXECUTOR`) from any function but
+  `disasm::EXECUTOR_CALLERS`, exactly
+  `l4core::ioport::invoke_port::<kernel::arch::x86_64::objects::Objects>`
+  (`#[inline(never)]` now, so its symbol bounds its calls), and on the
+  executor's addresses anywhere but as such a call's target, in code or in
+  data; it insists on at least one executor call from `invoke_port`.
+  `a_writer_through_the_ioport_executor_fails_the_check`, the `#[ignore]`d
+  guarantee, passes now, and `..._fails_only_the_executor_rule`, the
+  re-check's "passes" test turned round, asserts that both of the writer's
+  calls are executor findings and that `io.rs`'s rules alone still find
+  nothing. Further tests cover the allowed caller, with LLVM's suffix, nine
+  names that are not it (`invoke_port` for another type, generic-less,
+  a closure or `.specialized` clone of it, `invoke::invoke`,
+  `invoke_control`, `pic::init`, `arch::exit`, another type's
+  `IoPorts::port_out`), jumps inside and across the executor, and its
+  address in operands and in `.rodata`. A clean release kernel's listing
+  shows two executor calls, both from `invoke_port::<Objects>`.
+
+What neither rules out is kernel code that forges a capability in a real
+slot, which breaks every capability guarantee at once, not just this one; a
+reviewer reads `invoke_port`'s callers (`l4core::invoke::invoke`) as for any
+capability check.

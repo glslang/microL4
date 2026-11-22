@@ -6,7 +6,8 @@
 # notification's untyped empties the IRQ node, so a notification retyped
 # at its address is never signalled; and deleting a CNode that holds a
 # handler, whose IRQ node holds the last capability to a notification a
-# thread waits on, releases the thread and frees the GSI.
+# thread waits on, finalises both: the kernel survives, the thread never
+# wakes, and the GSI can be issued again.
 cmdline: test=redteam-irq
 exit: success
 expect: microL4 kernel
