@@ -11,13 +11,15 @@
 # MR18 (root answers each with the probe's registers and ip + 2); the line
 # the harness types, which reaches client 1 since focus starts there;
 # uart's Stats; TEST PASS. Then a Sync, and IOPort_Out32(0xF4, 0x10) ends
-# the run with success. A kernel with debug would print the lines
-# forbidden below.
+# the run with success. The `next:` below puts root's first line right
+# after the loader's last, so a kernel that printed anything at all fails;
+# a kernel with debug would also print the lines forbidden below.
 kernel: release
 cmdline: test=release
 exit: success
 expect: loader: microL4 loader
-expect: root: microL4 root task
+expect: entering kernel
+next: root: microL4 root task
 expect: root: cmdline "test=release"
 expect: root: image frames: slots
 expect: root: empty: slots
