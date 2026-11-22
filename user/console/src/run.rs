@@ -46,6 +46,9 @@ pub fn run() -> ! {
             }
             Event::Message(m) => {
                 let reply = handle(ipc, &mut term, &mut out, &uart, m, &mut buf, &mut line);
+                // Every arm whose reply has words in the IPC buffer has
+                // flushed already, so this flush, which writes that buffer
+                // when it has bytes to send, finds nothing to send then.
                 out.flush();
                 r = match reply {
                     Some(msg) => reply_recv(slot::ENDPOINT, &msg),
@@ -89,7 +92,14 @@ fn handle<F: FnMut(&[u8])>(
         Request::Read => {
             let saved = Slot::new(slot::CNODE, slot::saved_read(c as u64 + 1), 64);
             match term.read(c, out, || cnode_save_caller(saved).is_ok(), line) {
-                ReadAnswer::Line(n) => line_reply(ipc, &line[..n]),
+                // `read` may have queued the client's unfinished output,
+                // and flushing it calls `uart` through this same IPC
+                // buffer: flush before the reply's words are written there,
+                // as the saved-Read path does, not after.
+                ReadAnswer::Line(n) => {
+                    out.flush();
+                    line_reply(ipc, &line[..n])
+                }
                 ReadAnswer::Saved => return None,
                 ReadAnswer::Busy => refusal(Refusal::Busy),
             }
