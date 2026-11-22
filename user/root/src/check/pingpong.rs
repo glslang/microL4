@@ -2,10 +2,16 @@
 //! the check of each reply, and the timing arithmetic.
 //!
 //! The root task's request `i` carries the round trip's [`Shape`] and `i`
-//! in its label, `i` in MR0 when it has words, and `!i` in MR119 when it is
-//! full-length. The server answers with the same shape, `i + 1` in the
-//! label's counter and MR0, and MR119 plus one, so every reply proves the
-//! server saw that request.
+//! in its label, and `i` in MR0 when it has words. The server answers with
+//! the same shape and `i + 1` in the label's counter and MR0. A
+//! full-length request also carries [`word`]`(k, 2i)` in each of MR4 to
+//! MR119, which travel through both IPC buffers: the server checks every
+//! one and answers each plus one, [`word`]`(k, 2i + 1)`, and the root task
+//! checks every word of the reply and adds one again, which makes its next
+//! request. So every reply proves the server saw that request, and every
+//! buffer word that crossed, both ways.
+
+use core::fmt;
 
 use libsys::{Message, MessageInfo};
 
@@ -48,6 +54,8 @@ impl Shape {
     }
 }
 
+/// The first message register in the IPC buffer.
+pub const FIRST_BUFFER_MR: usize = 4;
 /// The last message register, which only a full-length message carries.
 pub const LAST: usize = 119;
 
@@ -59,24 +67,17 @@ pub const fn label(shape: Shape, i: u64) -> u64 {
     shape.tag() << COUNTER_BITS | (i & COUNTER_MASK)
 }
 
-/// What MR119 holds in request `i`.
-pub const fn last_word(i: u64) -> u64 {
-    !i
-}
-
 /// Request `i` of `shape`, as it travels in registers; for a full-length
-/// one the sender also puts [`last_word`]`(i)` in MR119, and MR4 to MR118
-/// hold whatever its buffer holds.
+/// one MR4 to MR119 hold whatever the sender's buffer holds, which must be
+/// [`word`]`(k, 2i)`.
 pub fn request(shape: Shape, i: u64) -> Message {
     let info = MessageInfo::new(label(shape, i), 0, 0, shape.words());
     let mr0 = if shape.words() > 0 { i } else { 0 };
     Message::new(info, [mr0, 0, 0, 0])
 }
 
-/// The server's answer to `msg`, whose MR119 was `last` if it is
-/// full-length: the reply, and what its MR119 must be. Fails if `msg` is no
-/// request.
-pub fn answer(msg: &Message, last: u64) -> Result<(Message, u64), Mismatch> {
+/// The shape and counter of request `msg`. Fails if `msg` is no request.
+pub fn parse_request(msg: &Message) -> Result<(Shape, u64), Mismatch> {
     let tag = msg.info.label() >> COUNTER_BITS;
     let shape = Shape::from_tag(tag).ok_or(Mismatch {
         what: "the request label's shape",
@@ -85,31 +86,84 @@ pub fn answer(msg: &Message, last: u64) -> Result<(Message, u64), Mismatch> {
     })?;
     expect("the request's length", msg.info.length(), shape.words())?;
     expect("the request's extra_caps", msg.info.extra_caps(), 0)?;
-    let next = (msg.info.label() & COUNTER_MASK) + 1;
-    let info = MessageInfo::new(label(shape, next), 0, 0, shape.words());
-    let mr0 = if shape.words() > 0 { msg.mr[0] + 1 } else { 0 };
-    Ok((Message::new(info, [mr0, 0, 0, 0]), last.wrapping_add(1)))
+    Ok((shape, msg.info.label() & COUNTER_MASK))
 }
 
-/// Checks the reply to request `i` of `shape`; `last` is its MR119, read
-/// only for a full-length one.
-pub fn check_reply(shape: Shape, i: u64, reply: &Message, last: u64) -> Result<(), Mismatch> {
+/// The server's answer to `msg`, as it travels in registers; for a
+/// full-length one the server has made MR4 to MR119 the reply's with
+/// [`advance`]. Fails if `msg` is no request.
+pub fn answer(msg: &Message) -> Result<Message, Mismatch> {
+    let (shape, i) = parse_request(msg)?;
+    let info = MessageInfo::new(label(shape, i + 1), 0, 0, shape.words());
+    let mr0 = if shape.words() > 0 { msg.mr[0] + 1 } else { 0 };
+    Ok(Message::new(info, [mr0, 0, 0, 0]))
+}
+
+/// Checks the registers of the reply to request `i` of `shape`; for a
+/// full-length one the root task then checks MR4 to MR119 with
+/// [`advance`].
+pub fn check_reply(shape: Shape, i: u64, reply: &Message) -> Result<(), Mismatch> {
     expect("the reply's label", reply.info.label(), label(shape, i + 1))?;
     expect("the reply's length", reply.info.length(), shape.words())?;
     expect("the reply's extra_caps", reply.info.extra_caps(), 0)?;
     if shape.words() > 0 {
         expect("the reply's MR0", reply.mr[0], i + 1)?;
     }
-    if shape == Shape::Full {
-        expect("the reply's MR119", last, last_word(i).wrapping_add(1))?;
-    }
     Ok(())
 }
 
-/// What a fixed word of the full-length runs' MR4 to MR118 holds; the
-/// server echoes them, so after the run they must be unchanged.
-pub const fn pattern(i: usize) -> u64 {
-    (i as u64).wrapping_mul(0x0101_0101_0101_0101) ^ 0x5A5A_0000_0000_5A5A
+/// A base value for MR`k`, different for each `k` from 4 to 119.
+pub const fn pattern(k: usize) -> u64 {
+    (k as u64).wrapping_mul(0x0101_0101_0101_0101) ^ 0x5A5A_0000_0000_5A5A
+}
+
+/// What MR`k`, 4 to 119, holds in message `n` of a full-length run:
+/// request `i` is message `2i`, its reply message `2i + 1`.
+pub const fn word(k: usize, n: u64) -> u64 {
+    pattern(k).wrapping_add(n)
+}
+
+/// The message number of request `i` of a full-length run.
+pub const fn request_number(i: u64) -> u64 {
+    2 * i
+}
+
+/// The message number of the reply to request `i`.
+pub const fn reply_number(i: u64) -> u64 {
+    2 * i + 1
+}
+
+/// A buffer word that is not what it should be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WordMismatch {
+    pub mr: usize,
+    pub got: u64,
+    pub want: u64,
+}
+
+impl fmt::Display for WordMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MR{} is {:#x}, not {:#x}", self.mr, self.got, self.want)
+    }
+}
+
+/// Checks that MR4 to MR119, which `mr` reads, hold message `n`'s words,
+/// and makes each message `n + 1`'s, plus one, with `set_mr`: the server
+/// does this to a request, the root task to a reply, which makes its next
+/// request. Stops at the first wrong word.
+pub fn advance(
+    n: u64,
+    mr: impl Fn(usize) -> u64,
+    mut set_mr: impl FnMut(usize, u64),
+) -> Result<(), WordMismatch> {
+    for k in FIRST_BUFFER_MR..=LAST {
+        let (got, want) = (mr(k), word(k, n));
+        if got != want {
+            return Err(WordMismatch { mr: k, got, want });
+        }
+        set_mr(k, got.wrapping_add(1));
+    }
+    Ok(())
 }
 
 fn expect(what: &'static str, got: u64, want: u64) -> Result<(), Mismatch> {
@@ -174,50 +228,107 @@ mod tests {
             for i in [0, 1, 999, u32::MAX as u64 - 1] {
                 let req = request(shape, i);
                 assert_eq!(req.info.length(), shape.words());
-                let (reply, last) = answer(&req, last_word(i)).unwrap();
-                assert_eq!(check_reply(shape, i, &reply, last), Ok(()), "{shape:?} {i}");
+                assert_eq!(parse_request(&req), Ok((shape, i)));
+                let reply = answer(&req).unwrap();
+                assert_eq!(check_reply(shape, i, &reply), Ok(()), "{shape:?} {i}");
             }
         }
     }
 
     #[test]
     fn a_wrong_reply_fails() {
-        let (good, last) = answer(&request(Shape::Full, 7), last_word(7)).unwrap();
-        assert_eq!(check_reply(Shape::Full, 7, &good, last), Ok(()));
-        // An answer to another request, another shape, a stale MR0 or MR119.
-        let (other, _) = answer(&request(Shape::Full, 8), last_word(8)).unwrap();
-        let what = |r: &Message, last| check_reply(Shape::Full, 7, r, last).map_err(|m| m.what);
-        assert_eq!(what(&other, last), Err("the reply's label"));
+        let good = answer(&request(Shape::Full, 7)).unwrap();
+        assert_eq!(check_reply(Shape::Full, 7, &good), Ok(()));
+        // An answer to another request, another shape, a stale MR0.
+        let other = answer(&request(Shape::Full, 8)).unwrap();
+        let what = |r: &Message| check_reply(Shape::Full, 7, r).map_err(|m| m.what);
+        assert_eq!(what(&other), Err("the reply's label"));
         let short = Message::new(MessageInfo::new(label(Shape::Full, 8), 0, 0, 4), good.mr);
-        assert_eq!(what(&short, last), Err("the reply's length"));
+        assert_eq!(what(&short), Err("the reply's length"));
         let stale = Message::new(good.info, [7, 0, 0, 0]);
-        assert_eq!(what(&stale, last), Err("the reply's MR0"));
-        assert_eq!(what(&good, last_word(7)), Err("the reply's MR119"));
-        let one = answer(&request(Shape::One, 7), 0).unwrap().0;
-        assert_eq!(what(&one, last), Err("the reply's label"));
-        // MR0 and MR119 mean nothing in a zero-length reply.
-        let zero = answer(&request(Shape::Zero, 3), 0).unwrap().0;
+        assert_eq!(what(&stale), Err("the reply's MR0"));
+        let one = answer(&request(Shape::One, 7)).unwrap();
+        assert_eq!(what(&one), Err("the reply's label"));
+        // MR0 means nothing in a zero-length reply.
+        let zero = answer(&request(Shape::Zero, 3)).unwrap();
         assert_eq!(zero.mr, [0; 4]);
-        assert_eq!(check_reply(Shape::Zero, 3, &zero, 12345), Ok(()));
+        assert_eq!(check_reply(Shape::Zero, 3, &zero), Ok(()));
     }
 
     #[test]
     fn the_server_refuses_what_is_no_request() {
         let bad = Message::new(MessageInfo::new(0x9 << 32, 0, 0, 1), [0; 4]);
         assert_eq!(
-            answer(&bad, 0).map_err(|m| m.what),
+            answer(&bad).map_err(|m| m.what),
             Err("the request label's shape")
         );
         let long = Message::new(MessageInfo::new(label(Shape::One, 0), 0, 0, 2), [0; 4]);
         assert_eq!(
-            answer(&long, 0).map_err(|m| m.what),
+            answer(&long).map_err(|m| m.what),
             Err("the request's length")
         );
         let caps = Message::new(MessageInfo::new(label(Shape::One, 0), 0, 1, 1), [0; 4]);
         assert_eq!(
-            answer(&caps, 0).map_err(|m| m.what),
+            answer(&caps).map_err(|m| m.what),
             Err("the request's extra_caps")
         );
+    }
+
+    /// MR0 to MR119 as plain words, standing for an IPC buffer.
+    fn buffer(n: u64) -> [u64; LAST + 1] {
+        let mut b = [0; LAST + 1];
+        for (k, w) in b.iter_mut().enumerate().skip(FIRST_BUFFER_MR) {
+            *w = word(k, n);
+        }
+        b
+    }
+
+    fn advance_buffer(n: u64, b: &mut [u64; LAST + 1]) -> Result<(), WordMismatch> {
+        let copy = *b;
+        advance(n, |k| copy[k], |k, v| b[k] = v)
+    }
+
+    #[test]
+    fn the_buffer_words_go_round_each_plus_one() {
+        // Request 5 is message 10; the server's answer is message 11, and
+        // the root task's next request message 12, request 6's.
+        let mut b = buffer(request_number(5));
+        assert_eq!(advance_buffer(10, &mut b), Ok(()));
+        assert_eq!(b, buffer(reply_number(5)));
+        assert_eq!(advance_buffer(11, &mut b), Ok(()));
+        assert_eq!(b, buffer(request_number(6)));
+        assert_eq!(
+            b[..FIRST_BUFFER_MR],
+            [0; FIRST_BUFFER_MR],
+            "MR0 to MR3 untouched"
+        );
+    }
+
+    #[test]
+    fn a_word_that_did_not_cross_fails() {
+        // A kernel that copied only MR119 leaves the receiver's own words.
+        let mut reply = buffer(request_number(0));
+        reply[LAST] = word(LAST, reply_number(0));
+        assert_eq!(
+            advance_buffer(reply_number(0), &mut reply),
+            Err(WordMismatch {
+                mr: 4,
+                got: word(4, 0),
+                want: word(4, 1),
+            })
+        );
+        // Nor does the server's own last answer pass for the next request.
+        let mut stale = buffer(reply_number(3));
+        assert_eq!(
+            advance_buffer(request_number(4), &mut stale).map_err(|m| m.mr),
+            Err(4)
+        );
+        // Any one word.
+        for k in [4, 60, 118, LAST] {
+            let mut b = buffer(9);
+            b[k] ^= 1 << 40;
+            assert_eq!(advance_buffer(9, &mut b).map_err(|m| m.mr), Err(k));
+        }
     }
 
     #[test]
@@ -251,7 +362,10 @@ mod tests {
 
     #[test]
     fn the_pattern_differs_word_to_word() {
-        assert_ne!(pattern(4), pattern(5));
-        assert_ne!(pattern(4), 0);
+        for k in FIRST_BUFFER_MR..LAST {
+            assert_ne!(pattern(k), pattern(k + 1));
+            assert_ne!(pattern(k), 0);
+        }
+        assert_ne!(word(4, 0), word(4, 1));
     }
 }
