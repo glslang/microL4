@@ -1,9 +1,9 @@
 //! The server loop, on the user target: uart's thread, which the root task
 //! starts in a VSpace and CSpace of its own, bound to notification NU.
 
+use libsys::device::{ioport_in8, ioport_out8, irq_handler_ack};
 use libsys::invoke::{Slot, cnode_save_caller};
 use libsys::proto::{self, IRQ, MAX_BYTES, MAX_WORDS};
-use libsys::standin::{ioport_in8, ioport_out8, irq_handler_ack};
 use libsys::{CPtr, Event, Ipc, Message, MessageInfo, Received, recv, reply_recv, send, signal};
 
 use crate::{Answer, Irq, Outcome, Port, Release, Uart, decode, slot};

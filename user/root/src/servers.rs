@@ -9,15 +9,15 @@
 use core::fmt::Write;
 
 use libsys::bootinfo::{CAP_INIT_TCB, CAP_INIT_VSPACE, CAP_IO_PORT_CONTROL, CAP_IRQ_CONTROL};
+use libsys::device::{
+    IsaIrq, ioport_control_issue, irq_control_get_isa, irq_handler_set_notification,
+};
 use libsys::invoke::{
     cnode_copy, cnode_mint, tcb_bind_notification, tcb_configure, tcb_resume, tcb_set_sched_params,
     tcb_write_registers,
 };
 use libsys::output::{EXIT_FAILURE, EXIT_PORT_NUMBER, IoPort, Polled};
 use libsys::proto::{IRQ, RX_READY};
-use libsys::standin::{
-    IsaIrq, ioport_control_issue, irq_control_get_isa, irq_handler_set_notification,
-};
 use libsys::vspace::{self, EXECUTE, READ, READ_WRITE, Table, WRITE_BACK};
 use libsys::{
     BootInfo, CPtr, Ipc, IpcBufferFrame, ObjectAlloc, ObjectType, Registers, Rights, Slot, UserReg,
@@ -498,7 +498,7 @@ extern "C" fn watch(fault_ep: CPtr, com1: CPtr, exit_port: CPtr, _: u64) -> ! {
     };
     let _ = writeln!(Polled::com1(IoPort(com1)), "{line}");
     if exit_port != 0 {
-        let _ = libsys::standin::ioport_out32(exit_port, EXIT_PORT_NUMBER, EXIT_FAILURE);
+        let _ = libsys::device::ioport_out32(exit_port, EXIT_PORT_NUMBER, EXIT_FAILURE);
     }
     libsys::debug_halt(1)
 }
