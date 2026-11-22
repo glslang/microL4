@@ -10,7 +10,8 @@
 //! copy of B2, U a copy of E itself, unbadged. Each client makes
 //! [`bc::PHASES`] calls, and records what each returned; the server checks
 //! every message's badge against its sender ([`bc::sender`]) and answers
-//! with that badge.
+//! with that badge. A badge is set once: `CNode_Mint` of B1 with a new
+//! badge, or of A1's copy with its own, is `IllegalOperation`.
 //!
 //! 1. Phases 0 to 2 run freely. The server answers phases 0 and 1 at once
 //!    and keeps each client's phase-2 call waiting with `CNode_SaveCaller`;
@@ -133,6 +134,20 @@ pub fn run(bi: &BootInfo) -> ! {
     println!(
         "badge: clients at priority {CLIENT_PRIORITY}: A1 and A2 call through copies of B1 (slots {} and {}), B through a copy of B2 (slot {}), U through an unbadged copy (slot {}), each with Write and GrantReply",
         copies[A1], copies[A2], copies[B], copies[U]
+    );
+    // A badge is set once (`docs/abi.md`, `CNode_Mint`): `spare` stays
+    // empty, as the `CNode_SaveCaller` check below needs.
+    let new_badge = cnode_mint(ipc, root_slot(spare), root_slot(b1), Rights::ALL, 0xbad);
+    let own_badge = cnode_mint(ipc, root_slot(spare), root_slot(copies[A1]), w_gr, BADGE_1);
+    if !is(new_badge, SyscallError::IllegalOperation)
+        || !is(own_badge, SyscallError::IllegalOperation)
+    {
+        fail!(
+            "badge: CNode_Mint of B1 with badge 0xbad: {new_badge:?}; of A1's copy with badge {BADGE_1:#x}: {own_badge:?}; want IllegalOperation for both"
+        );
+    }
+    println!(
+        "badge: ok   CNode_Mint of B1 with a new badge, or of A1's copy with its own: IllegalOperation, a badge is set once"
     );
     for (id, name) in NAMES.iter().enumerate() {
         tcb_resume(tcbs + id as u64)
