@@ -13,6 +13,8 @@ use proptest::prelude::*;
 
 use super::*;
 
+mod redteam;
+
 /// Everything the terminal sent, with where each byte came from.
 #[derive(Default)]
 struct Rec(Vec<(Source, u8)>);
