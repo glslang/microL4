@@ -18,8 +18,10 @@ use super::endpoint::{self as queue, EpState, IpcEnv};
 /// recorded badge is `badge` leaves the queue, in queue order, with its
 /// fault cleared, and becomes `Restart`, made runnable, so it re-executes
 /// its system call (or, for a queued fault, its faulting instruction) and
-/// resolves its `CPtr`s afresh. The other senders keep their order, and
-/// `ep` becomes `Idle` if none is left. Nothing happens for badge 0 or an
+/// resolves its `CPtr`s afresh: unless it runs at once, it joins the tail
+/// of its ready queue, where seL4 puts each at the head, so that its last
+/// released runs first. The other senders keep their order, and `ep`
+/// becomes `Idle` if none is left. Nothing happens for badge 0 or an
 /// endpoint not in state `Send`.
 ///
 /// Not preemptible, as in seL4 and like [`super::cancel_all_ipc`]: one

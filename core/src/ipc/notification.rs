@@ -395,8 +395,10 @@ pub(crate) fn cancel_signal<E: Threads + ?Sized>(e: &mut E, t: TcbRef, n: NtfnRe
 
 /// `cancel_all_signals(N)`: every waiter leaves, in queue order, with its
 /// fault cleared, and becomes `Restart`, made runnable, so its retried
-/// `Recv` resolves its `CPtr` afresh. The pending word is discarded and
-/// `n` becomes `Idle`; its binding is kept. Not preemptible, as in seL4
+/// `Recv` resolves its `CPtr` afresh: unless it runs at once, it joins the
+/// tail of its ready queue, where seL4 puts each at the head, so that its
+/// last waiter runs first. The pending word is discarded and `n` becomes
+/// `Idle`; its binding is kept. Not preemptible, as in seL4
 /// (`cancelAllSignals`): one step per waiter.
 pub fn cancel_all_signals<E: Threads + ?Sized>(e: &mut E, n: NtfnRef) {
     let v = notification(e, n);

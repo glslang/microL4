@@ -17,7 +17,12 @@
 //! scheduler right. Where seL4's order of effects is visible, it is kept:
 //! a sender wakes its receiver before it blocks for the reply
 //! (`src/object/endpoint.c`, `sendIPC`), so a `Call` partner of equal
-//! priority runs next.
+//! priority runs next. Where a woken thread that does not run at once
+//! joins its ready queue is the scheduler's rule, not seL4's (ADR 0013):
+//! at the tail. So of the threads [`cancel_all_ipc`] releases, the first to
+//! have waited runs first, where seL4 puts each at the head of its ready
+//! queue and the last runs first (`docs/design.md`, "IPC", "Compared with
+//! seL4").
 
 use crate::cap::{Cap, CapType, Rights, TCB_SLOT_CALLER, TCB_SLOT_CSPACE, TCB_SLOT_REPLY};
 use crate::cdt;
@@ -434,7 +439,10 @@ pub fn cancel_ipc<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef) {
 /// `cancel_all_ipc(E)`: the last capability to `ep` is being deleted.
 /// Every queued thread leaves, in queue order, with its fault cleared, and
 /// becomes `Restart`, made runnable, so it re-executes its system call or
-/// faulting instruction and resolves its `CPtr` afresh; `ep` becomes `Idle`.
+/// faulting instruction and resolves its `CPtr` afresh; `ep` becomes
+/// `Idle`. Unless it runs at once, each joins the tail of its ready queue,
+/// where seL4 puts each at the head, so that its last released runs
+/// first.
 /// Not preemptible, as in seL4 (`cancelAllIPC`): one step per queued
 /// thread.
 pub fn cancel_all_ipc<E: IpcEnv + ?Sized>(e: &mut E, ep: EpRef) {
