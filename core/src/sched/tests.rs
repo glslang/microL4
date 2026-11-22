@@ -574,11 +574,11 @@ fn compare(w: &World, m: &Model, exit: bool) -> Result<(), TestCaseError> {
     // `check` walked every queue and matched it to the bitmap; compare the
     // non-empty ones.
     let n = check(w, N).map_err(TestCaseError::fail)?;
-    for p in 0..PRIORITIES {
-        if m.queues[p].is_empty() && w.sched.head(p as u8).is_none() {
+    for (p, mq) in m.queues.iter().enumerate() {
+        if mq.is_empty() && w.sched.head(p as u8).is_none() {
             continue;
         }
-        let q: Vec<usize> = m.queues[p].iter().copied().collect();
+        let q: Vec<usize> = mq.iter().copied().collect();
         prop_assert_eq!(w.queue(p as u8), q, "queue {}", p);
     }
     prop_assert_eq!(n, m.queues.iter().map(VecDeque::len).sum::<usize>());

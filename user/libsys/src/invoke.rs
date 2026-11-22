@@ -435,8 +435,9 @@ pub fn tcb_read_registers(
         &[],
     )?;
     let mut regs = Registers::ZERO;
-    for i in 0..reply.length().min(USER_REGS) {
-        regs.0[i] = reply.word(i);
+    let n = reply.length().min(USER_REGS);
+    for (i, r) in regs.0[..n].iter_mut().enumerate() {
+        *r = reply.word(i);
     }
     Ok(regs)
 }

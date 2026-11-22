@@ -809,8 +809,9 @@ pub fn build(
     t.tables[PML4][index(KERNEL_VIRT_BASE, 3)] = kernel_table(phys(IMAGE_PDPT));
 
     // The direct map.
-    for gib in 0..direct_map_end.div_ceil(PD_SPAN) as usize {
-        t.tables[DIRECT_PDPT][gib] = kernel_table(phys(DIRECT_PDS + gib));
+    let gibs = direct_map_end.div_ceil(PD_SPAN) as usize;
+    for (gib, e) in t.tables[DIRECT_PDPT][..gibs].iter_mut().enumerate() {
+        *e = kernel_table(phys(DIRECT_PDS + gib));
     }
     for p in 0..direct_map_end / PAGE_2M {
         let base = p * PAGE_2M;
@@ -848,8 +849,8 @@ pub fn build(
     // The image at KERNEL_VIRT_BASE.
     t.tables[IMAGE_PDPT][index(KERNEL_VIRT_BASE, 2)] = kernel_table(phys(IMAGE_PD));
     let pts = layout.size.div_ceil(PAGE_2M) as usize;
-    for j in 0..pts {
-        t.tables[IMAGE_PD][j] = kernel_table(phys(IMAGE_PTS + j));
+    for (j, e) in t.tables[IMAGE_PD][..pts].iter_mut().enumerate() {
+        *e = kernel_table(phys(IMAGE_PTS + j));
     }
     summary.image_pts = pts;
     for k in 0..layout.size / PAGE_4K {
@@ -1164,8 +1165,7 @@ mod tests {
                         continue;
                     }
                     let pt = follow(e2, 0);
-                    for i1 in 0..ENTRIES {
-                        let e1 = t.tables[pt][i1];
+                    for (i1, &e1) in t.tables[pt].iter().enumerate() {
                         if e1 & P != 0 {
                             leaf(base | (i1 as u64) << 12, PAGE_4K, e1);
                         }
