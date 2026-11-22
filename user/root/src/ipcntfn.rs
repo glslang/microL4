@@ -30,9 +30,14 @@
 //! task's last call flushes any signal still pending, which S receives
 //! first.
 //!
-//! Last, the root task unbinds S: a signal then wakes nobody and waits in
+//! Then the root task unbinds S: a signal then wakes nobody and waits in
 //! N, where the root task's polls find it once, and later signals merge
 //! there for a wait.
+//!
+//! Last, with S unbound in an endpoint receive, a signal waits in N, and
+//! binding S again delivers it at once (the design's change from seL4):
+//! S wakes with the word and `rsi` 0, and N is left Idle, so the next
+//! signal wakes S alone.
 
 use core::sync::atomic::Ordering::Relaxed;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
@@ -69,6 +74,8 @@ const BIND_NOTIFICATION: u64 = 0x2B;
 const LOG_LEN: usize = 16;
 static LOG: [[AtomicU64; 2]; LOG_LEN] = [const { [const { AtomicU64::new(0) }; 2] }; LOG_LEN];
 static LOGGED: AtomicUsize = AtomicUsize::new(0);
+/// The last receive S recorded, encoded.
+static LAST: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
 /// What S counted (`Tally`'s fields).
 static DELIVERIES: AtomicU64 = AtomicU64::new(0);
@@ -202,6 +209,7 @@ pub fn run(bi: &BootInfo) -> ! {
     script(ipc, &caps);
     free(&caps, client_tcbs, signaller_tcbs, done);
     unbind(ipc, server_tcb, &caps);
+    bind_delivers(ipc, server_tcb, &caps);
     println!("TEST PASS");
     libsys::debug_halt(0)
 }
@@ -410,14 +418,48 @@ fn unbind(ipc: Ipc, server: CPtr, caps: &Caps) {
     );
 }
 
+/// S, unbound, waits on E: a signal waits in N, and binding S delivers it
+/// at once and leaves N Idle, so the next signal wakes S alone.
+fn bind_delivers(ipc: Ipc, server: CPtr, caps: &Caps) {
+    let last = || {
+        let words = [LAST[0].load(Relaxed), LAST[1].load(Relaxed)];
+        Seen::decode(words).unwrap_or_else(|| fail!("ipcntfn: S's last record is {words:#x?}"))
+    };
+    let start = LOGGED.load(Relaxed);
+    let [pending, next, _] = ROOT_SIGNALS;
+    signal(caps.signals[0]);
+    let_others_run(ipc);
+    let waited = LOGGED.load(Relaxed) - start;
+    tcb_bind_notification(ipc, server, caps.ntfn)
+        .unwrap_or_else(|e| fail!("ipcntfn: binding S again: {e}"));
+    let_others_run(ipc);
+    let (at_bind, first) = (LOGGED.load(Relaxed) - start, last());
+    signal(caps.signals[1]);
+    let_others_run(ipc);
+    let (after, second) = (LOGGED.load(Relaxed) - start, last());
+    let want = (Seen::Signal(pending), Seen::Signal(next));
+    if (waited, at_bind, after) != (0, 1, 2) || (first, second) != want {
+        fail!(
+            "ipcntfn: binding S, in an endpoint receive, with {pending:#x} pending in N: S recorded {waited} receives before the bind, {at_bind} by its end, last {first}, and {after} after one more signal, last {second}; want 0, 1 ({}) and 2 ({})",
+            want.0,
+            want.1
+        );
+    }
+    println!(
+        "ipcntfn: ok   binding S again while it waited on E with {pending:#x} pending in N delivered the signal at once, rsi 0, and left N idle: the next signal woke S with {next:#x} alone"
+    );
+}
+
 /// Records what one of S's receives returned.
 fn record(seen: Seen) {
     let n = LOGGED.load(Relaxed);
+    let [a, b] = seen.encode();
     if let Some(slot) = LOG.get(n) {
-        let [a, b] = seen.encode();
         slot[0].store(a, Relaxed);
         slot[1].store(b, Relaxed);
     }
+    LAST[0].store(a, Relaxed);
+    LAST[1].store(b, Relaxed);
     LOGGED.store(n + 1, Relaxed);
     match seen {
         Seen::Signal(word) => {
