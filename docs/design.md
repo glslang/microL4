@@ -1661,7 +1661,7 @@ static range for slot addresses.
 M4 left the hooks inert. From M5 they are live, and each arm not yet filled
 names its milestone:
 
-| Hook | Capability | What it does (M5, M6) |
+| Hook | Capability | What it does (M5 to M7) |
 | --- | --- | --- |
 | `init_object` | TCB | `tcb::init` (a full slice, RFLAGS `0x202`), `fpu::init_area` (the FP template; a zeroed MXCSR would unmask every SIMD exception), and in debug builds a place in the debug list |
 | `init_object` | PML4 | the kernel's half, entries 256 to 511 (`arch::paging::init_object`) |
@@ -1669,11 +1669,15 @@ names its milestone:
 | `finalise` | Endpoint or Notification, last; Reply | `ipc::finalise`: an endpoint's queue is released with `cancel_all_ipc`; a notification is unbound, then its waiters are released with `cancel_all_signals` (M6); a reply capability needs nothing |
 | `finalise` | Frame, paging structure, PML4 | `arch::paging::finalise`: a mapped Frame or structure is unmapped, and a PML4's last capability empties its user half, loading the kernel PML4 first if CR3 holds it |
 | `moved` | Frame, paging structure | `arch::paging::moved`: a mapped capability's back-reference follows it |
+| `finalise` | IRQHandler, last (M7) | `core::irq` deletes the IRQ node slot's capability, as seL4's `deletingIRQHandler` (the notification's own `finalise` runs if that was its last capability); returns the IRQHandler as the cleanup |
+| `after_delete` | IRQHandler (M7) | `core::irq` masks the source and frees the entry and its vector, as seL4's `deletedIRQHandler` ([Deletion](#deletion-2)); the kernel executes the mask |
+| `finalise` | IOPort, last (M7) | returns the IOPort as the cleanup, as seL4's `Arch_finaliseCap` |
+| `after_delete` | IOPort (M7) | `core::ioport` clears its range in the bitmap, as seL4's `Arch_postCapDeletion` |
 
 `finalise` returns no cleanup for any type before M7. For an Untyped,
 IRQControl, IOPortControl or Hypervisor capability, which `core/` passes with
-`last` set on every deletion, it never does anything. IRQHandlers and
-IOPorts (M7) keep inert arms, and `after_delete` does nothing before M7.
+`last` set on every deletion, it never does anything. Before M7 IRQHandlers
+and IOPorts keep inert arms, and `after_delete` does nothing.
 `arch::Objects` also implements `Tcbs`, `Scheduling`, `Threads`, `IpcEnv`
 and `PagingStore`. The scheduler lives in a static that only `Objects`
 reaches, which is sound while kernel code uses one `Objects` at a time for
@@ -3677,13 +3681,42 @@ recommends (TLFS CPUID `0x4000_0004` EAX bits 3 and 8).
 
 The MADT gives up to four I/O APICs (ID, base, GSI base); the pin count is the
 version register's MRE + 1, at most 120, since the 8-bit register select
-reaches redirection entries 0 to 119 only. On issue the kernel first writes
-the pin's entry masked and edge-triggered, keeping its old vector, and reads
-back Remote IRR. If it is set, the kernel writes the old vector to the I/O APIC's EOI register
-(version `0x20` or later: QEMU's is `0x20`, but Hyper-V's is `0x11` and has none; see [Open questions](#open-questions)) and reads again; if it is
-still set, the issue fails with `RevokeFirst` and the pin stays masked. Only
-then does it write the final entry: vector, fixed delivery, physical
-destination the boot CPU, the requested trigger and polarity, unmasked.
+reaches redirection entries 0 to 119 only.
+
+Remote IRR (bit 14 of an entry) is set when the I/O APIC sends a level
+interrupt, and a level pin sends nothing more until an EOI for that vector
+clears it; on an edge entry it is undefined (82093AA datasheet, from memory;
+QEMU clears it). Normally the local APIC's EOI broadcast clears it, as in
+seL4: every delivery is EOI'd, EOI-broadcast suppression is off, and a masked
+or freed pin keeps its vector and trigger, so the broadcast still matches. It
+is left set, stale, only when a delivery's EOI never came: the firmware had it
+in service when the local APIC was reset (leaving x2APIC through the disabled
+state clears ISR; SDM, from memory), say. So on issue the kernel first masks
+the pin's entry, keeping vector, trigger and polarity, and reads it back. If
+Remote IRR is set, it clears it as Linux's `clear_IO_APIC_pin` and
+`__eoi_ioapic_pin` do (`arch/x86/kernel/apic/io_apic.c`, from memory; check in
+M7): it writes the entry level-triggered, still masked and with its old
+vector, since an EOI clears Remote IRR only on a level entry (QEMU's
+`ioapic_eoi_broadcast` checks the trigger, from memory); then, on an I/O APIC
+of version `0x20` or later (QEMU's), it writes the old vector to the EOI
+register at offset `0x40`, and on an older one, which has none (Hyper-V's
+`0x11`), it writes the entry edge-triggered and then level-triggered again,
+both masked, which is how Linux simulates that EOI ([ADR
+0027](adr/0027-stale-remote-irr.md)). It reads Remote IRR again; if it is
+still set, the issue fails with `RevokeFirst` and the pin stays masked.
+Masking and unmasking would not clear it, since the mask bit only holds back
+new messages, and the kernel cannot make the local APIC broadcast an EOI for a
+vector that is not in service (an EOI broadcasts only an in-service vector
+whose TMR bit is set, and a self-IPI is edge-triggered). This runs in the
+resource check, before the destination slot
+([Conventions](abi.md#conventions-1)), so an issue that then fails may have
+cleared a free pin's stale Remote IRR; it changes nothing else. Only once
+every check has passed does it write the final entry, the destination word
+first: physical destination the boot CPU, then vector, fixed delivery, the
+requested trigger and polarity, unmasked. The EOI register makes the register
+block `0x44` bytes from version `0x20`, and all of it must lie in the I/O
+APIC's window page.
+
 ISA IRQ `n` goes to GSI `n`, edge, active high, unless an override (bus 0,
 source `n`) gives the GSI and flags ("conforms to bus", and a reserved
 polarity or trigger value, mean the ISA default).
@@ -3721,24 +3754,28 @@ not copied or minted.
 | `GetMSI()` | one MSI or MSI-X message; returns its address and data | M9 |
 | `GetSint(sint)` | SynIC SINT 0-15, Hyper-V only | M9 |
 
-Each checks that the source is free, takes the lowest free vector, programs the
-source and writes an IRQHandler capability (holding the IRQ number) into the
-destination slot as a revocable child of IRQControl. A source that already has
-a handler, no free vector, or a pin whose Remote IRR stays set gives
-`RevokeFirst`.
+Each checks that the source is free, takes the lowest free vector, programs
+the source and writes an IRQHandler capability (holding the IRQ number) into
+the destination slot as a revocable child of IRQControl. A source that already
+has a handler, no free vector, or a pin whose Remote IRR stays set once the
+kernel has tried to clear it gives `RevokeFirst`. A new entry starts with
+`pending` and `masked` clear and the IRQ node slot empty.
 
 IRQHandler capabilities can be copied; mint data is ignored.
 `SetNotification(ntfn)` needs a notification capability with the Write right
-(seL4's `CanSend`) and fails with `IllegalOperation` if the copy would
-exceed `MAX_DERIVATION_DEPTH`; after every check it deletes any bound
-capability, then copies the given one, badge included, into the IRQ node slot.
-`Clear` deletes the bound capability. `Ack` clears `pending` and unmasks the
-pin if the kernel masked it; for MSI and SINTs it does nothing.
+(seL4's `CanSend`) and fails with `IllegalOperation` if the copy would exceed
+`MAX_DERIVATION_DEPTH`; after every check it deletes any bound capability,
+then copies the given one, badge included, into the IRQ node slot. `Clear`
+deletes the bound capability. Neither touches the source: a pin the kernel
+masked stays masked until an Ack, and `pending` stays as it was, as seL4's
+`invokeIRQHandler_SetIRQHandler` and `invokeIRQHandler_ClearIRQHandler` only
+replace or delete the slot's capability. `Ack` clears `pending` and unmasks the pin if the
+kernel masked it; for MSI and SINTs it does nothing.
 
 | Source | On issue | On delivery | On Ack | On handler deletion |
 | --- | --- | --- | --- | --- |
-| I/O APIC, level | Remote IRR checked, then programmed unmasked | masked before EOI | unmasked | mask bit set; vector and trigger kept |
-| I/O APIC, edge | Remote IRR checked, then programmed unmasked | `pending` set; if it was already set, masked | `pending` cleared; unmasked if masked | mask bit set; vector and trigger kept |
+| I/O APIC, level | masked, a stale Remote IRR cleared, then programmed unmasked | masked before EOI | unmasked | mask bit set; vector and trigger kept |
+| I/O APIC, edge | masked, a stale Remote IRR cleared, then programmed unmasked | `pending` set; if it was already set, masked | `pending` cleared; unmasked if masked | mask bit set; vector and trigger kept |
 | MSI | vector reserved | unchanged | nothing | vector freed |
 | SINT | SINTn = vector, unmasked | unchanged | nothing | SINTn masked |
 
@@ -3776,16 +3813,24 @@ Deleting the final IRQHandler capability deletes the IRQ node capability
 (which may finalise the notification, as seL4's `deletingIRQHandler` does),
 masks the source (an I/O APIC pin: only its mask bit, keeping vector and
 trigger, as seL4's `ioapic_mask`; a SINT: its mask bit), and then frees the
-entry and vector. Keeping the vector matters for a level interrupt that
-arrived during the deletion: its stale delivery is taken as soon as the kernel
-returns with IF = 1, before the vector can be reissued, lands on a `Free`
-entry, and its EOI broadcast still matches the pin's entry, so Remote IRR
-clears; reissue checks Remote IRR anyway. A deleted MSI that the device keeps
-sending lands on a `Free` entry, or after reuse gives the new owner a spurious
-signal; drivers treat signals as hints. Revoking IRQControl deletes every
-IRQHandler. A notification cannot be finalised while bound, because the IRQ
-node holds a capability to it; revoking an ancestor (its untyped, say)
-deletes that capability as a descendant first.
+entry and vector. As in seL4, the first step is the `finalise` hook's, which
+returns the IRQHandler as the cleanup, and the other two are `after_delete`'s,
+once the handler's slot is empty (`deletedIRQHandler`, through
+`postCapDeletion`), so the IRQ is free exactly when the last slot naming it is
+([How `core/` reaches kernel memory](#how-core-reaches-kernel-memory)).
+Keeping the vector matters for a level interrupt that arrived during the
+deletion: its stale delivery is taken as soon as the kernel returns with
+IF = 1, before the vector can be reissued, lands on a `Free` entry, and its EOI
+broadcast still matches the pin's entry, so Remote IRR clears; reissue clears
+a stale one anyway ([Local APIC, PIC and I/O APIC
+(M3)](#local-apic-pic-and-io-apic-m3)). The freed vector may go to another
+source while the masked pin still names it; the pin never sends it, and the
+new source's EOI broadcasts can only clear the old pin's Remote IRR. A deleted
+MSI that the device keeps sending lands on a `Free` entry, or after reuse
+gives the new owner a spurious signal; drivers treat signals as hints.
+Revoking IRQControl deletes every IRQHandler. A notification cannot be
+finalised while bound, because the IRQ node holds a capability to it; revoking
+an ancestor (its untyped, say) deletes that capability as a descendant first.
 
 ### MSI (M9) and the trust model
 
@@ -3805,9 +3850,10 @@ recorded for M10 brief 7.
 `core/src/irq.rs` (M7) holds the IRQ table, vector allocator, ISA routes, the
 issue, bind, Ack, Clear, delete and deliver transitions, and message decoding.
 It returns hardware actions (`MaskRte`, `UnmaskRte`, `CheckRemoteIrr`,
-`ProgramRte`, `ProgramSint`, `MaskSint`, `Eoi`) and touches no hardware; host
-tests and a proptest against a set-based model cover it. From M3,
-`l4core::apic` holds the local APIC, I/O APIC and PIC registers, the values
+`ClearRemoteIrr`, which picks the EOI register or the trigger toggle by the
+I/O APIC's version, `ProgramRte`, `ProgramSint`, `MaskSint`, `Eoi`) and
+touches no hardware; host tests and a proptest against a set-based model
+cover it. From M3, `l4core::apic` holds the local APIC, I/O APIC and PIC registers, the values
 the kernel writes at boot and the EOI rule, and `l4core::acpi` the ISA
 routes (`Platform::isa_route`).
 `kernel/src/arch/x86_64/` (`idt.rs`, `apic.rs`, `ioapic.rs`, `pic.rs`, and
@@ -3823,7 +3869,7 @@ device window.
 | An IRQ node slot holds only a notification capability with the Write right and never names a deleted notification | checks in `SetNotification`; IRQ node slots in the derivation list; model test of revoke | M7 |
 | Deleting the last IRQHandler masks its source, empties its IRQ node slot and frees its vector | finalise path, `core::irq` tests, QEMU scenario | M7 |
 | Between two Acks an I/O APIC pin delivers at most three interrupts: two, plus one the local APIC already holds when the mask lands | `core::irq` state machine, proptest, QEMU scenario with the PIT at its highest rate | M7 |
-| No pin is unmasked with Remote IRR set | `core::irq` actions, read-back in `ioapic.rs`, QEMU scenario that deletes a handler with a level interrupt pending | M7 |
+| No pin is unmasked with Remote IRR set | `core::irq` actions, read-back in `ioapic.rs`, QEMU scenario that deletes a handler with a level interrupt pending; a self-test that leaves a level pin's Remote IRR stale (its entry's vector changed between delivery and EOI, say) and then issues the pin, with QEMU's I/O APIC at version `0x20` and at `0x11` (`-global ioapic.version=0x11` through `qemu_args:`; QEMU accepts only those two, from memory) | M7 |
 | Every fixed interrupt is EOI'd exactly once: `0x30`-`0xFE` always, `0x20`-`0x2F` only when its ISR bit is set, `0xFF` never | common interrupt exit, timer and device scenarios | M3, M7 |
 | User code cannot enter an interrupt handler with `int n` | DPL 0 on every gate but `#BP`; red-team brief 5 | M3, M10 |
 | No interrupt arrives before the IDT is loaded; pins stay masked until issued; the PIC, LINT0 and LINT1 stay masked | M3 init order, QEMU scenario | M3 |
@@ -3838,7 +3884,9 @@ device window.
 | `GetIOAPIC` names an I/O APIC by its MADT index and a pin on it (`object-api-arch.xml`, `ioapic_decode_map_pin_to_vector`) | `GetIOAPIC` names a GSI; `GetISA` an ISA IRQ | GSIs are what the MADT's I/O APIC bases and overrides use, so root needs no I/O APIC ordering |
 | Overrides are printed, not applied (`MADT_ISO` in `acpi.c`); user space parses ACPI from the RSDP | `GetISA` applies them in the kernel | User space has no ACPI parser and never reads ACPI |
 | Every `IRQSignal` source is masked on delivery until Ack (`handleInterrupt`, `src/object/interrupt.c`), though an x86 MSI cannot be masked (`maskInterrupt`, `include/plat/pc99/plat/machine/interrupt.h`) | Level pins the same; an edge pin is masked only by a second delivery before Ack; MSI and SINTs never | An edge pin masked from its first delivery loses any edge between the driver's last poll and its Ack; the `pending` bit still bounds it to three interrupts per Ack; a masked SINT breaks host signalling |
-| Deleting the handler sets the pin's mask bit and keeps its vector (`deletedIRQHandler`, `src/object/interrupt.c`; `ioapic_mask`, `ioapic.c`) | The same, and issuing a pin first checks that Remote IRR is 0 | A level interrupt pending at an earlier deletion must not leave the pin dead for its next owner |
+| Deleting the handler sets the pin's mask bit and keeps its vector (`deletedIRQHandler`, `src/object/interrupt.c`; `ioapic_mask`, `ioapic.c`) | The same | A level interrupt pending at the deletion is EOI'd against the kept vector, so its Remote IRR clears |
+| Remote IRR is never read. Boot writes every pin masked, edge-triggered, vector 0 (`single_ioapic_init`, `ioapic.c`), which clears it where a switch to edge does (QEMU); issue writes the pin's entry without looking (`ioapic_map_pin_to_vector`), so a level pin with a stale one stays silent | Boot keeps each pin's vector and trigger; issue clears a stale Remote IRR (the EOI register from version `0x20`, Linux's trigger toggle below it) and refuses the pin with `RevokeFirst` if it stays set ([ADR 0027](adr/0027-stale-remote-irr.md)) | A level pin must not be handed out dead; Hyper-V's I/O APIC is version `0x11`, with no EOI register |
+| The destination slot is looked up before `GetIOAPIC`'s I/O APIC, pin, level and polarity are checked (`Arch_decodeIRQControlInvocation`) | Arguments, then the source and vector, then the destination slot | One order for every invocation in the range ([Conventions](abi.md#conventions-1)) |
 | PIC mode with `IRQControl_Get` for ISA IRQs (`Arch_checkIRQ`) | I/O APIC only; PIC always masked | Both platforms have an I/O APIC |
 | `GetMSI` takes PCI bus, device, function and handle | Takes no source; returns address and data | Unchecked without an IOMMU; spares drivers the APIC ID |
 | IOSpace and IOPageTable objects drive the VT-d IOMMU, with a master IOSpace capability minted per PCI device (`io.tex`, "I/O Space") | No IOMMU objects; a driver that can program DMA or MSI is trusted with the machine | Neither target gives the guest an IOMMU by default (q35 without `intel-iommu`; Hyper-V, from memory); PLAN.md records DMA as a known limitation (M10 brief 7) |
@@ -3893,7 +3941,9 @@ since `sysretq` loads RFLAGS from `r11`.
 
 `core/src/ioport.rs` (M7) holds the bitmap, the reserved set, the checks and
 message decoding, with host tests and a proptest against a set model;
-`arch/x86_64/io.rs` (since M0) only executes `in` and `out`.
+`arch/x86_64/io.rs` (since M0) only executes `in` and `out`, and from M7 its
+functions are `#[inline(never)]` for the release kernel's disassembly check
+([A release kernel without UART code](#a-release-kernel-without-uart-code)).
 
 ### Invariants
 
@@ -4261,8 +4311,9 @@ From M5 a `test=` name the kernel does not know goes to the root task, which
 reads it from BootInfo: the kernel prints `test=<name>: not a kernel
 self-test; the root task runs it` and runs boot step 10; the root task
 fails a name it does not know. A kernel without `selftest` knows no
-test, so it says it has no self-tests and passes every `test=` to the root
-task. xtask builds the kernel with `--features selftest` for `test`, `run`,
+test, so it passes every `test=` to the root task, saying it has no
+self-tests if it has `debug`. xtask builds the kernel with
+`--features selftest` for `test`, `run`,
 `gdb`, `image`, `build` and `acpidump` (the Hyper-V check reads COM1), and
 `cargo xtask clippy` lints it twice, with `selftest` and with no features, so
 that every `cfg` compiles both ways; M7 adds a build without `debug`. From M7,
@@ -4330,21 +4381,32 @@ possibly interleaved.
 
 M7's done-when is checked three ways. The `serial` module is
 `#[cfg(feature = "debug")]`, so release code naming it does not compile.
-`cargo xtask test` builds the kernel without `debug`, disassembles it, and
-fails on any `in` or `out` outside the IOPort invocation path in `io.rs`,
-any immediate in `0x3F8` to `0x3FF` moved into `dx`, `edx` or `rdx`, and any
-`serial` symbol (`0x3FF` alone is also the IPC buffer's alignment mask); that also catches a port write added outside `serial.rs` or
-inlined into another function. A
-scenario boots that kernel: all output comes from `uart`, and root ends the
-run through an IOPort capability for `isa-debug-exit` (`0xF4`) made from
-IOPortControl.
+`cargo xtask test` builds the kernel without `debug`, disassembles it, and fails on any `in` or
+`out` outside the functions of `io.rs`, any immediate in `0x3F8` to `0x3FF`
+moved into `dx`, `edx` or `rdx`, and any `serial` symbol (`0x3FF` alone is
+also the IPC buffer's alignment mask); that also catches a port write added
+outside `serial.rs` or inlined into another function. So that each `in` and
+`out` sits under an `io.rs` symbol, those functions are `#[inline(never)]` and
+take the port in `dx` from their argument. A release kernel calls them from
+three places only: the IOPort invocations, `pic::init` at boot (ports `0x20`,
+`0x21`, `0xA0` and `0xA1`, when the MADT sets `PCAT_COMPAT`, as q35's does)
+and `arch::exit` (`isa-debug-exit`, after a panic). A scenario boots that
+kernel: all output comes from `uart`, and root ends the run through an IOPort
+capability for `isa-debug-exit` (`0xF4`) made from IOPortControl, writing what
+`arch::exit` writes: `0x10` for success, which QEMU turns into exit status 33,
+or `0x11` for failure (35). BootInfo does not say whether the kernel has
+`debug`, so root learns it from the scenario's `test=` name: that test makes
+no debug system call, since one would raise `UnknownSyscall` in root, which
+has no fault handler, and stop it silently until the 60-second limit. The
+test checks that fault itself, from another thread whose fault endpoint root
+holds.
 
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")`; xtask disassembly check (no `in` or `out` outside the IOPort path, no `0x3F8` to `0x3FF` moved into `dx`, no `serial` symbol); release scenario | M7 |
-| Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test `debug_numbers_need_a_debug_kernel`; release scenario | M5, M7 |
+| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")`; xtask disassembly check (no `in` or `out` outside `io.rs`'s functions, no `0x3F8` to `0x3FF` moved into `dx`, no `serial` symbol); release scenario | M7 |
+| Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test `debug_numbers_need_a_debug_kernel`; release scenario, whose root test takes the fault from another thread | M5, M7 |
 | `DebugPutChar` and `DebugDumpScheduler` change no register a thread can rely on | `l4core::syscall` returns them without writing a register, and `dispatch` writes none; host test `debug_system_calls_go_back_to_the_kernel` | M5 |
 | Debug system calls read no user memory and take no capability | `dispatch::debug_call` uses only `rdi`'s value and kernel state; review | M5 |
 | The TCB size is the same with and without `debug` | the debug list's two link words live in the TCB's debug-only tail at offset 608 in every build; `l4core::tcb`'s compile-time layout asserts | M5 |
@@ -4397,7 +4459,7 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | How does a server tell "nothing pending" from a message or signal with badge 0? | `NBRecv` returns badge 0 both for nothing and for unbadged senders | M6, `libsys` (answered) | Answered in M6: an empty `NBRecv` returns `rdi` = 0 and `rsi` = 0, so a server that polls gives every signaller a non-zero badge, and every client a non-zero badge or a message whose `MessageInfo` is not 0. `root` does both: `test=badge`'s server stops at a receive with `rdi` and `rsi` both 0, and its unbadged client sends a non-zero label; `test=ipcntfn` gives every notification capability a single bit from bit 32 up, and `libsys::Event::classify` takes a receive for a signal only when `rsi` is 0 and `rdi` has one of those bits ([Binding](#binding)) |
 | What else must `libsys` document? | Two seL4 behaviours surprise servers | M6 (answered) | Answered in M6: reusing a notification badge needs revoke, an `NBRecv` to drain old bits, then a new Mint (`libsys::notification`); a saved reply capability vanishes when its client is suspended or deleted (`libsys::invoke::cnode_save_caller`). `cnode_cancel_badged_sends` says to revoke the badged original first |
 | Are the IMCR ports `0x22` and `0x23` real on q35 and Hyper-V? | They are kept from user space on the assumption that they can route PIC interrupts around the local APIC | M7 | Keep them reserved; reserving an absent port costs nothing |
-| What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Open. QEMU's I/O APIC is version `0x20`, but Hyper-V's is `0x11` (the M3 Hyper-V check), which has no EOI register. M7 must clear a stale Remote IRR there another way, such as switching the pin to edge-triggered and back while masked, as Linux does for older I/O APICs (from memory; check in M7) |
+| What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 | Decided by the M7 spec check ([ADR 0027](adr/0027-stale-remote-irr.md)); check in M7. QEMU's I/O APIC is version `0x20`, Hyper-V's `0x11` (the M3 Hyper-V check). Normal operation needs nothing: the local APIC's EOI broadcast clears Remote IRR on any version, as in seL4, because a pin keeps its vector and trigger. For a stale one, issue writes the entry level-triggered and masked, then writes the old vector to the EOI register from version `0x20`, or below it switches the entry to edge-triggered and back, as Linux's `__eoi_ioapic_pin` does (from memory). Masking and unmasking leaves Remote IRR set, and the local APIC broadcasts an EOI only for a vector in service, so neither is an option. A self-test runs both paths on QEMU, whose I/O APIC takes `version=0x11` (from memory). Hyper-V's path stays unchecked: no planned driver there uses a level pin (COM1 is edge; VMBus uses SINTs) |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
 | Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 | Yes; raise the radix to 13 if not |
 | Must `vmbus` send VMBus `UNLOAD` before `INITIATE_CONTACT` because the firmware left a connection open? | Contact fails or channels are stale if the host still sees the firmware's session | M9 | Yes, as other guests do after kexec; confirm against FreeBSD's `vmbus.c` |
