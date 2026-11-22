@@ -383,6 +383,21 @@ fn a_poll_never_blocks() {
 }
 
 #[test]
+fn an_empty_poll_sets_rdi_and_rsi_to_0_whatever_they_held() {
+    // `rsi` is no input of a receive: an empty poll gives 0 and 0 as an
+    // empty `NBRecv` on an endpoint does, Idle or with others waiting.
+    let mut w = world();
+    w.set_mrs(B, [5; 4]);
+    w.syscall(B, 8, sn(0, ORIG), info_caps(0x55, 1, 3), None);
+    assert_eq!((w.state(B), got(&w, B)), (ThreadState::Running, (0, 0)));
+    w.recv(C, sn(0, ORIG));
+    w.syscall(B, 8, sn(0, READ_ONLY), u64::MAX, None);
+    assert_eq!((w.state(B), got(&w, B)), (ThreadState::Running, (0, 0)));
+    assert_eq!(w.mrs(B), [5; 4]);
+    assert_eq!(nqueue(&w, 0), [tcb(C)]);
+}
+
+#[test]
 fn waiting_and_polling_need_read() {
     for number in [5, 8] {
         let mut w = world();
