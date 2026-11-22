@@ -1,0 +1,69 @@
+# M7's done-when on QEMU with the selftest kernel (user/root/src/console.rs;
+# docs/design.md, "Scenarios" under "User-level drivers and console"): two
+# clients write interleaved lines through console, and input typed by the
+# harness reaches the right client. The root task starts watch (255), which
+# receives the servers' faults, uart (200), which drives COM1 through an
+# IOPort capability and IRQ 4 (an edge pin: wait, Ack, service), and
+# console (150), each server in a CSpace and VSpace of its own built from
+# the root task's image frames. It attaches as client 1 and points print!
+# at console, then drives clients a (badge 2) and b (badge 3), at 100, one
+# step at a time through their Calls on endpoint D, so every write boundary
+# is fixed. Each piece below is distinct, so a piece console put inside
+# another line would be missing from its own: console keeps each client's
+# unfinished line until its newline. The 300-byte b2 line arrives in three
+# 100-byte writes with a's whole line between them; b's burst of twelve
+# 200-byte lines makes uart hold some of console's writes. Then each client
+# writes a prompt and reads; the harness focuses b with Ctrl-T 3 and types
+# its line, then focuses a and types a line with a typo, DEL and Ctrl-U.
+# Root checks each client read exactly its line, and uart's Stats: receive
+# and THRE interrupts served, exactly the 22 bytes sent, no overruns. The
+# echoed input lines are not expected: whether a prompt shows depends on
+# whether the client's Read came before its input (host tests pin echo).
+cmdline: test=console
+exit: success
+expect: microL4 kernel
+expect: cmdline: "test=console"
+expect: root: microL4 root task
+expect: root: cmdline "test=console"
+expect: console: watch (TCB slot
+expect: priority 255) receives the servers' faults; uart (TCB slot
+expect: priority 200) holds copies of the COM1 IOPort
+expect: GSI 4, edge, active high); console (TCB slot
+expect: priority 150); each server in a CSpace and VSpace of its own
+expect: console: root is client 1; its output goes through console from here
+expect: console: clients a (badge 2) and b (badge 3), priority 100
+expect: a1 alpha one
+expect: b1 bravo one
+expect: a2 short
+expect: b2 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901 end
+expect: a3 x
+expect: a4 y
+expect: b3 z
+expect: a5 end
+expect: console: interleaved lines written, in 11 steps
+expect: b burst 01 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 01
+expect: b burst 02 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 02
+expect: b burst 03 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 03
+expect: b burst 04 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 04
+expect: b burst 05 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 05
+expect: b burst 06 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 06
+expect: b burst 07 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 07
+expect: b burst 08 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 08
+expect: b burst 09 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 09
+expect: b burst 10 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 10
+expect: b burst 11 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 11
+expect: b burst 12 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc 12
+expect: console: burst of 12 lines written
+expect: console: input next
+send: \x143to b\r                  # Ctrl-T 3: focus b
+expect: [console] focus 3 (b)
+expect: b: read "to b"
+send: \x142hellp\x7fo\x15hi a\r    # Ctrl-T 2, a typo, DEL, Ctrl-U, the line
+expect: [console] focus 2 (a)
+expect: a: read "hi a"
+expect: console: ok   a read exactly "hi a" and b exactly "to b"; nothing else reached a client
+expect: console: uart:
+expect: , 22 bytes received,
+expect: console: ok   receive and THRE interrupts both served, all 22 bytes the harness sent received, no overruns
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB

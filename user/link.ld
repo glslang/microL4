@@ -12,6 +12,12 @@
  * empty segments, which the kernel ignores), then libsys's .libsys_stack.
  * The image ends at the top of the libsys stack; the kernel maps the IPC
  * buffer and BootInfo right after it.
+ *
+ * The root task builds its servers' address spaces from its own image
+ * frames (docs/design.md, "Where the servers run"), so the script exports
+ * the segment bounds: __rodata_start and __data_start (each page-aligned),
+ * __data_end (the end of .bss) and __libsys_stack_start; libsys's image.rs
+ * reads them.
  */
 ENTRY(_start)
 
@@ -41,6 +47,7 @@ SECTIONS
 
     .rodata : ALIGN(4K)
     {
+        __rodata_start = .;
         *(.rodata .rodata.*)
     } :rodata
 
@@ -49,6 +56,7 @@ SECTIONS
 
     .data : ALIGN(4K)
     {
+        __data_start = .;
         *(.data .data.*)
         *(.got .got.*)
     } :data
@@ -57,6 +65,7 @@ SECTIONS
     {
         *(.bss .bss.*)
         *(COMMON)
+        __data_end = .;
     } :data
 
     /* A guard page below each stack. */
@@ -112,6 +121,7 @@ SECTIONS
 
     .stack (NOLOAD) : ALIGN(4K)
     {
+        __libsys_stack_start = .;
         KEEP(*(.libsys_stack))
         . = ALIGN(4K);
     } :stack

@@ -1,0 +1,20 @@
+[package]
+name = "console"
+description = "microL4's console server: clients' lines kept whole, line editing and focus, host-tested, and the server loop the root task runs in a VSpace of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+libsys = { path = "../libsys" }
+
+[dev-dependencies]
+# The proptest of random clients against a model of their lines. `std`
+# alone: no forking, timeouts or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

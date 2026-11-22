@@ -1,6 +1,7 @@
-//! The root task's logic that needs no kernel: the verdicts of its tests,
-//! built for the host as well, where `cargo test -p root --lib` runs them.
-//! The program itself is `main.rs`.
+//! The root task's logic that needs no kernel: the verdicts of its tests
+//! and the plan of a server's address space, built for the host as well,
+//! where `cargo test -p root --lib` runs them. The program itself is
+//! `main.rs`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -9,3 +10,4 @@
 extern crate std;
 
 pub mod check;
+pub mod process;

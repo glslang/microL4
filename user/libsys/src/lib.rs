@@ -21,8 +21,16 @@
 //!   IOPort invocations (M7).
 //! - [`objects`] hands out the root task's free slots and picks the untyped
 //!   its objects are retyped from.
-//! - [`print!`] and [`println!`] write through `DebugPutChar`; the panic
-//!   handler prints the panic and ends the run with `DebugHalt(1)`.
+//! - [`proto`] defines the `uart` and `console` protocols; [`console`] and
+//!   [`uart`] are their clients.
+//! - [`print!`] and [`println!`] write where [`output`] says, through
+//!   `DebugPutChar` until a program names a console client; [`exit`] ends
+//!   the run through an `isa-debug-exit` IOPort if one is set, else with
+//!   `DebugHalt`, and [`output::Polled`] writes to COM1 past `uart`. The
+//!   panic handler prints the panic and ends the run with `exit(1)`.
+//! - [`vspace`] maps paging structures and frames, and [`image`] gives the
+//!   program's segment bounds, for building a server's address space from
+//!   the root task's image frames.
 //!
 //! User programs build for `x86_64-unknown-none`, like the kernel, so
 //! nothing uses SSE (`docs/design.md`, "FP and SIMD"), but with the small
@@ -38,17 +46,27 @@
 #[cfg(test)]
 extern crate std;
 
+mod client;
+pub mod console;
 pub mod cpu;
 mod debug;
 pub mod device;
 pub mod error;
+#[cfg(target_os = "none")]
+pub mod image;
 pub mod invoke;
 pub mod notification;
 pub mod objects;
+pub mod output;
+pub mod proto;
+#[doc(hidden)]
+pub mod standin;
 #[cfg(target_os = "none")]
 mod start;
 pub mod syscall;
 pub mod transfer;
+pub mod uart;
+pub mod vspace;
 
 pub use l4core::bootinfo::{self, BootInfo};
 pub use l4core::cap::{ObjectType, Rights};
@@ -57,14 +75,16 @@ pub use l4core::error::{LookupFailure, SyscallError};
 pub use l4core::ipc::{self, IpcBuffer, MessageInfo};
 pub use l4core::regs::{UserReg, fault_label};
 
+pub use client::CallError;
 pub use cpu::rdtsc;
-#[doc(hidden)]
-pub use debug::_print;
 pub use debug::{Console, debug_dump_scheduler, debug_halt, debug_put_char};
 pub use error::Error;
 pub use invoke::{IpcBufferFrame, Registers, Reply, Slot};
 pub use notification::{Event, poll, signal, wait};
 pub use objects::{AllocError, ObjectAlloc, SlotAlloc, UntypedAlloc};
+#[doc(hidden)]
+pub use output::_print;
+pub use output::exit;
 pub use syscall::{
     CPtr, Ipc, Message, Received, call, nb_recv, nb_send, recv, reply, reply_recv, send, yield_now,
 };
