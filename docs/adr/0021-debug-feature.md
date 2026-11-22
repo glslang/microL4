@@ -1,6 +1,6 @@
 # 0021: All UART code and the debug system calls exist only with the kernel's `debug` feature, and `DebugHalt` takes an exit status
 
-Status: accepted, M1 (2026-10-29)
+Status: accepted, M1 (2026-10-29); M7 status note at the end
 
 ## Context
 
@@ -46,3 +46,26 @@ run with a pass or fail status.
   `isa-debug-exit`, which the root task makes from IOPortControl.
 - The TCB keeps one size in both builds: the debug list lives in its
   debug-only tail.
+
+## M7 status (2026-11-22)
+
+M7 built the release kernel and its check as decided, with two points made
+precise:
+
+- "Outside the IOPort path in `io.rs`" means outside `io.rs`'s functions: the
+  check fails on any `in` or `out` whose address lies outside the symbols of
+  `kernel/src/arch/x86_64/io.rs`. Those six functions (`inb`, `inw`, `inl`,
+  `outb`, `outw`, `outl`) are `#[inline(never)]` and take the port as their
+  first argument, so every `in` and `out` sits under one of them; the IOPort
+  invocations, `pic::init` and `arch::exit` call them.
+- A fourth rule: the check also fails on a `call` or jump to one of `io.rs`'s
+  functions when the straight-line code before it moved an immediate in
+  `0x3F8` to `0x3FF` into `dil`, `di`, `edi` or `rdi`, the port argument.
+  Since those functions move the port into `dx` themselves, that is how
+  release code would name COM1 without the second rule's `mov` into `dx`.
+
+The release kernel is built without features and copied to
+`target/xtask/release-kernel/<profile>/kernel.elf`; `cargo xtask test`
+disassembles it with `llvm-objdump` from rustup's `llvm-tools`
+(`xtask/src/disasm.rs`) before the scenarios, and the `release` scenario
+boots it (`docs/design.md`, "A release kernel without UART code").
