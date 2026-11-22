@@ -1782,7 +1782,7 @@ Hypervisor capabilities.
 | Capabilities are created only by boot, retype, IRQControl and IOPortControl invocations, `Call` and fault delivery (reply capabilities), and deletion (Zombies); every other capability is derived from one its holder has | the only callers of `insert_root` and `insert_derived`; red-team brief 1 | M2, M10 |
 | Destroying a CNode or TCB is preemptible, recurses at most two levels, and keeps every invariant at each step | Zombie algorithm; proptest with random preemption points over nested and cyclic containers, including deleting a slot inside the container its own deletion destroys | M2 |
 | No lookup reaches, and the kernel inserts nothing into, a slot of a CNode or TCB being destroyed | finalisation starts only at the last capability, which becomes a Zombie that lookups stop at; the TCB `finalise` hook suspends the thread before `core/` clears its slots; proptest | M2, M5 |
-| The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container: the node is `IRQ_NODE` in the kernel image's `.bss` (`arch/x86_64/objects.rs`), and in the test kernels memory of its own at `IRQ_NODE_BASE`, which no CNode or TCB covers; M2's proptest, whose root CNode holds an IRQHandler; `test=redteam-irq`, which deletes a CNode K holding a handler whose IRQ node slot holds the last capability to a notification a thread W waits on: the handler is finalised inside the Zombie's reduction, which deletes that capability from the IRQ node through the handler's own hook (`irq::finalise`) and releases W, and the GSI can be issued again | M2, M7 |
+| The Zombie code clears only CNode and TCB slots, never IRQ-node slots | IRQ-node slots belong to no container: the node is `IRQ_NODE` in the kernel image's `.bss` (`arch/x86_64/objects.rs`), and in the test kernels memory of its own at `IRQ_NODE_BASE`, which no CNode or TCB covers; M2's proptest, whose root CNode holds an IRQHandler; `test=redteam-irq`, which deletes a CNode K holding a handler whose IRQ node slot holds the last capability to a notification a thread W waits on, so that the handler is finalised inside the Zombie's reduction and its own hook (`irq::finalise`) deletes that capability from the IRQ node; the test checks that the kernel survives the deletion, that W never woke, and that ISA IRQ 0 (GSI 2) can be issued again. That W is released is not observed: released, it restarts its Wait on an empty slot and stops on the capability fault, with no fault handler, which root cannot tell from W still waiting | M2, M7 |
 | Every relocation of a capability to another slot calls `moved(cap, old_slot, new_slot)` before the next preemption point, so back-references stay exact | one `l4core::cdt` move and one swap function, used by Move, Mutate, both halves of Rotate, the Rotate swap, every Zombie swap and `CNode_SaveCaller`; `arch::paging::moved` rewrites the back-reference; proptest over nested CNode deletion with a mapped capability in slot 0 of the nested CNode, rotates and swaps of mapped capabilities, and untyped revoke, at random preemption points (the `vspace` proptest from M5); host test `moves_rotates_and_swaps_rewrite_back_references`; `CNode_SaveCaller` moves with `cdt::move_slot` (M6; host test `save_caller_moves_the_reply_capability_below_its_callers_master`); red-team brief 4 | M2, M5, M6, M10 |
 
 ### Compared with seL4
@@ -4484,18 +4484,23 @@ writer and `debug::print` are `#[cfg(feature = "debug")]`, so release code
 naming them does not compile. Before any scenario, `cargo xtask test`
 disassembles the release kernel (`xtask/src/disasm.rs`, with `llvm-objdump`
 from rustup's `llvm-tools`, which `tools/setup.sh` adds, else one on `PATH`)
-and fails on any of six things:
+and fails on any of seven things:
 
 - a `call` or jump to one of `io.rs`'s functions from any function but the
   three that may make one (`disasm::IO_CALLERS`): the IOPort executor
   (`Objects`' `IoPorts::port_in` and `port_out`), `pic::init` and
   `arch::exit`, each found by the address range its symbol covers;
-- an address inside `io.rs`'s functions anywhere but as a direct call's or
-  jump's target: in an instruction that loads, compares, pushes or stores it
-  (a sign-extended 32-bit immediate or displacement, `movabs`, or the target
-  objdump prints for a rip-relative operand), or as eight bytes anywhere in
-  the kernel's data sections but `.rootimage`, the root task's ELF, which is
-  where a function pointer would sit;
+- a `call` or jump to the IOPort executor (`disasm::EXECUTOR`) from any
+  function but `disasm::EXECUTOR_CALLERS`, exactly
+  `l4core::ioport::invoke_port::<kernel::arch::x86_64::objects::Objects>`,
+  the IOPort invocation for the kernel's own objects;
+- an address inside `io.rs`'s functions or the executor's anywhere but as a
+  direct call's or jump's target: in an instruction that loads, compares,
+  pushes or stores it (a sign-extended 32-bit immediate or displacement,
+  `movabs`, or the target objdump prints for a rip-relative operand), or as
+  eight bytes anywhere in the kernel's data sections but `.rootimage`, the
+  root task's ELF, which is where a function pointer or a vtable entry would
+  sit;
 - an `in` or `out`, string forms included, outside `io.rs`'s functions (the
   address ranges their symbols cover);
 - an immediate in `0x3F8` to `0x3FF` moved into `dx`, `edx` or `rdx` (only a
@@ -4509,21 +4514,24 @@ and fails on any of six things:
 
 It also fails if the listing has fewer than 1,000 instructions, no `io.rs`
 function with an `in` and one with an `out`, no call to them from the three
-callers, or no data to scan, so a listing it misreads cannot pass by finding
-nothing. So that each `in` and `out` sits under an `io.rs` symbol, the six
-functions there (`inb`, `inw`, `inl`, `outb`, `outw`, `outl`) are
-`#[inline(never)]` and take the port as their first argument, which they move
-into `dx` themselves; so that each call sits under a caller's symbol, the
-three callers are `#[inline(never)]` too. A release kernel calls `io.rs` from
+callers, no call to the executor from `invoke_port`, or no data to scan, so a
+listing it misreads cannot pass by finding nothing. So that each `in` and
+`out` sits under an `io.rs` symbol, the six functions there (`inb`, `inw`,
+`inl`, `outb`, `outw`, `outl`) are `#[inline(never)]` and take the port as
+their first argument, which they move into `dx` themselves; so that each call
+sits under a caller's symbol, the three callers and `invoke_port` are
+`#[inline(never)]` too. A release kernel calls `io.rs` from
 those three places only: the IOPort invocations, `pic::init` at boot (ports
 `0x20`, `0x21`, `0xA0` and `0xA1`, when the MADT sets `PCAT_COMPAT`, as q35's
-does) and `arch::exit` (`isa-debug-exit`, after a panic). The first two rules
-hold whatever port UART code would compute: it needs `in` and `out`, which
-only `io.rs` has, so it would have to reach `io.rs` from one of those three
-functions, whose code a reviewer reads once. The port rules are a second line;
-alone they missed a port read from memory or computed from a base (the M7 red
-team's finding, `docs/redteam/m7-disasm-computed-port.md`, whose listing is
-now a host test that fails the call-site rule). The `release` scenario
+does) and `arch::exit` (`isa-debug-exit`, after a panic). The first three
+rules hold whatever port UART code would compute: it needs `in` and `out`,
+which only `io.rs` has, so it would have to reach `io.rs` from one of those
+three functions, whose code a reviewer reads once, and the executor only
+through the IOPort invocation, whose capability check it would have to pass.
+The port rules are a second line; alone they missed a port read from memory
+or computed from a base (the M7 red team's finding,
+`docs/redteam/m7-disasm-computed-port.md`, whose listing is now a host test
+that fails the call-site rule). The `release` scenario
 ([Scenarios](#scenarios)) boots that kernel: all output comes from `uart`, and
 root ends the run through an IOPort capability for `isa-debug-exit` (`0xF4`)
 made from IOPortControl, writing what `arch::exit` writes: `0x10` for success,
@@ -4534,11 +4542,26 @@ raise `UnknownSyscall` in root, which has no fault handler, and stop it
 silently until the 60-second limit. The test checks that fault itself, from
 another thread whose fault endpoint root holds.
 
+The executor cannot be called with a port of the caller's choosing in the
+first place. `port_in` and `port_out` take an `l4core::ioport::PortAccess`,
+the port and width `invoke_port` checked against the invoked capability's
+range; its fields and its constructor are private to `l4core::ioport`, so
+only `invoke_port` builds one, after those checks, and kernel code that calls
+the executor with a port of its own, `unsafe` or not, does not compile (two
+`compile_fail` doctests on `PortAccess` keep it so). Their SAFETY comments
+rest on that token. The token proves only what `invoke_port` read through its
+kernel's `load`, which is why the executor's caller rule names
+`invoke_port::<Objects>` exactly: a kernel type of its own, whose `load`
+returned a COM1 capability no slot holds, could otherwise run `invoke_port`
+and pass the token on (the re-check of the M7 fix round found the executor's
+callers unchecked: a writer calling `port_out` with COM1 passed; its listing
+is the host test `a_writer_through_the_ioport_executor_fails_the_check`).
+
 ### Invariants
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")` on `serial.rs`, `kprintln!`'s writer and `debug::print`, so release code naming them does not compile (every release build, and `cargo xtask clippy`'s release configuration); `cargo xtask test`'s disassembly check, `disasm::check` (`io.rs` called only from the IOPort executor, `pic::init` and `arch::exit`, its addresses in no other instruction and in no data, no `in` or `out` outside `io.rs`'s functions, no `0x3F8` to `0x3FF` moved into `dx`, none passed as `io.rs`'s port argument, no `serial` symbol), whose host tests in `xtask/src/disasm.rs` run each rule on listings and an ELF that break it, the M7 red team's computed-port writer among them; the `release` and `release_fault` scenarios, whose `next:` puts the root task's first line right after the loader's last, so a release kernel that prints anything at boot fails, and whose `forbid:` lines catch a debug kernel's banner, BootInfo summary, `DEBUG HALT` and panic lines | M7 |
+| A kernel built without `debug` contains no UART code and touches ports `0x3F8` to `0x3FF` only in IOPort invocations | `cfg(feature = "debug")` on `serial.rs`, `kprintln!`'s writer and `debug::print`, so release code naming them does not compile (every release build, and `cargo xtask clippy`'s release configuration); the IOPort executor's `PortAccess`, which only `l4core::ioport::invoke_port` builds, so kernel code outside `l4core` cannot call the executor with a port of its own (two `compile_fail` doctests); `cargo xtask test`'s disassembly check, `disasm::check` (`io.rs` called only from the IOPort executor, `pic::init` and `arch::exit`, the executor only from `invoke_port::<Objects>`, their addresses in no other instruction and in no data, no `in` or `out` outside `io.rs`'s functions, no `0x3F8` to `0x3FF` moved into `dx`, none passed as `io.rs`'s port argument, no `serial` symbol), whose host tests in `xtask/src/disasm.rs` run each rule on listings and an ELF that break it, the M7 red team's computed-port writer and the fix-round re-check's writer through the executor among them; the `release` and `release_fault` scenarios, whose `next:` puts the root task's first line right after the loader's last, so a release kernel that prints anything at boot fails, and whose `forbid:` lines catch a debug kernel's banner, BootInfo summary, `DEBUG HALT` and panic lines | M7 |
 | Without `debug`, numbers 16 to 31 raise `UnknownSyscall` | `Syscall::from_number(_, false)`; host test `debug_numbers_need_a_debug_kernel`; the `release` scenario, whose root test (`user/root/src/release.rs`) has a probe thread make `DebugPutChar`, `DebugHalt`, `DebugDumpScheduler` and numbers 19 and 31, and takes each `UnknownSyscall` on endpoint D with the number in MR18 (`root::check::console`, host test `the_probes_faults_are_answered_two_bytes_on`) | M5, M7 |
 | `DebugPutChar` and `DebugDumpScheduler` change no register a thread can rely on | `l4core::syscall` returns them without writing a register, and `dispatch` writes none; host test `debug_system_calls_go_back_to_the_kernel` | M5 |
 | Debug system calls read no user memory and take no capability | `dispatch::debug_call` uses only `rdi`'s value and kernel state; review | M5 |
@@ -4919,7 +4942,7 @@ or typed bytes.
 | `Read` by `c` with none | `c`'s held bytes become its prompt; if `c` has focus, showing its input line | input of `c`, if focused |
 | A printable byte, BS, DEL or Ctrl-U typed for the focused client `f` | showing `f`'s input line, unless the owner is input of `f`; then the byte's echo ([Input](#input)) | input of `f` |
 | Enter (CR, or LF not after CR) | as a printable byte; the line answers `f`'s saved `Read`, which clears `f`'s prompt, or joins `f`'s waiting lines | none |
-| Ctrl-T and a digit `n` | `\r\n` unless the owner is none; `[console] focus n (name)\r\n`, or `client n` before it has attached; then restoring | none, or input of `n` |
+| Ctrl-T and a digit `n` | `\r\n` unless the owner is none; the status line `[console] focus n (name)`, or `client n` before it has attached, in reverse video (`ESC [7m` before it, `ESC [0m` after), and `\r\n`; then restoring | none, or input of `n` |
 | Any other typed byte: Ctrl-T itself and a non-digit after it, an LF after CR, ESC and what it skips, a dropped byte | nothing; the input line is not redrawn | unchanged |
 
 So a line of at most 512 bytes that its client does not flush midway reaches
@@ -4942,8 +4965,10 @@ ends each of its lines is console's own. Sent as they were, a client's ESC and
 CSI sequences would move a VT100 terminal's cursor up into other lines, erase
 console's focus status line and forge one. M8's raw mode (label `0x125`,
 `BadLabel` until then) is where `term`'s escape sequences would pass as they
-are; M7 does not build it. A client can still print text that looks like a
-status line, but only on a line of its own, below the real one.
+are; M7 does not build it. A client can still print text that reads like a
+status line, but only on a line of its own, below the real one, and in plain
+text: console's own status lines are in reverse video (`console::STATUS_ON`
+and `STATUS_OFF`), which a client, whose ESC shows as `^[`, cannot ask for.
 
 #### Input
 
@@ -5051,7 +5076,7 @@ without them runs exactly as before.
 | `send: <text>` | writes `<text>` to QEMU's standard input, COM1's receive side, once every `expect:` above it has matched; consecutive `send:` lines go together, in order. Escapes: `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`; a `\` before anything else is an error. As for every value, the ends are trimmed and ` #` starts a comment, so a space or `#` there is `\x20` or `\x23`. A scenario's `send:` lines total at most 4 KiB once unescaped (a parse error otherwise), far below a pipe's 64 KiB, so the blocking write to QEMU's stdin never waits past the timeout on a guest that has stopped reading |
 | `kernel: release` | boots the kernel built without features (no `debug`, no `selftest`), in the run's profile; `kernel: selftest` is the default |
 | `forbid: <text>` | no line of the transcript may contain `<text>`; checked as each line arrives and reported when the run ends, naming the first such line |
-| `next: <text>` | right after an `expect:` or another `next:` (a parse error otherwise): the serial line right after the one that step matched must start with `<text>`, so no line came between them; any other line there fails the scenario, naming it, and nothing after it matches. `release` and `release_fault` put the root task's first line next after the loader's `entering kernel`, so a release kernel that prints anything at boot fails them, whatever it prints |
+| `next: <text>` | right after an `expect:` or another `next:` (a parse error otherwise): the serial line right after the one that step matched must start with `<text>`, so no line came between them; any other line there fails the scenario, naming it, and ends the boot at once, since nothing after it can match. `release` and `release_fault` put the root task's first line next after the loader's `entering kernel`, so a release kernel that prints anything at boot fails them, whatever it prints |
 | `exit: timeout` | beside `success` and `failure`: the guest must still be running when the scenario's `timeout:`, which it then needs, ends the boot, with every `expect:` matched. For a kernel with no exit of its own; no scenario uses it now that `release` ends through `isa-debug-exit` |
 
 **Timing.** A `send:` must have an `expect:` above it (a parse error
@@ -5199,7 +5224,7 @@ release kernel.
 | Every byte queued for transmit is sent once and in order; every byte received, unless overrun, reaches console once and in order | host tests `random_interleavings_lose_nothing_and_never_strand_uart` (every byte console wrote on the wire once and in order, the kernel's beside them; every byte the host sent received, or with overruns the survivors in order), `a_write_that_does_not_fit_is_held_and_released_in_order` and `a_full_ring_stops_and_resumes_reception`; the `console` and `release` scenarios, where uart's `Stats` count exactly the 60 and 14 bytes the harness sent (`root::check::console`, host test `uarts_totals`) | M7 |
 | Whenever uart waits, IER.THRI is set exactly while the transmit queue holds bytes or a Drain is held, and IER's data bit is clear only while the receive ring is full | `Uart::wanted_ier`; `random_interleavings_lose_nothing_and_never_strand_uart` compares the model's IER with it each time uart waits; host tests `a_drain_is_answered_only_when_the_queue_and_fifo_are_empty` and `a_full_ring_stops_and_resumes_reception` | M7 |
 | console emits each client's bytes once and in order, `\n` as `\r\n` and every byte but printable ASCII and tab as its visible escape; a line of at most 512 bytes that its client does not flush midway reaches the wire with no other byte from console inside it | `Terminal::write`, `flush` and `read`, through `put_shown` (`console::shown`); the proptest `eight_clients_against_a_model_of_their_lines` (512 cases of up to 120 operations), which checks each client's bytes on the terminal against the model's, its own rendering of the escapes, and that each whole line's bytes are consecutive; goldens `a_write_that_completes_lines_sends_them_whole`, `a_break_comes_only_after_another_clients_line`, `held_bytes_go_out_at_512` and `a_clients_control_bytes_are_shown_not_sent`; the `console` scenario's interleaved and burst parts | M7 |
-| No client can move the terminal's cursor out of its own line: none can erase or overwrite console's status line or another client's line | the escapes above, on a client's output, prompt and `Attach` name alike; the proptest, which fails any byte of a client's output or prompt that reaches the terminal as a control byte but tab and the CR LF that ends its line; the M7 red team's tests (`user/console/src/tests/redteam.rs`, `docs/redteam/m7-console-escapes.md`), which run its cursor-up and erase attack over a VT100 screen model and find console's status line kept. A client can still print text that looks like a status line, on a line of its own | M7 |
+| No client can move the terminal's cursor out of its own line: none can erase or overwrite console's status line or another client's line | the escapes above, on a client's output, prompt and `Attach` name alike; the proptest, which fails any byte of a client's output or prompt that reaches the terminal as a control byte but tab and the CR LF that ends its line; the M7 red team's tests (`user/console/src/tests/redteam.rs`, `docs/redteam/m7-console-escapes.md`), which run its cursor-up and erase attack over a VT100 screen model and find console's status line kept. A client can still print text that reads like a status line, on a line of its own, but not in reverse video, which console's status lines alone have: the red team's guarantee test finds a client's look-alikes, with escapes and without, plain on the screen model | M7 |
 | Each typed line reaches exactly one client, the one focused while its bytes were read, as edited; echo, status and redrawn lines reach no client | `Terminal::input` routes each byte by the focus when it is read, and only Enter hands a line to a client; the proptest, which compares every line a typed byte completes, and its client, with the model's; goldens for every row of the input table and `the_scenarios_input_reaches_the_right_clients`; the `console` scenario, where root checks each client's lines (`root::check::console`, host test `each_client_reads_its_line_and_nothing_else`) and its drain finds no line left for root, `a` or `b` (host test `a_drain_read_answered_is_something_more`) | M7 |
 | Every `Read` is answered at most once, and exactly once if its client survives and a line is typed for it | an Enter answers a saved `Read` once and clears it, and `CNode_SaveCaller` refuses a second save, which console answers with `Busy`; the proptest, which compares every `Read`'s answer (a line, saved, or `Busy`) with the model's; golden `enter_answers_the_saved_read_or_joins_the_waiting_lines` | M7 |
 | console never blocks on a client; it blocks only in calls to uart, which always reply | `console::run` (`user/console/src/run.rs`) answers clients only by `ReplyRecv` or by `Send` on a saved reply capability, and calls only uart, whose requests always get a reply (a held one later); review | M7 |
