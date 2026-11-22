@@ -5,7 +5,7 @@
 //! bytes against a model of their lines.
 
 use std::collections::VecDeque;
-use std::string::{String, ToString};
+use std::string::String;
 use std::vec::Vec;
 use std::{format, vec};
 
@@ -85,6 +85,24 @@ impl T {
         }
         self.rec.take()
     }
+}
+
+/// console's status line `text` as it reaches the terminal: in reverse
+/// video, then `\r\n`.
+fn status(text: &str) -> String {
+    format!("\x1b[7m{text}\x1b[0m\r\n")
+}
+
+/// The status line's marks are console's own bytes, around the text.
+#[test]
+fn a_status_line_is_console_s_own_in_reverse_video() {
+    assert_eq!((STATUS_ON, STATUS_OFF), (&b"\x1b[7m"[..], &b"\x1b[0m"[..]));
+    let mut t = T::new();
+    t.term.attach(2, b"cee");
+    assert_eq!(t.term.input(0x14, &mut t.rec, &mut t.line), None);
+    assert_eq!(t.term.input(b'3', &mut t.rec, &mut t.line), None);
+    assert!(t.rec.0.iter().all(|&(from, _)| from == Source::Console));
+    assert_eq!(t.rec.take(), status("[console] focus 3 (cee)"));
 }
 
 // The event table.
@@ -176,7 +194,10 @@ fn a_clients_control_bytes_are_shown_not_sent() {
     assert_eq!(t.read(0), (ReadAnswer::Saved, None, "\r\n^[[1A> ".into()));
     // A name, in a status line.
     t.term.attach(3, b"\x1b[2Kx\x9b");
-    assert_eq!(t.typed(b"\x144"), "\r\n[console] focus 4 (^[[2Kx\\x9b)\r\n");
+    assert_eq!(
+        t.typed(b"\x144"),
+        format!("\r\n{}", status("[console] focus 4 (^[[2Kx\\x9b)"))
+    );
     // Every byte's form.
     for b in 0..=255u8 {
         let (e, n) = shown(b);
@@ -275,20 +296,26 @@ fn enter_answers_the_saved_read_or_joins_the_waiting_lines() {
 fn ctrl_t_and_a_digit_moves_the_focus() {
     let mut t = T::new();
     t.term.attach(1, b"bee");
-    assert_eq!(t.typed(b"\x142"), "[console] focus 2 (bee)\r\n");
+    assert_eq!(t.typed(b"\x142"), status("[console] focus 2 (bee)"));
     assert_eq!(t.term.focus(), 1);
     // Before it has attached; from the middle of an input line.
     t.typed(b"half");
-    assert_eq!(t.typed(b"\x147"), "\r\n[console] focus 7 (client 7)\r\n");
+    assert_eq!(
+        t.typed(b"\x147"),
+        format!("\r\n{}", status("[console] focus 7 (client 7)"))
+    );
     // Back: the half-typed line is where it was, and is restored.
-    assert_eq!(t.typed(b"\x142"), "[console] focus 2 (bee)\r\nhalf");
+    assert_eq!(
+        t.typed(b"\x142"),
+        format!("{}half", status("[console] focus 2 (bee)"))
+    );
     assert_eq!(t.term.owner(), Owner::Input(1));
     // A reading client's prompt comes back with its line.
     t.write(5, "six> ");
     t.read(5);
     assert_eq!(
         t.typed(b"\x146"),
-        "\r\n[console] focus 6 (client 6)\r\nsix> "
+        format!("\r\n{}six> ", status("[console] focus 6 (client 6)"))
     );
 }
 
@@ -407,9 +434,10 @@ fn the_scenarios_input_reaches_the_right_clients() {
             assert_eq!(
                 shown,
                 [
-                    "[console] focus 3 (b)\r\nb> to b\r\n".to_string(),
+                    format!("{}b> to b\r\n", status("[console] focus 3 (b)")),
                     format!(
-                        "[console] focus 2 (a)\r\na> hellp\x08 \x08o{}hi a\r\n",
+                        "{}a> hellp\x08 \x08o{}hi a\r\n",
+                        status("[console] focus 2 (a)"),
                         "\x08 \x08".repeat(5)
                     ),
                 ]
@@ -420,9 +448,10 @@ fn the_scenarios_input_reaches_the_right_clients() {
             assert_eq!(
                 shown,
                 [
-                    "[console] focus 3 (b)\r\nto b\r\n".to_string(),
+                    format!("{}to b\r\n", status("[console] focus 3 (b)")),
                     format!(
-                        "[console] focus 2 (a)\r\nhellp\x08 \x08o{}hi a\r\n",
+                        "{}hellp\x08 \x08o{}hi a\r\n",
+                        status("[console] focus 2 (a)"),
                         "\x08 \x08".repeat(5)
                     ),
                 ]

@@ -36,8 +36,8 @@ use libsys::proto::{self, MAX_BYTES, Refusal, label};
 #[cfg(target_os = "none")]
 pub use run::run;
 pub use terminal::{
-    CLIENTS, Chunks, EDIT, LINE, NAME, Out, Owner, ReadAnswer, Source, Terminal, WAITING, passes,
-    shown,
+    CLIENTS, Chunks, EDIT, LINE, NAME, Out, Owner, ReadAnswer, STATUS_OFF, STATUS_ON, Source,
+    Terminal, WAITING, passes, shown,
 };
 
 /// console's CSpace: a 16-slot CNode with guard 0 of size 60, so `CPtr`
