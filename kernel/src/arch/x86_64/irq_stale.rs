@@ -4,7 +4,11 @@
 //! kernel toggles the trigger.
 //!
 //! The HPET's last comparator raises a level-triggered interrupt on an I/O
-//! APIC input it can drive, programmed with vector `0xEF`. Once the local
+//! APIC input it can drive, programmed with vector `0xEF`. The HPET names
+//! its inputs by number, and the test takes input `n` to be GSI `n`, on an
+//! I/O APIC whose GSI base is 0, as on q35, whose one I/O APIC serves GSIs
+//! 0 to 23. An input only an I/O APIC with another base serves is not
+//! used, and with none left the test fails rather than guess. Once the local
 //! APIC holds that vector, Remote IRR is set; the test rewrites the entry
 //! masked with vector `0xEE` before any EOI and lowers the line, so no EOI
 //! can clear it: a delivery whose EOI never came, as the firmware can leave
@@ -63,13 +67,17 @@ pub fn test_irq_stale(root: &RootSpace, bi: &BootInfo) -> ! {
     let mut k = Objects::begin();
     let routing = *k.routing();
     let cap = src.route_cap();
+    // Input `g` is GSI `g` only on an I/O APIC with GSI base 0.
     let Some((gsi, pin, io)) = (0..32u32)
         .rev()
         .filter(|i| cap >> i & 1 == 1)
-        .find_map(|g| routing.pin(g.into()).map(|(p, io)| (g, p, io)))
+        .find_map(|g| {
+            let (p, io) = routing.pin(g.into()).filter(|(_, io)| io.gsi_base == 0)?;
+            Some((g, p, io))
+        })
     else {
         fail(format_args!(
-            "HPET comparator {} reaches no I/O APIC input (route capability {cap:#x})",
+            "HPET comparator {} reaches no input of an I/O APIC with GSI base 0 (route capability {cap:#x})",
             src.comparator()
         ))
     };

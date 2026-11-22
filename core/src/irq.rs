@@ -153,12 +153,14 @@ impl Routing {
 
     /// The routes of a parsed `platform`, given each I/O APIC's pin count
     /// and version as the kernel read them, in MADT order. An I/O APIC
-    /// without both, or with no pins, serves nothing.
+    /// without both, with no pins, or whose last GSI would pass
+    /// `u32::MAX` (bad firmware: a GSI is 32 bits), serves nothing.
     pub fn from_platform(platform: &Platform, pins: &[u16], versions: &[u8]) -> Routing {
         let mut r = Routing::NONE;
         for (i, io) in platform.ioapics.iter().enumerate().take(MAX_IOAPICS) {
             if let (Some(&pins), Some(&version)) = (pins.get(i), versions.get(i))
                 && pins > 0
+                && u64::from(io.gsi_base) + u64::from(pins) <= 1 << 32
             {
                 r.ioapics[i] = Some(IoApicDesc {
                     gsi_base: io.gsi_base,
@@ -184,12 +186,6 @@ impl Routing {
             };
             Some((pin, io))
         })
-    }
-
-    /// The I/O APIC an action's pin names; panics for one there is none of,
-    /// which only an issued pin's action can name.
-    pub fn ioapic(&self, pin: Pin) -> IoApicDesc {
-        self.ioapics[pin.ioapic as usize].expect("an issued pin's I/O APIC")
     }
 }
 
@@ -488,11 +484,13 @@ pub fn invoke_control<K: Kernel + Threads + Interrupts + ?Sized>(
                 .routing()
                 .pin(gsi)
                 .ok_or(SyscallError::InvalidArgument(0))?;
+            // Every GSI an I/O APIC serves fits (`Routing::from_platform`).
+            let gsi = u32::try_from(gsi).map_err(|_| SyscallError::InvalidArgument(0))?;
             if trigger > 1 || polarity > 1 {
                 return Err(SyscallError::RangeError { min: 0, max: 1 }.into());
             }
             let route = IsaRoute {
-                gsi: gsi as u32,
+                gsi,
                 level: trigger == 1,
                 active_low: polarity == 1,
             };

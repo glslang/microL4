@@ -352,8 +352,11 @@ impl SlotMemory for Objects {
 
     fn store(&mut self, at: SlotAddr, slot: Slot) {
         self.check_slot(at);
-        // SAFETY: as in `load`. The slot is outside the kernel image, or one
-        // of `IRQ_NODE`'s, so the write changes no kernel code and no other
+        // SAFETY: as in `load`. The slot is outside the kernel image; or
+        // in `.rootimage`'s pages, which lie in the image but which boot
+        // step 8 unmapped from the kernel window and RAM untyped now cover
+        // ([`reclaim`]), and which the kernel never reads again; or one of
+        // `IRQ_NODE`'s. So the write changes no kernel code and no other
         // static data, and nothing holds a reference to it.
         unsafe { ptr::write(phys_to_virt(at.get()) as *mut [u64; 4], slot.to_words()) };
     }
@@ -919,7 +922,8 @@ impl Objects {
             "fill outside object RAM"
         );
         // SAFETY: the range is RAM below the direct map's end, outside the
-        // kernel image (checked above), mapped RW. No Rust reference to it
+        // kernel image or in `.rootimage`'s reclaimed pages (checked above;
+        // see `store`), mapped RW. No Rust reference to it
         // exists: only this type reaches object memory, by value. That it
         // holds no slot, so that `core`'s state stays sound, is the
         // caller's word (above).

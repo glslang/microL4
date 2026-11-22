@@ -18,10 +18,12 @@ use super::StaticCell;
 /// COM1's ISA IRQ on both platforms.
 const COM1_IRQ: u8 = 4;
 
-/// I/O APIC `index`'s registers, at `base` in the device window.
+/// I/O APIC `index`'s registers, at `base` in the device window, and its
+/// version, which says whether it has the EOI register.
 #[derive(Clone, Copy)]
 struct IoApic {
     base: u64,
+    version: IoApicVersion,
 }
 
 /// Each I/O APIC in MADT order, as step 5 found it: its registers in the
@@ -34,31 +36,30 @@ struct IoApics {
 static IOAPICS: StaticCell<IoApics> = StaticCell::new();
 
 impl IoApic {
-    /// I/O APIC `index`'s 32-bit register block, `0x20` bytes, or `0x44`
-    /// from version `0x20`, which must lie in the one page the window maps
-    /// for it: past it is another device's page.
+    /// I/O APIC `index`, its registers at `phys`, and its version, read
+    /// from its version register. Its 32-bit register block, `0x20` bytes,
+    /// or `0x44` from version `0x20`, must lie in the one page the window
+    /// maps for it: past it is another device's page. The `0x20` bytes are
+    /// checked before the version is read, the block of that version once
+    /// it is known.
     fn new(index: usize, phys: u64) -> Self {
-        let io = IoApic {
+        check_block(phys, 0x20);
+        let mut io = IoApic {
             base: DeviceWindow::virt(ioapic_page(index)) + (phys & 0xFFF),
+            version: IoApicVersion(0),
         };
-        io.check_block(phys, 0x20);
+        io.version = IoApicVersion(io.read(a::IOAPIC_VERSION));
+        check_block(phys, a::ioapic_block(io.version.version()));
         io
-    }
-
-    fn check_block(&self, phys: u64, len: u32) {
-        assert!(
-            phys & 0xFFF <= 0x1000 - u64::from(len),
-            "ioapic: registers at {phys:#x} ({len:#x} bytes) cross a page"
-        );
     }
 
     /// Reads indirect register `reg`.
     fn read(&self, reg: u32) -> u32 {
         // SAFETY: `paging::init` mapped this I/O APIC's page UC, RW in the
         // device window, and its register select and window are 32-bit
-        // registers at offsets 0 and 0x10 of its block, which `new` checked
-        // lies in that page. Selecting and reading a register touches no
-        // memory.
+        // registers at offsets 0 and 0x10 of its block, whose first 0x20
+        // bytes `new` checked lie in that page before its first read.
+        // Selecting and reading a register touches no memory.
         unsafe {
             ptr::write_volatile((self.base + u64::from(a::IOREGSEL)) as *mut u32, reg);
             ptr::read_volatile((self.base + u64::from(a::IOWIN)) as *const u32)
@@ -67,10 +68,14 @@ impl IoApic {
 
     /// Writes indirect register `reg`.
     fn write(&self, reg: u32, value: u32) {
-        // SAFETY: as in `read`. The callers write only redirection entries:
-        // a mask bit at boot, and from M7 the entries `l4core::irq`'s
-        // actions give, whose delivery mode is always fixed, so no write
-        // sends an NMI, SMI or INIT.
+        // SAFETY: as in `read`. The callers write only redirection entries,
+        // and none sends an NMI, SMI or INIT: step 5 sets the mask bit of
+        // the entry it read; `MaskRte` and `ClearRemoteIrr` write back the
+        // entry as read, mask set, so a delivery mode the firmware left
+        // stays but cannot fire; `UnmaskRte` follows `ProgramRte` on an
+        // issued pin, so it unmasks the fixed delivery mode `ProgramRte`
+        // wrote; and `ProgramRte` writes fixed delivery mode. With
+        // `selftest`, `write_low` writes what `test=irq_stale` gives.
         unsafe {
             ptr::write_volatile((self.base + u64::from(a::IOREGSEL)) as *mut u32, reg);
             ptr::write_volatile((self.base + u64::from(a::IOWIN)) as *mut u32, value);
@@ -78,15 +83,30 @@ impl IoApic {
     }
 
     /// Writes `vector` to the EOI register, which version `0x20` and later
-    /// have; `init` checked that their block, the EOI register included,
-    /// lies in the window page.
-    fn eoi(&self, vector: u32) {
-        // SAFETY: as in `read`: the 32-bit EOI register at offset 0x40 lies
-        // in the mapped page (`init` checked the 0x44-byte block of an I/O
-        // APIC of this version). Writing a vector there only clears Remote
-        // IRR in the level entries that name it.
-        unsafe { ptr::write_volatile((self.base + u64::from(a::IOAPIC_EOI)) as *mut u32, vector) }
+    /// have. An older I/O APIC has none: then it writes nothing and
+    /// returns false (Remote IRR stays set, and the issue that asked for
+    /// the write reads it set again and refuses with `RevokeFirst`).
+    fn eoi(&self, vector: u32) -> bool {
+        if self.version.version() < a::IOAPIC_EOI_VERSION {
+            return false;
+        }
+        // SAFETY: as in `read`. This I/O APIC's version is `0x20` or
+        // later, so its block is the 0x44 bytes `new` checked lie in the
+        // mapped page, and the 32-bit EOI register at offset 0x40 is in
+        // it. Writing a vector there only clears Remote IRR in the level
+        // entries that name it.
+        unsafe { ptr::write_volatile((self.base + u64::from(a::IOAPIC_EOI)) as *mut u32, vector) };
+        true
     }
+}
+
+/// Asserts that an I/O APIC's register block, `len` bytes at `phys`, lies
+/// in the one page the window maps for it.
+fn check_block(phys: u64, len: u32) {
+    assert!(
+        phys & 0xFFF <= 0x1000 - u64::from(len),
+        "ioapic: registers at {phys:#x} ({len:#x} bytes) cross a page"
+    );
 }
 
 /// What step 5 found of the I/O APICs: each one's pin count and version,
@@ -108,8 +128,7 @@ pub fn init(p: &Platform, apic_id: u8) -> Found {
     let mut ioapics = [None; MAX_IOAPICS];
     for (i, io) in p.ioapics.iter().enumerate() {
         let ioapic = IoApic::new(i, io.address);
-        let version = IoApicVersion(ioapic.read(a::IOAPIC_VERSION));
-        ioapic.check_block(io.address, a::ioapic_block(version.version()));
+        let version = ioapic.version;
         let id = ioapic.read(a::IOAPIC_ID) >> 24 & 0xF;
         found.pins[i] = version.pins();
         found.versions[i] = version.version();
@@ -164,7 +183,12 @@ pub fn perform(action: Action) -> bool {
         match w {
             RteWrite::Low(v) => io.write(reg, v),
             RteWrite::High(v) => io.write(a::redirection_high(pin.pin), v),
-            RteWrite::Eoi(v) => io.eoi(v),
+            // core asks for it only of version 0x20 and later; were it to
+            // ask of an older one, nothing is written and the issue's next
+            // `CheckRemoteIrr` refuses it.
+            RteWrite::Eoi(v) => {
+                io.eoi(v);
+            }
         }
     }
     false

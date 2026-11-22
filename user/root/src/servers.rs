@@ -413,9 +413,12 @@ fn fill_page(ipc: Ipc, frame: CPtr, addr: u64, scratch: u64) {
     vspace::frame_map(ipc, frame, scratch, READ_WRITE, WRITE_BACK, CAP_INIT_VSPACE)
         .unwrap_or_else(|e| fail!("servers: mapping a data frame at {scratch:#x}: {e}"));
     // SAFETY: `addr` is a page of the root task's own `.data` and `.bss`,
-    // mapped readable in this VSpace, and only this thread runs while the
-    // servers are built; `scratch` is a page nothing else maps, where the
-    // fresh frame was just mapped read-write. The pages do not overlap.
+    // mapped readable in this VSpace, and no thread writes it while the
+    // servers are built: watch, the one other thread in this VSpace yet,
+    // waits in its first Recv on F, which writes nothing but its
+    // registers, and uart and console run in VSpaces of their own.
+    // `scratch` is a page nothing else maps, where the fresh frame was
+    // just mapped read-write. The pages do not overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(addr as *const u8, scratch as *mut u8, PAGE as usize);
     }
