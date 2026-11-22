@@ -2,6 +2,13 @@
 //! current line, line editing and focus (`docs/design.md`, "Output" and
 //! "Input" under "console"). Pure: every event writes what the terminal
 //! must show to an [`Out`], and the run loop sends that to uart.
+//!
+//! A client's bytes reach the terminal shown, not obeyed ([`shown`]):
+//! printable ASCII and tab as they are, every other byte as a visible
+//! escape, so no client can move the cursor out of its own line to
+//! overwrite another client's or console's status line
+//! (`docs/redteam/m7-console-escapes.md`). M8's raw mode (label `0x125`,
+//! reserved until then) is where a client's bytes would pass as they are.
 
 use libsys::proto::MAX_BYTES;
 
@@ -27,9 +34,46 @@ const ESC: u8 = 0x1B;
 const DEL: u8 = 0x7F;
 const RUBOUT: &[u8] = b"\x08 \x08";
 
+/// Whether a client's byte reaches the terminal as it is: printable ASCII
+/// and tab, which moves the cursor only forward along its line.
+pub const fn passes(b: u8) -> bool {
+    matches!(b, 0x20..=0x7E | b'\t')
+}
+
+/// How the terminal shows a client's byte that does not [`pass`](passes),
+/// and the escape's length: caret notation for the C0 controls and DEL
+/// (`^[` for ESC, `^M` for CR, `^?` for DEL), `\xNN` from `0x80` up, C1
+/// controls included.
+pub const fn shown(b: u8) -> ([u8; 4], usize) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    match b {
+        0x00..=0x1F | 0x7F => ([b'^', b ^ 0x40, 0, 0], 2),
+        _ => (
+            [b'\\', b'x', HEX[(b >> 4) as usize], HEX[(b & 0xF) as usize]],
+            4,
+        ),
+    }
+}
+
+/// Puts a client's `bytes` on the terminal as [`shown`] says, as `from`.
+fn put_shown(out: &mut impl Out, from: Source, mut bytes: &[u8]) {
+    while let Some(i) = bytes.iter().position(|&b| !passes(b)) {
+        if i > 0 {
+            out.put(from, &bytes[..i]);
+        }
+        let (esc, n) = shown(bytes[i]);
+        out.put(from, &esc[..n]);
+        bytes = &bytes[i + 1..];
+    }
+    if !bytes.is_empty() {
+        out.put(from, bytes);
+    }
+}
+
 /// Where bytes on the terminal come from. Only `Client` bytes are a
-/// client's output, each exactly once; the rest is the terminal's own:
-/// prompts shown (possibly again), echo, breaks and status lines.
+/// client's output, each exactly once, [`shown`]; the rest is the
+/// terminal's own: prompts shown (possibly again, also [`shown`]), echo,
+/// breaks and status lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Client(usize),
@@ -166,8 +210,8 @@ impl Terminal {
         &self.clients[c].edit[..self.clients[c].edit_len]
     }
 
-    /// `Attach`: client `c`'s name in status lines; at most [`NAME`]
-    /// bytes, which the decoder checked.
+    /// `Attach`: client `c`'s name in status lines, [`shown`]; at most
+    /// [`NAME`] bytes, which the decoder checked.
     pub fn attach(&mut self, c: usize, name: &[u8]) {
         let cl = &mut self.clients[c];
         let n = name.len().min(NAME);
@@ -192,7 +236,7 @@ impl Terminal {
             out.put(Source::Console, b"\r\n");
         }
         let cl = &self.clients[f];
-        out.put(Source::Prompt(f), &cl.prompt[..cl.prompt_len]);
+        put_shown(out, Source::Prompt(f), &cl.prompt[..cl.prompt_len]);
         out.put(Source::Console, &cl.edit[..cl.edit_len]);
         self.owner = Owner::Input(f);
     }
@@ -207,25 +251,25 @@ impl Terminal {
         }
     }
 
-    /// Client `c`'s held bytes go to the terminal as they are, after a
+    /// Client `c`'s held bytes go to the terminal, [`shown`], after a
     /// break.
     fn emit_held(&mut self, c: usize, out: &mut impl Out) {
         self.brk(c, out);
         let cl = &mut self.clients[c];
-        out.put(Source::Client(c), &cl.held[..cl.held_len]);
+        put_shown(out, Source::Client(c), &cl.held[..cl.held_len]);
         cl.held_len = 0;
         self.owner = Owner::Output(c);
     }
 
-    /// `Write` by client `c`: each completed line goes out after a break
-    /// with `\n` as `\r\n`; 512 held bytes with no `\n` go out as they are;
-    /// then the focused client's input line is restored.
+    /// `Write` by client `c`: each completed line goes out after a break,
+    /// [`shown`], with `\n` as `\r\n`; 512 held bytes with no `\n` go out
+    /// [`shown`] too; then the focused client's input line is restored.
     pub fn write(&mut self, c: usize, bytes: &[u8], out: &mut impl Out) {
         for &b in bytes {
             if b == LF {
                 self.brk(c, out);
                 let cl = &mut self.clients[c];
-                out.put(Source::Client(c), &cl.held[..cl.held_len]);
+                put_shown(out, Source::Client(c), &cl.held[..cl.held_len]);
                 out.put(Source::Client(c), b"\r\n");
                 cl.held_len = 0;
                 self.owner = Owner::None;
@@ -412,7 +456,7 @@ impl Terminal {
         out.put(Source::Console, b" (");
         let cl = &self.clients[n];
         if cl.attached {
-            out.put(Source::Console, &cl.name[..cl.name_len]);
+            put_shown(out, Source::Console, &cl.name[..cl.name_len]);
         } else {
             out.put(Source::Console, b"client ");
             out.put(Source::Console, &[b'1' + n as u8]);

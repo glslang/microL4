@@ -1,7 +1,8 @@
 //! The terminal's rules (`docs/design.md`, "Output" and "Input"): golden
-//! byte transcripts for every row of the event and input tables, the
-//! `console` scenario's input, and a proptest of eight clients' random
-//! writes, flushes, reads and typed bytes against a model of their lines.
+//! byte transcripts for every row of the event and input tables, how a
+//! client's control bytes are shown, the `console` scenario's input, and a
+//! proptest of eight clients' random writes, flushes, reads and typed
+//! bytes against a model of their lines.
 
 use std::collections::VecDeque;
 use std::string::{String, ToString};
@@ -150,6 +151,45 @@ fn held_bytes_go_out_at_512() {
     let mut s: String = "y".repeat(512);
     s.push('\n');
     assert_eq!(t.write(0, &s), format!("{}\r\n", "y".repeat(512)));
+}
+
+#[test]
+fn a_clients_control_bytes_are_shown_not_sent() {
+    let mut t = T::new();
+    // Tab and printable ASCII pass; C0, DEL and everything from 0x80 up
+    // are shown.
+    assert_eq!(
+        t.write(0, "a\tb\x1b[2Jc\rd\x08e\x7f\x00\x1f\n"),
+        "a\tb^[[2Jc^Md^He^?^@^_\r\n"
+    );
+    t.term.write(0, b"\x80\x9b\xc3\xa9\xff\n", &mut t.rec);
+    assert_eq!(t.rec.take(), "\\x80\\x9b\\xc3\\xa9\\xff\r\n");
+    // Held bytes flushed, and 512 of them at once.
+    t.write(1, "\x1b[H");
+    assert_eq!(t.flush(1), "^[[H");
+    assert_eq!(
+        t.write(2, &"\x01".repeat(512)),
+        format!("\r\n{}", "^A".repeat(512))
+    );
+    // A prompt, when its Read shows it.
+    t.write(0, "\x1b[1A> ");
+    assert_eq!(t.read(0), (ReadAnswer::Saved, None, "\r\n^[[1A> ".into()));
+    // A name, in a status line.
+    t.term.attach(3, b"\x1b[2Kx\x9b");
+    assert_eq!(t.typed(b"\x144"), "\r\n[console] focus 4 (^[[2Kx\\x9b)\r\n");
+    // Every byte's form.
+    for b in 0..=255u8 {
+        let (e, n) = shown(b);
+        let want = match b {
+            0x00..=0x1F | 0x7F => format!("^{}", char::from(b ^ 0x40)),
+            _ => format!("\\x{b:02x}"),
+        };
+        if !passes(b) {
+            assert_eq!(&e[..n], want.as_bytes(), "{b:#x}");
+            assert!(e[..n].iter().all(|&c| passes(c) && c != b'\t'));
+        }
+        assert_eq!(passes(b), b == b'\t' || (0x20..=0x7E).contains(&b));
+    }
 }
 
 #[test]
@@ -487,6 +527,11 @@ fn op() -> impl Strategy<Value = Op> {
         2 => Just(b' '),
         3 => Just(b'\n'),
         1 => Just(b'\r'),
+        1 => Just(b'\t'),
+        1 => Just(0x1Bu8),
+        1 => Just(0x08u8),
+        1 => Just(0x7Fu8),
+        1 => any::<u8>(),
     ];
     let typed_byte = prop_oneof![
         10 => b'a'..=b'z',
@@ -510,6 +555,19 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
+/// How the terminal must show a client's bytes: tab and printable ASCII
+/// as they are, C0 controls and DEL in caret notation, the rest as `\xNN`.
+fn shown_model(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .flat_map(|&b| match b {
+            b'\t' | b' '..=b'~' => vec![b],
+            0..=0x1F | 0x7F => vec![b'^', b ^ 0x40],
+            _ => format!("\\x{b:02x}").into_bytes(),
+        })
+        .collect()
+}
+
 /// The model: what each client's output must be, which of its lines must
 /// reach the terminal whole, and where each typed line goes.
 #[derive(Default)]
@@ -520,7 +578,8 @@ struct Model {
     /// went out early.
     clean: [bool; CLIENTS],
     /// Per client: its output as the terminal must show it, `\n` as
-    /// `\r\n`, and the ranges of that which are whole lines.
+    /// `\r\n` and other bytes as [`shown_model`] says, and the ranges of
+    /// that which are whole lines.
     shown: [Vec<u8>; CLIENTS],
     whole: [Vec<(usize, usize)>; CLIENTS],
     // The editor.
@@ -543,7 +602,8 @@ impl Model {
 
     fn emit(&mut self, c: usize, newline: bool) {
         let start = self.shown[c].len();
-        self.shown[c].extend_from_slice(&self.held[c]);
+        let held = shown_model(&self.held[c]);
+        self.shown[c].extend_from_slice(&held);
         if newline {
             self.shown[c].extend_from_slice(b"\r\n");
             if self.clean[c] {
@@ -682,6 +742,23 @@ fn check(ops: &[Op]) -> Result<(), TestCaseError> {
                     prop_assert_eq!(got, model.typed(b), "typed {:#x}", b);
                 }
             }
+        }
+    }
+    // No client's byte, in its output or its prompt, reaches the terminal
+    // as a control byte: only tab, and the CR LF console ends its lines
+    // with.
+    for (i, &(from, b)) in rec.0.iter().enumerate() {
+        if let Source::Client(_) | Source::Prompt(_) = from {
+            let line_end = (b == b'\r' && rec.0.get(i + 1) == Some(&(from, b'\n')))
+                || (b == b'\n' && i > 0 && rec.0[i - 1] == (from, b'\r'));
+            prop_assert!(
+                b == b'\t'
+                    || (0x20..=0x7E).contains(&b)
+                    || (line_end && matches!(from, Source::Client(_))),
+                "{:?} sent {:#x}",
+                from,
+                b
+            );
         }
     }
     // Each client's bytes once and in order, `\n` as `\r\n`.

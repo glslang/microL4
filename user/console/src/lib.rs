@@ -4,7 +4,9 @@
 //! console multiplexes up to eight clients onto uart. It keeps each
 //! client's unfinished output line until the client ends it, flushes it,
 //! reads, or fills 512 bytes, so a line of at most 512 bytes reaches the
-//! wire whole and the clients' output interleaves line by line; it edits
+//! wire whole and the clients' output interleaves line by line, with each
+//! client's control bytes shown as visible escapes rather than sent, so
+//! that no client can rewrite another's line or the status line; it edits
 //! input lines and routes each to the client focused when its bytes were
 //! read (Ctrl-T and a digit moves the focus). The logic is
 //! [`Terminal`], pure and host-tested; [`decode`] checks a request's
@@ -34,7 +36,8 @@ use libsys::proto::{self, MAX_BYTES, Refusal, label};
 #[cfg(target_os = "none")]
 pub use run::run;
 pub use terminal::{
-    CLIENTS, Chunks, EDIT, LINE, NAME, Out, Owner, ReadAnswer, Source, Terminal, WAITING,
+    CLIENTS, Chunks, EDIT, LINE, NAME, Out, Owner, ReadAnswer, Source, Terminal, WAITING, passes,
+    shown,
 };
 
 /// console's CSpace: a 16-slot CNode with guard 0 of size 60, so `CPtr`
