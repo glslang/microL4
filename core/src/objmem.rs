@@ -2,12 +2,15 @@
 //! address and every range `core/` zeroes (`docs/design.md`, "How `core/`
 //! reaches kernel memory").
 //!
-//! Slots live in CNodes and TCBs, and `Kernel::zero` clears untyped memory.
-//! Before M7, which adds the IRQ node in kernel static memory, all of these
-//! are RAM the kernel hands out after step 5: a `USABLE`, `LOADER` or
-//! `ACPI_RECLAIMABLE` region, at or above 1 MiB (no untyped and no boot
-//! region lies lower), below the direct map's end, and outside the holes the
-//! kernel names: its own image, and a hypercall page the firmware locked.
+//! Slots live in CNodes and TCBs, and from M7 in the IRQ node, and
+//! `Kernel::zero` clears untyped memory. The IRQ node lies in the kernel
+//! image's `.bss`, so the kernel checks its slots against the node's own
+//! range (`arch::Objects::check_slot`); every other slot and every range
+//! `zero` clears is RAM the kernel hands out after step 5: a `USABLE`,
+//! `LOADER` or `ACPI_RECLAIMABLE` region, at or above 1 MiB (no untyped and
+//! no boot region lies lower), below the direct map's end, and outside the
+//! holes the kernel names: its own image, and a hypercall page the firmware
+//! locked.
 //! [`ObjectMemory`] holds that set as sorted, disjoint ranges, computed once
 //! at boot, so the kernel's debug assertion on each slot access is one binary
 //! search.

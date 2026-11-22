@@ -327,7 +327,8 @@ pub const fn redirection_high(pin: u16) -> u32 {
 }
 
 /// A redirection entry's low word with its mask bit set and every other
-/// field kept, so the pin keeps its vector until M7 issues it.
+/// field kept, so the pin keeps its vector until IRQControl issues it
+/// (`crate::irq`).
 pub const fn redirection_masked(old: u32) -> u32 {
     old | REDIRECTION_MASKED
 }
