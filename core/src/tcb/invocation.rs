@@ -8,9 +8,12 @@
 //!
 //! # Orders and choices the ABI leaves open
 //!
-//! - The label is checked first: a label outside `0x20` to `0x2D`, and
-//!   BindNotification and UnbindNotification until M6, are
+//! - The label is checked first: a label outside `0x20` to `0x2D` is
 //!   `IllegalOperation` before any length check.
+//! - BindNotification's `IllegalOperation` cases come in seL4's order
+//!   (`decodeBindNotification`): the TCB already bound, then the extra
+//!   capability not a notification or without Read, then the notification
+//!   bound or with waiters. UnbindNotification takes no length check.
 //! - Every check of Configure, SetSpace and SetIPCBuffer, the depth limit
 //!   included, runs in `decode`, before any slot is emptied. `perform`
 //!   deletes each old capability, then installs the new one only if its
@@ -34,12 +37,13 @@ use crate::cdt;
 use crate::cnode;
 use crate::error::SyscallError;
 use crate::invoke::{ExtraCap, InvokeError, Message, Reply};
+use crate::ipc::{self, NotificationCap};
 use crate::kernel::Preempted;
 use crate::regs::{FRAME_REGS, USER_REGS, UserReg, sanitise};
 use crate::sched;
 use crate::slot::{SlotAddr, SlotMemory};
 
-use super::{IPC_BUFFER_SIZE, TcbRef, ThreadState, Threads, restart, set_mr, suspend};
+use super::{IPC_BUFFER_SIZE, NtfnRef, TcbRef, ThreadState, Threads, restart, set_mr, suspend};
 
 /// TCB invocation labels (`docs/abi.md`, "TCB invocations"), `0x20` to
 /// `0x2D`; `0x2E` to `0x3F` are reserved.
@@ -55,9 +59,7 @@ pub mod label {
     pub const SET_SPACE: u64 = 0x28;
     pub const SUSPEND: u64 = 0x29;
     pub const RESUME: u64 = 0x2A;
-    /// M6; `IllegalOperation` until then.
     pub const BIND_NOTIFICATION: u64 = 0x2B;
-    /// M6; `IllegalOperation` until then.
     pub const UNBIND_NOTIFICATION: u64 = 0x2C;
     pub const SET_TLS_BASE: u64 = 0x2D;
 }
@@ -138,6 +140,13 @@ pub enum TcbInvocation {
         target: TcbRef,
     },
     Resume {
+        target: TcbRef,
+    },
+    BindNotification {
+        target: TcbRef,
+        ntfn: NtfnRef,
+    },
+    UnbindNotification {
         target: TcbRef,
     },
     SetTlsBase {
@@ -333,12 +342,35 @@ pub fn decode<E: Threads + ?Sized>(
         }
         label::SUSPEND => TcbInvocation::Suspend { target },
         label::RESUME => TcbInvocation::Resume { target },
+        label::BIND_NOTIFICATION => {
+            let ntfn = msg
+                .extra_caps
+                .first()
+                .ok_or(SyscallError::TruncatedMessage)?;
+            if e.bound_notification(target).is_some() {
+                return Err(SyscallError::IllegalOperation);
+            }
+            let ntfn = NotificationCap::from_cap(&ntfn.cap)
+                .filter(NotificationCap::can_wait)
+                .ok_or(SyscallError::IllegalOperation)?
+                .ntfn;
+            let v = ipc::notification(e, ntfn);
+            if v.bound.is_some() || v.head.is_some() {
+                return Err(SyscallError::IllegalOperation);
+            }
+            TcbInvocation::BindNotification { target, ntfn }
+        }
+        label::UNBIND_NOTIFICATION => {
+            if e.bound_notification(target).is_none() {
+                return Err(SyscallError::IllegalOperation);
+            }
+            TcbInvocation::UnbindNotification { target }
+        }
         label::SET_TLS_BASE => {
             let [base] = args(msg, 0)?;
             TcbInvocation::SetTlsBase { target, base }
         }
-        // Reserved labels, labels of other types, and BindNotification and
-        // UnbindNotification until M6.
+        // Reserved labels and labels of other types.
         _ => return Err(SyscallError::IllegalOperation),
     };
     Ok(inv)
@@ -546,6 +578,10 @@ pub fn perform<E: Threads + ?Sized>(
             suspend(e, target);
         }
         TcbInvocation::Resume { target } => restart(e, target),
+        TcbInvocation::BindNotification { target, ntfn } => {
+            ipc::bind_notification(e, target, ntfn);
+        }
+        TcbInvocation::UnbindNotification { target } => ipc::unbind_notification(e, target),
         TcbInvocation::SetTlsBase { target, base } => {
             let base = sanitise(UserReg::FsBase, base);
             let mut regs = e.regs(target);

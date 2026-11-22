@@ -23,7 +23,7 @@ use crate::invoke::{self, ExtraCap, InvokeError, Message, Reply};
 use crate::kernel::{Kernel, Preempted};
 use crate::sched::{Scheduler, Scheduling};
 use crate::slot::{Slot, SlotAddr, SlotMemory};
-use crate::tcb::{TcbRef, Tcbs, Threads};
+use crate::tcb::{NtfnRef, TcbRef, Tcbs, Threads};
 use crate::testing::{Event, FakeMemory};
 
 /// Fake physical memory: the CNodes' slots in one small [`FakeMemory`],
@@ -429,6 +429,14 @@ impl Threads for Space {
 
     fn write_buffer_word(&mut self, _: u64, _: u64) {
         unreachable!("no thread in a paging test")
+    }
+
+    fn notification_word(&self, _: NtfnRef, _: u64) -> u64 {
+        unreachable!("no notification in a paging test")
+    }
+
+    fn set_notification_word(&mut self, _: NtfnRef, _: u64, _: u64) {
+        unreachable!("no notification in a paging test")
     }
 }
 

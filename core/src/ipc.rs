@@ -9,10 +9,14 @@
 //! capabilities, cancellation and fault delivery) in `machine`. M5 builds
 //! endpoints without capability transfer (ADR 0023); M6 adds capability
 //! transfer, notifications and `CNode_SaveCaller`.
+//!
+//! The notification objects (M6), with signal, wait and poll, binding,
+//! their cancellation and their invariants, are in `notification`.
 
 mod endpoint;
 mod machine;
 pub mod message;
+mod notification;
 
 pub use endpoint::{Endpoint, EndpointCap, EpState, IpcEnv, ep_field};
 pub use machine::{
@@ -23,6 +27,11 @@ pub use message::{
     IPC_BUFFER_BITS, IPC_BUFFER_SIZE, IPC_BUFFER_WORDS, IpcBuffer, LABEL_BITS, MSG_MAX_EXTRA_CAPS,
     MSG_MAX_LENGTH, MSG_REG_COUNT, MessageInfo, MrLocation, MsgReg, delivered_length, mr_location,
     word,
+};
+pub use notification::{
+    Notification, NotificationCap, NtfnState, bind_notification, cancel_all_signals,
+    check_notifications, complete_bound_signal, may_wait, notification, ntfn_field,
+    set_notification, signal, unbind_notification, wait,
 };
 
 /// The state machine's tests, and the world `crate::syscall`'s tests share.

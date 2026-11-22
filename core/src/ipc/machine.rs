@@ -29,6 +29,7 @@ use crate::tcb::{self, EpRef, TcbRef, ThreadState};
 
 use super::endpoint::{self as queue, EndpointCap, EpState, IpcEnv};
 use super::message::{MSG_MAX_LENGTH, MSG_REG_COUNT, MessageInfo, word};
+use super::notification::{self, NotificationCap};
 
 /// The most message registers a fault reply sets: `UnknownSyscall`'s MR0
 /// to MR17 (`docs/abi.md`, "Fault replies").
@@ -99,7 +100,9 @@ pub fn send<E: IpcEnv + ?Sized>(
 ///
 /// 1. Whatever is in `r`'s caller slot is deleted: a server that receives
 ///    again before replying gives up that reply.
-/// 2. A bound notification's pending signal (M6).
+/// 2. If `r`'s bound notification is `Active`, `r` gets its signal instead
+///    (`rdi` = the word, `rsi` = 0) and the receive is complete, blocking
+///    or not ([`super::notification::complete_bound_signal`]).
 /// 3. No sender waits: a blocking `r` becomes `BlockedOnReceive` at the tail
 ///    of the queue; a non-blocking one gets badge 0 and `MessageInfo` 0.
 ///    A sender `S` waits: it leaves the queue and `r` gets its message with
@@ -108,6 +111,9 @@ pub fn send<E: IpcEnv + ?Sized>(
 ///    other becomes `Running`.
 pub fn receive<E: IpcEnv + ?Sized>(e: &mut E, r: TcbRef, cap: &EndpointCap, blocking: bool) {
     delete_one(e, r.slot(TCB_SLOT_CALLER));
+    if notification::complete_bound_signal(e, r) {
+        return;
+    }
     let ep = cap.ep;
     match e.endpoint(ep).state {
         EpState::Idle | EpState::Recv => {
@@ -346,11 +352,13 @@ pub fn reply_error<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef, err: SyscallError) 
 
 /// `cancel_ipc(T)` (`docs/design.md`, "Deletion and cancellation"), which
 /// the kernel's [`crate::tcb::Threads::cancel_ipc`] calls for Suspend,
-/// Resume and TCB deletion. A thread blocked on an endpoint leaves its
-/// queue; one waiting for a reply loses the one reply capability derived
-/// from its master, wherever it is. Either becomes `Inactive`. A thread in
-/// any other state keeps it. In every state the pending fault is cleared,
-/// so a thread suspended while its fault waits never sends it later.
+/// Resume and TCB deletion, and a signal or a bind for a bound thread in
+/// an endpoint receive. A thread blocked on an endpoint or a notification
+/// leaves its queue; one waiting for a reply loses the one reply
+/// capability derived from its master, wherever it is. Each becomes
+/// `Inactive`. A thread in any other state keeps it. In every state the
+/// pending fault is cleared, so a thread suspended while its fault waits
+/// never sends it later. A binding is left alone.
 pub fn cancel_ipc<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef) {
     match e.state(t) {
         ThreadState::BlockedOnSend { ep, .. } | ThreadState::BlockedOnReceive { ep, .. } => {
@@ -364,11 +372,7 @@ pub fn cancel_ipc<E: IpcEnv + ?Sized>(e: &mut E, t: TcbRef) {
             }
             sched::set_thread_state(e, t, ThreadState::Inactive);
         }
-        // Nothing makes this state before M6's notifications, whose
-        // `cancel_signal` goes here.
-        ThreadState::BlockedOnNotification { .. } => {
-            sched::set_thread_state(e, t, ThreadState::Inactive);
-        }
+        ThreadState::BlockedOnNotification { ntfn } => notification::cancel_signal(e, t, ntfn),
         ThreadState::Inactive | ThreadState::Running | ThreadState::Restart => {}
     }
     e.set_fault(t, None);
@@ -399,14 +403,21 @@ pub fn cancel_all_ipc<E: IpcEnv + ?Sized>(e: &mut E, ep: EpRef) {
 
 /// The IPC part of the kernel's [`crate::kernel::Kernel::finalise`] hook
 /// (`docs/design.md`, "Deletion and finalisation"): the last capability to
-/// an endpoint releases its queue with [`cancel_all_ipc`]. A reply
-/// capability needs nothing: a one-shot one deleted unused leaves its
-/// caller `BlockedOnReply`, and a master is deleted only by its TCB's
-/// finalisation, after [`cancel_ipc`] removed the one derived from it. A
-/// TCB's hook calls [`crate::tcb::suspend`] itself.
+/// an endpoint releases its queue with [`cancel_all_ipc`]; the last
+/// capability to a notification unbinds it and releases its waiters
+/// ([`super::notification::finalise`]). A reply capability needs nothing:
+/// a one-shot one deleted unused leaves its caller `BlockedOnReply`, and a
+/// master is deleted only by its TCB's finalisation, after [`cancel_ipc`]
+/// removed the one derived from it. A TCB's hook calls
+/// [`crate::tcb::finalise`] itself.
 pub fn finalise<E: IpcEnv + ?Sized>(e: &mut E, cap: Cap, last: bool) {
-    if last && let Some(ep) = EndpointCap::from_cap(&cap) {
+    if !last {
+        return;
+    }
+    if let Some(ep) = EndpointCap::from_cap(&cap) {
         cancel_all_ipc(e, ep.ep);
+    } else if let Some(n) = NotificationCap::from_cap(&cap) {
+        notification::finalise(e, n.ntfn);
     }
 }
 
@@ -480,8 +491,9 @@ pub fn deliver_fault<E: IpcEnv + ?Sized>(
 /// - each endpoint is `Idle` exactly when its queue is empty; its links
 ///   run both ways from head to tail; in `Send` every queued thread is
 ///   `BlockedOnSend` on it and in `Recv` `BlockedOnReceive`;
-/// - each thread blocked on an endpoint is in that endpoint's queue, and a
-///   thread blocked on none has null queue links;
+/// - each thread blocked on an endpoint is in that endpoint's queue, each
+///   thread waiting on a notification in that notification's queue, and
+///   a thread blocked on neither has null queue links;
 /// - a `BlockedOnReceive` thread has an empty caller slot;
 /// - a thread holds a fault only while `BlockedOnSend` in a `Call` or
 ///   `BlockedOnReply`;
@@ -491,7 +503,8 @@ pub fn deliver_fault<E: IpcEnv + ?Sized>(
 /// - each caller slot is empty or holds the one reply capability derived
 ///   from a `BlockedOnReply` thread's master.
 ///
-/// A queue longer than `threads` is reported as a cycle.
+/// [`super::check_notifications`] checks the notifications themselves and
+/// their bindings. A queue longer than `threads` is reported as a cycle.
 pub fn check<E: IpcEnv + ?Sized>(
     e: &E,
     threads: &[TcbRef],
@@ -508,9 +521,17 @@ pub fn check<E: IpcEnv + ?Sized>(
                     return Err("a blocked thread is not in its endpoint's queue");
                 }
             }
+            ThreadState::BlockedOnNotification { ntfn } => {
+                notification::check_queue(e, ntfn, threads.len())?;
+                if !notification::in_queue(e, ntfn, t, threads.len()) {
+                    return Err("a waiting thread is not in its notification's queue");
+                }
+            }
             _ => {
                 if e.ep_links(t) != (None, None) {
-                    return Err("a thread not blocked on an endpoint has queue links");
+                    return Err(
+                        "a thread not blocked on an endpoint or notification has queue links",
+                    );
                 }
             }
         }

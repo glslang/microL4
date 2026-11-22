@@ -11,8 +11,9 @@
 //!   data ([`ThreadState`]).
 //! - [`Threads`]: what TCB invocations need besides slots and fields, the
 //!   scheduler and the hooks the kernel and IPC fill.
-//! - Thread operations: [`init`], [`init_root`], [`suspend`], [`restart`],
-//!   [`activate`], and message registers ([`set_mr`], [`buffer_word`]).
+//! - Thread operations: [`init`], [`init_root`], [`suspend`], [`finalise`],
+//!   [`restart`], [`activate`], and message registers ([`set_mr`],
+//!   [`buffer_word`]).
 //! - The TCB invocations, decoded into a [`TcbInvocation`] and performed
 //!   ([`invoke`], [`decode`], [`perform`]).
 
@@ -85,7 +86,7 @@ pub mod field {
     pub const FAULT_EP: u64 = FAULT + crate::regs::FAULT_WORDS as u64 * 8;
     /// The IPC buffer's user address; 0 for none.
     pub const IPC_BUFFER: u64 = FAULT_EP + 8;
-    /// The bound notification's physical address; 0 for none (M6).
+    /// The bound notification's physical address; 0 for none.
     pub const BOUND_NOTIFICATION: u64 = IPC_BUFFER + 8;
     /// The first byte past the scalars.
     pub const END: u64 = BOUND_NOTIFICATION + 8;
@@ -535,20 +536,23 @@ pub trait Tcbs {
         self.set_tcb_word(t, field::IPC_BUFFER, addr);
     }
 
-    /// The bound notification (M6).
+    /// The bound notification.
     fn bound_notification(&self, t: TcbRef) -> Option<NtfnRef> {
         NtfnRef::new(self.tcb_word(t, field::BOUND_NOTIFICATION))
     }
 
-    /// Binds or unbinds a notification (M6).
+    /// Binds or unbinds a notification. Raw: the notification's side is
+    /// [`crate::ipc::bind_notification`]'s and
+    /// [`crate::ipc::unbind_notification`]'s.
     fn set_bound_notification(&mut self, t: TcbRef, ntfn: Option<NtfnRef>) {
         self.set_tcb_word(t, field::BOUND_NOTIFICATION, ntfn.map_or(0, NtfnRef::get));
     }
 }
 
 /// What the TCB invocations and thread operations need besides slots,
-/// hooks and TCB fields: the scheduler ([`Scheduling`]) and five hooks the
-/// kernel and IPC supply. The kernel implements it on `arch::Objects`.
+/// hooks and TCB fields: the scheduler ([`Scheduling`]), five hooks the
+/// kernel and IPC supply, and the notification words binding uses. The
+/// kernel implements it on `arch::Objects`.
 pub trait Threads: Kernel + Scheduling {
     /// IPC's `cancel_ipc` (`docs/design.md`, "Deletion and cancellation"):
     /// if `t` is blocked in IPC, takes it off its endpoint or notification
@@ -576,6 +580,19 @@ pub trait Threads: Kernel + Scheduling {
     /// an IPC buffer: inside a non-device frame that a TCB's buffer slot
     /// holds with Read and Write.
     fn write_buffer_word(&mut self, paddr: u64, value: u64);
+
+    /// The word at byte `offset` of notification `n`: one of
+    /// [`crate::ipc::ntfn_field`]'s (M6). `TCB_BindNotification` reads and
+    /// writes notifications, so their words are here and not in
+    /// [`crate::ipc::IpcEnv`], which extends this trait; the typed
+    /// accessors are [`crate::ipc::notification`] and
+    /// [`crate::ipc::set_notification`], and only [`crate::ipc`] writes
+    /// notifications. The kernel implements both over the direct map, never
+    /// forming a reference into the object.
+    fn notification_word(&self, n: NtfnRef, offset: u64) -> u64;
+
+    /// Overwrites the word at byte `offset` of notification `n`.
+    fn set_notification_word(&mut self, n: NtfnRef, offset: u64, value: u64);
 }
 
 /// Words in an IPC buffer: `tag`, `msg[0..120]`, `user_data`,
@@ -620,7 +637,8 @@ pub fn init_root<T: Tcbs + ?Sized>(e: &mut T, t: TcbRef, entry: u64, bootinfo: u
 /// `fault_ip` to `next_ip` so a Resume does not repeat a finished system
 /// call; takes it off the ready queue and makes it `Inactive`. A
 /// `SwitchTo` naming it becomes `ChooseNew`, and if it is the current
-/// thread another is chosen. The kernel's TCB finalisation calls it too.
+/// thread another is chosen. A bound notification stays bound (seL4
+/// `suspend`). TCB finalisation calls it through [`finalise`].
 pub fn suspend<E: Threads + ?Sized>(e: &mut E, t: TcbRef) {
     e.cancel_ipc(t);
     if e.state(t) == ThreadState::Running {
@@ -629,6 +647,17 @@ pub fn suspend<E: Threads + ?Sized>(e: &mut E, t: TcbRef) {
         e.set_regs(t, &regs);
     }
     sched::set_thread_state(e, t, ThreadState::Inactive);
+}
+
+/// The thread part of finalising `t`'s last capability (`docs/design.md`,
+/// "Suspend, Resume and deletion"; seL4 `finaliseCap`): unbinds its
+/// notification, then [`suspend`]s it, which takes it out of any queue,
+/// cancels its IPC and clears a scheduler action naming it. The kernel's
+/// hook then drops its FP and FS and GS base ownership and its place in
+/// the debug list; core then deletes its five slots.
+pub fn finalise<E: Threads + ?Sized>(e: &mut E, t: TcbRef) {
+    crate::ipc::unbind_notification(e, t);
+    suspend(e, t);
 }
 
 /// Resumes `t` (`TCB_Resume`, seL4 `restart`): if it is `Inactive` or

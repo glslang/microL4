@@ -5,11 +5,10 @@
 //! [`super::paging`]), `Tcbs`, `Scheduling`, `Threads` and `IpcEnv` over
 //! the direct map.
 //!
-//! - Slots, TCB fields, endpoint words and IPC buffer words are loaded and
-//!   stored by value through raw pointers at `PHYS_MAP_BASE + addr`, and
-//!   `zero` writes
-//!   through one the same way; no Rust reference into object memory is
-//!   ever made.
+//! - Slots, TCB fields, endpoint and notification words and IPC buffer
+//!   words are loaded and stored by value through raw pointers at
+//!   `PHYS_MAP_BASE + addr`, and `zero` writes through one the same way;
+//!   no Rust reference into object memory is ever made.
 //! - Debug builds check every slot address, TCB and range `zero` clears
 //!   against [`ObjectMemory`], computed once at the end of step 5: RAM the
 //!   kernel hands out, inside the direct map, outside the kernel image; and
@@ -20,7 +19,9 @@
 //!   capability suspends it and drops its FP and FS/GS-base ownership; a
 //!   Frame or paging structure unmaps; a mapped one that moves takes its
 //!   back-reference along; an endpoint's last capability releases its
-//!   queue (`l4core::ipc::finalise`).
+//!   queue, and a notification's unbinds it and releases its waiters
+//!   (`l4core::ipc::finalise`); a TCB's last capability also unbinds its
+//!   notification (`l4core::tcb::finalise`).
 //! - The preemption point polls the local APIC's IRR and never enables
 //!   interrupts. With `selftest` it also counts polls, times the longest
 //!   stretch between two, and can be told to report a preemption with no
@@ -32,14 +33,14 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use l4core::bootinfo::{BOOTINFO_SIZE, BootInfo};
-use l4core::cap::{Cap, CapType, ENDPOINT_BITS, SLOT_SIZE, TCB_BITS};
+use l4core::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS, SLOT_SIZE, TCB_BITS};
 use l4core::ipc::{self, IpcEnv};
 use l4core::kernel::{Kernel, Preempted};
 use l4core::objmem::ObjectMemory;
 use l4core::sched::{Scheduler, Scheduling};
 use l4core::slot::{Slot, SlotAddr, SlotMemory};
 use l4core::syscall;
-use l4core::tcb::{self, EpRef, REGS_OFFSET, TcbRef, Tcbs, Threads, XSAVE_OFFSET};
+use l4core::tcb::{self, EpRef, NtfnRef, REGS_OFFSET, TcbRef, Tcbs, Threads, XSAVE_OFFSET};
 
 use super::{BootFacts, StaticCell, apic, entry, fpu, paging, phys_to_virt, thread};
 use crate::boot::BootState;
@@ -196,6 +197,17 @@ impl Objects {
         ep.get() + offset
     }
 
+    /// The physical address of word `offset` of notification `n`: one of
+    /// its eight.
+    fn notification_field(&self, n: NtfnRef, offset: u64) -> u64 {
+        assert!(
+            offset < 1 << NOTIFICATION_BITS && offset.is_multiple_of(8),
+            "notification field offset {offset:#x}"
+        );
+        self.check(n.get(), 1 << NOTIFICATION_BITS, "notification");
+        n.get() + offset
+    }
+
     /// Boot step 8: copies root-image `bytes` to `paddr`, inside one image
     /// frame of the boot region, which step 6 zeroed.
     pub fn copy_into_frame(&mut self, paddr: u64, bytes: &[u8]) {
@@ -327,6 +339,26 @@ impl Threads for Objects {
         // slot or kernel data.
         unsafe { ptr::write(phys_to_virt(paddr) as *mut u64, value) };
     }
+
+    fn notification_word(&self, n: NtfnRef, offset: u64) -> u64 {
+        let at = self.notification_field(n, offset);
+        // SAFETY: an `NtfnRef` names a live notification (it comes only
+        // from a Notification capability, a waiting thread's state or a
+        // TCB's binding, which IPC keeps in step with the notification's
+        // queue and binding, and finalisation empties both before the
+        // memory can be reset): 64-byte aligned in RAM below the direct
+        // map's end, so mapped RW and write-back. The word is one of its
+        // eight, which only this type reaches, by value; any bits are a
+        // `u64`.
+        unsafe { ptr::read(phys_to_virt(at) as *const u64) }
+    }
+
+    fn set_notification_word(&mut self, n: NtfnRef, offset: u64, value: u64) {
+        let at = self.notification_field(n, offset);
+        // SAFETY: as in `notification_word`; the write changes one word of
+        // the notification and no slot, kernel code or static data.
+        unsafe { ptr::write(phys_to_virt(at) as *mut u64, value) };
+    }
 }
 
 /// Endpoint words and IPC buffer reads through the direct map, for
@@ -368,14 +400,14 @@ impl Kernel for Objects {
             | CapType::IrqControl
             | CapType::IoPortControl
             | CapType::Hypervisor => {}
-            // The last capability suspends the thread (off its ready queue,
-            // IPC cancelled; M6 unbinds its notification), drops its FP and
-            // FS and GS base ownership without saving, and takes it off the
-            // debug list. No cleanup.
+            // The last capability unbinds the thread's notification and
+            // suspends it (off its ready queue, IPC cancelled), drops its FP
+            // and FS and GS base ownership without saving, and takes it off
+            // the debug list. No cleanup.
             CapType::Tcb => {
                 if last {
                     let t = TcbRef::from_cap(&cap).expect("a TCB capability names a TCB");
-                    tcb::suspend(self, t);
+                    tcb::finalise(self, t);
                     fpu::forget(t);
                     thread::forget(t);
                     #[cfg(feature = "debug")]
@@ -383,14 +415,15 @@ impl Kernel for Objects {
                 }
             }
             // The last capability to an endpoint releases its queue: every
-            // queued thread restarts its system call. A reply capability
-            // needs nothing: deleted unused, it leaves its caller
+            // queued thread restarts its system call. The last capability
+            // to a notification unbinds its TCB, then releases its waiters
+            // the same way and discards its word. A reply capability needs
+            // nothing: deleted unused, it leaves its caller
             // `BlockedOnReply`, and a master goes only with its TCB, after
             // `cancel_ipc` deleted the one derived from it.
-            CapType::Endpoint | CapType::Reply => ipc::finalise(self, cap, last),
-            // M6: on the last capability, unbound from its TCB and every
-            // waiter released.
-            CapType::Notification => {}
+            CapType::Endpoint | CapType::Notification | CapType::Reply => {
+                ipc::finalise(self, cap, last)
+            }
             // A Frame unmaps on every deletion, a paging structure on its
             // only one, and a PML4's last capability empties its user half
             // (loading the kernel PML4 first if it is in CR3).
