@@ -231,7 +231,10 @@ pub enum ExitCode {
 }
 
 /// Ends the run. Under QEMU this exits through `isa-debug-exit`; anywhere
-/// else, including Hyper-V, it halts and the host stops the VM.
+/// else, including Hyper-V, it halts and the host stops the VM. Never
+/// inlined: it is one of the three functions a release kernel may call
+/// [`io`] from, which the disassembly check finds by its symbol.
+#[inline(never)]
 pub fn exit(code: ExitCode) -> ! {
     if hypervisor().is_qemu() {
         // SAFETY: under QEMU, xtask always attaches isa-debug-exit at this
