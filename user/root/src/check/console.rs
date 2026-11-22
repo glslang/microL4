@@ -93,7 +93,7 @@ pub const INTERLEAVED_LINES: [&str; 7] = [
 /// The first step of the input part.
 pub const INPUT_STEPS: usize = 12;
 /// The last step of the interleaved lines.
-pub const INTERLEAVED_STEPS: usize = 11;
+pub const INTERLEAVED_STEPS: usize = 10;
 
 /// The `b2` line: `b2 `, digits, ` end` and its newline, 300 bytes.
 pub const B2_LEN: usize = 300;
@@ -319,6 +319,15 @@ mod tests {
                 assert!(i == j || !b.contains(a.as_str()), "{a:?} in {b:?}");
             }
         }
+        // Steps 0 to 10 write the interleaved lines, 11 is the burst, and
+        // root prints its line after the last interleaved step.
+        assert!(
+            SCRIPT[..=INTERLEAVED_STEPS]
+                .iter()
+                .all(|s| matches!(s.action, Action::Write(_) | Action::B2(_)))
+        );
+        assert_eq!(SCRIPT[INTERLEAVED_STEPS + 1].action, Action::Burst);
+        assert_eq!(INTERLEAVED_STEPS + 2, INPUT_STEPS);
         assert_eq!(SCRIPT[INPUT_STEPS].action, Action::Input("a> "));
         assert_eq!(SCRIPT.len(), INPUT_STEPS + 2);
         assert_eq!(CONSOLE_INPUT_BYTES, 22);
