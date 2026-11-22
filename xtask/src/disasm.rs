@@ -1031,4 +1031,94 @@ ffffffff8000cf82:      \tret
             ]
         );
     }
+
+    /// The M7 fix round's re-review: a COM1 writer that reaches the UART
+    /// through the IOPort executor, `Objects`' `IoPorts::port_in` and
+    /// `port_out`. They are safe trait methods that take any port, so the
+    /// writer sits in the kernel crate outside `arch`, with no `unsafe`,
+    /// and names COM1 as immediates in `esi`, port_out's port argument. A
+    /// release kernel that called it once after `arch::init` passed `cargo
+    /// xtask test`'s disassembly check and wrote its text on COM1; only
+    /// `release`'s `next:` failed it, because it printed at boot. In a
+    /// clean release kernel `l4core::ioport::invoke_port::<Objects>` is
+    /// the only caller of `port_in` and `port_out`. llvm-objdump's listing
+    /// (the loop and the panic path trimmed), with that build's addresses.
+    const EXECUTOR_SYMBOLS: &str = "\
+ffffffff8000acb0 l     F .text\t0000000000000004 .hidden kernel::arch::x86_64::io::inb
+ffffffff8000ace0 l     F .text\t0000000000000006 .hidden kernel::arch::x86_64::io::outb
+ffffffff8001d9a0 l     F .text\t000000000000002a .hidden <kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_in
+ffffffff8001d9d0 l     F .text\t0000000000000021 .hidden <kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_out
+ffffffff80001560 l     F .text\t00000000000000c2 .hidden kernel::viaexec::put
+";
+    const EXECUTOR_LISTING: &str = "\
+ffffffff80001560 <kernel::viaexec::put>:
+ffffffff800015a0:      \tmov\trdi, r15
+ffffffff800015a3:      \tmov\tesi, 0x3f8
+ffffffff800015a8:      \tmov\tedx, 0x1
+ffffffff800015ad:      \tmov\tecx, ebp
+ffffffff800015af:      \tcall\t0xffffffff8001d9d0 <<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_out>
+ffffffff800015e5:      \tmov\trdi, r15
+ffffffff800015e8:      \tmov\tesi, 0x3fd
+ffffffff800015ed:      \tmov\tedx, 0x1
+ffffffff800015f2:      \tcall\t0xffffffff8001d9a0 <<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_in>
+ffffffff800015f7:      \ttest\tal, 0x20
+ffffffff80001609:      \tret
+
+ffffffff8000acb0 <kernel::arch::x86_64::io::inb>:
+ffffffff8000acb0:      \tmov\tedx, edi
+ffffffff8000acb2:      \tin\tal, dx
+ffffffff8000acb3:      \tret
+
+ffffffff8000ace0 <kernel::arch::x86_64::io::outb>:
+ffffffff8000ace0:      \tmov\teax, esi
+ffffffff8000ace2:      \tmov\tedx, edi
+ffffffff8000ace4:      \tout\tdx, al
+ffffffff8000ace5:      \tret
+
+ffffffff8001d9a0 <<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_in>:
+ffffffff8001d9a0:      \tpush\trax
+ffffffff8001d9a1:      \tmov\tedi, esi
+ffffffff8001d9a3:      \tcmp\tdl, 0x1
+ffffffff8001d9ba:      \tcall\t0xffffffff8000acb0 <kernel::arch::x86_64::io::inb>
+ffffffff8001d9bf:      \tmovzx\teax, al
+ffffffff8001d9c2:      \tpop\trcx
+ffffffff8001d9c3:      \tret
+
+ffffffff8001d9d0 <<kernel::arch::x86_64::objects::Objects as l4core::ioport::IoPorts>::port_out>:
+ffffffff8001d9d0:      \tmov\tedi, esi
+ffffffff8001d9d2:      \tcmp\tdl, 0x1
+ffffffff8001d9ea:      \tmov\tesi, ecx
+ffffffff8001d9ec:      \tjmp\t0xffffffff8000ace0 <kernel::arch::x86_64::io::outb>
+";
+
+    /// The gap: the call-site rule stops at the IOPort executor, whose
+    /// callers nothing checks, and the port rules look only at io.rs's
+    /// port argument, so the writer above passes.
+    #[test]
+    fn a_writer_through_the_ioport_executor_passes_the_check() {
+        let s = scan(EXECUTOR_SYMBOLS, EXECUTOR_LISTING);
+        assert_eq!(
+            (s.io_functions, s.io_ins, s.io_outs, s.io_calls),
+            (2, 1, 1, 2)
+        );
+        assert_eq!(s.findings, Vec::<String>::new());
+    }
+
+    /// The guarantee the design states ("A release kernel without UART
+    /// code"): UART code fails the check whatever path it takes to `in`
+    /// and `out`, so both of the writer's calls into the IOPort executor
+    /// are findings.
+    #[test]
+    #[ignore = "M7 fix-round re-review: the IOPort executor's callers are not checked"]
+    fn a_writer_through_the_ioport_executor_fails_the_check() {
+        let s = scan(EXECUTOR_SYMBOLS, EXECUTOR_LISTING);
+        for addr in ["800015af", "800015f2"] {
+            let at = format!("0xffffffff{addr} in kernel::viaexec::put: call");
+            assert!(
+                s.findings.iter().any(|f| f.contains(&at)),
+                "{at}: {:?}",
+                s.findings
+            );
+        }
+    }
 }
