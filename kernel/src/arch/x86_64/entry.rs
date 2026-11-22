@@ -46,7 +46,9 @@ use l4core::sched::Scheduling;
 use l4core::tcb::{TcbRef, Tcbs};
 use l4core::trap::{TrapFrame, USER_CS, USER_DS};
 
-use super::{Objects, cpu, gdt, irq, serial, thread, trap};
+#[cfg(feature = "debug")]
+use super::serial;
+use super::{Objects, cpu, gdt, irq, thread, trap};
 
 #[cfg(feature = "selftest")]
 pub use self::selftest::{last_exit, ring0_single_steps, set_user_entry_hook};
@@ -80,6 +82,7 @@ global_asm!(
 
 /// First Rust code to run, on the kernel stack with BSS zeroed.
 extern "C" fn rust_entry(handoff_phys: u64) -> ! {
+    #[cfg(feature = "debug")]
     serial::init();
     crate::kmain(handoff_phys)
 }
