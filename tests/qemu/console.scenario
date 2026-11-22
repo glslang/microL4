@@ -12,7 +12,9 @@
 # another line would be missing from its own: console keeps each client's
 # unfinished line until its newline. The 300-byte b2 line arrives in three
 # 100-byte writes with a's whole line between them; b's burst of twelve
-# 200-byte lines makes uart hold some of console's writes. Then each client
+# 200-byte lines reaches uart in back-to-back writes, some of which uart may
+# hold on hardware; QEMU's transmitter empties at once, so it holds none (Stats
+# shows 0 Writes held). Then each client
 # writes a prompt and reads; the harness focuses b with Ctrl-T 3 and types
 # its line, then focuses a and types a line with a typo, DEL and Ctrl-U.
 # Root checks each client read exactly its line, and uart's Stats: receive
