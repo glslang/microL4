@@ -5,6 +5,8 @@
 mod acpidump;
 mod compile;
 mod disasm;
+#[cfg(test)]
+mod hostrender;
 mod image;
 mod qemu;
 mod rootimage;
@@ -34,7 +36,10 @@ commands:
                     tests/qemu/ (or only the named ones); with --bless, a
                     screendump that differs from its golden in
                     tests/qemu/golden/, or has none, becomes the golden if
-                    its scenario passes otherwise
+                    its scenario passes otherwise, unless the golden is
+                    the host render's (Source: microL4 host render),
+                    which only MICROL4_BLESS=1 cargo test -p xtask
+                    tui_screendumps writes
   clippy            clippy with -D warnings on every crate and target
   gdb               boot under QEMU paused, with GDB attached
   acpidump [-- <qemu args>]

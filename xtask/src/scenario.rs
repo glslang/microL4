@@ -45,7 +45,10 @@
 //! ([`screen`]). The screen stays beside the log as `<name>.png`, and a
 //! mismatch leaves `<name>.diff.png` there too. `cargo xtask test --bless`
 //! writes each screen that differs from its golden, or has none, as the
-//! golden, if its scenario passed everything else. The guest must keep the
+//! golden, if its scenario passed everything else, but never replaces one
+//! the host drew (the `tui` scenario's, from `hostrender.rs`, whose
+//! `Source` is [`screen::HOST_RENDER`]): it says so, and the scenario
+//! fails. The guest must keep the
 //! screen still from the line the screendump follows until it is taken:
 //! say, by waiting for a `send:` after it.
 
@@ -488,7 +491,8 @@ pub struct Goldens {
     /// `tests/qemu/golden/`.
     pub dir: PathBuf,
     /// `--bless`: a screen that differs from its golden, or has none,
-    /// becomes the golden, if its scenario passes otherwise.
+    /// becomes the golden, if its scenario passes otherwise, unless the
+    /// golden is the host render's.
     pub bless: bool,
     /// QEMU's version line, kept in each image's `Source` text, so a
     /// mismatch can say when the golden came from another QEMU.
@@ -765,7 +769,9 @@ fn screen_files(dir: &Path, name: &str) -> [PathBuf; 3] {
 /// Turns the screendump `name`'s PPM into a PNG beside it and compares it
 /// with its golden, pixel for pixel. A missing or different golden fails
 /// the check, unless `bless`, which writes the screen as the golden and
-/// returns a note saying so.
+/// returns a note saying so; but `bless` leaves a golden the host drew
+/// (its `Source` is [`screen::HOST_RENDER`]) as it is, and the check fails,
+/// so the guest's screen is compared with an image QEMU never wrote.
 fn check_screen(
     sc: &Scenario,
     name: &str,
@@ -794,8 +800,9 @@ fn check_screen(
     if matches!(golden, Ok(Some(_))) && difference.is_none() {
         return Ok(None);
     }
+    let host = matches!(&golden, Ok(Some(g)) if source(g) == Some(screen::HOST_RENDER));
     let bless_hint = format!("`cargo xtask test {} --bless` makes it the golden", sc.name);
-    if bless {
+    if bless && !host {
         fs::create_dir_all(&goldens.dir).map_err(|e| fail(e.to_string()))?;
         fs::write(&path, &encoded).map_err(|e| fail(format!("{}: {e}", rel(&path))))?;
         let was = match (&golden, &difference) {
@@ -837,18 +844,39 @@ fn check_screen(
         }
         screen::Difference::Size(..) => String::new(),
     };
-    let qemu = golden
-        .text
-        .iter()
-        .find(|(k, _)| k == "Source")
-        .filter(|(_, v)| *v != goldens.qemu)
-        .map(|(_, v)| format!("; the golden came from {v:?}, this is {:?}", goldens.qemu))
+    if host {
+        let left = if bless {
+            "`--bless` left the golden as it is: it"
+        } else {
+            "the golden"
+        };
+        return Err(fail(format!(
+            "differs from {}: {difference}; the screen is in {}{shown}; {left} is the host \
+             render (Source {:?}), which only `tui_screendumps_are_the_host_render` \
+             (xtask/src/hostrender.rs) writes, from term's renderer and the same bytes, so \
+             the guest drew something else",
+            rel(&path),
+            rel(&png),
+            screen::HOST_RENDER
+        )));
+    }
+    let qemu = source(&golden)
+        .filter(|v| *v != goldens.qemu)
+        .map(|v| format!("; the golden came from {v:?}, this is {:?}", goldens.qemu))
         .unwrap_or_default();
     Err(fail(format!(
         "differs from {}: {difference}{qemu}; the screen is in {}{shown}; if it is right, {bless_hint}",
         rel(&path),
         rel(&png)
     )))
+}
+
+/// A golden's `Source` text: QEMU's version, or [`screen::HOST_RENDER`].
+fn source(png: &screen::Png) -> Option<&str> {
+    png.text
+        .iter()
+        .find(|(k, _)| k == "Source")
+        .map(|(_, v)| v.as_str())
 }
 
 #[cfg(test)]
@@ -1499,12 +1527,84 @@ expect: TEST PASS
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// `--bless` leaves a golden the host drew as it is, and says why;
+    /// one from QEMU it still replaces.
+    #[test]
+    fn bless_leaves_a_host_render_golden_as_it_is() {
+        let dir = unit_dir("bless_leaves_a_host_render_golden_as_it_is");
+        let sc = parse("tui", "exit: success\nexpect: x\nscreendump: s\n").unwrap();
+        let goldens = Goldens {
+            dir: dir.join("golden"),
+            bless: true,
+            qemu: "QEMU emulator version 8.2.2".into(),
+        };
+        fs::create_dir_all(&goldens.dir).unwrap();
+        let golden = goldens.dir.join("s.png");
+        let [_, png, diff] = screen_files(&dir, "s");
+        let img = screen::Image::new(4, 3, (0..36).map(|i| i * 7).collect()).unwrap();
+        let mut off = img.clone();
+        off.rgb[0] ^= 0x80;
+        let host = screen::encode_png(&img, &[("Source", screen::HOST_RENDER)]);
+        fs::write(&golden, &host).unwrap();
+        let check = |img: &screen::Image, bless: bool| {
+            check_screen(&sc, "s", &write_ppm(&dir, "s", img), &goldens, bless)
+        };
+
+        // The same screen passes, with or without --bless.
+        assert_eq!(check(&img, true), Ok(None));
+        assert_eq!(check(&img, false), Ok(None));
+
+        // Another screen fails, --bless or not, and the golden stays.
+        for bless in [true, false] {
+            let _ = fs::remove_file(&diff);
+            let e = check(&off, bless).unwrap_err();
+            assert!(
+                e.contains("golden/s.png: 1 pixel differs, in x 0-0, y 0-0"),
+                "{e}"
+            );
+            assert!(
+                e.contains("is the host render (Source \"microL4 host render\"), which only `tui_screendumps_are_the_host_render`"),
+                "{e}"
+            );
+            assert_eq!(
+                e.contains("`--bless` left the golden as it is"),
+                bless,
+                "{e}"
+            );
+            // It neither offers --bless nor names a QEMU version.
+            assert!(
+                !e.contains("makes it the golden") && !e.contains("came from"),
+                "{e}"
+            );
+            assert!(diff.exists() && png.exists(), "{e}");
+            assert_eq!(fs::read(&golden).unwrap(), host);
+        }
+
+        // A golden from QEMU, such as `screendump`'s `ovmf`, still blesses.
+        fs::write(
+            &golden,
+            screen::encode_png(&img, &[("Source", &goldens.qemu)]),
+        )
+        .unwrap();
+        let note = check(&off, true).unwrap().unwrap();
+        assert!(note.starts_with("blessed "), "{note}");
+        let blessed = screen::decode_png(&fs::read(&golden).unwrap()).unwrap();
+        assert_eq!(blessed.image, off);
+        assert_eq!(blessed.text, [("Source".into(), goldens.qemu.clone())]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn repo_goldens_are_used_and_read() {
         // Each golden is a PNG xtask reads, named by a scenario's
-        // screendump: one no scenario takes is stale.
+        // screendump: one no scenario takes is stale. The host render's
+        // (`hostrender.rs`) are the `tui` scenario's, which
+        // `the_moments_are_the_scenarios_screendumps` checks once
+        // tests/qemu/tui.scenario is in the tree; a golden with the host
+        // render's Source is one of them, since only that test writes one.
         let all = load_dir(&crate::root().join("tests/qemu")).unwrap();
         let names: Vec<&str> = all.iter().flat_map(|s| s.screendumps()).collect();
+        let moments: Vec<&str> = crate::hostrender::MOMENTS.iter().map(|m| m.0).collect();
         let dir = crate::root().join("tests/qemu/golden");
         for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
@@ -1513,10 +1613,16 @@ expect: TEST PASS
                 panic!("{file}: tests/qemu/golden/ holds only screendump goldens, *.png")
             });
             assert!(
-                names.contains(&name),
+                names.contains(&name) || moments.contains(&name),
                 "no scenario takes screendump {name:?}"
             );
-            screen::decode_png(&fs::read(&path).unwrap()).unwrap();
+            let png = screen::decode_png(&fs::read(&path).unwrap()).unwrap();
+            if source(&png) == Some(screen::HOST_RENDER) {
+                assert!(
+                    moments.contains(&name),
+                    "{file}: the host render draws no screendump {name:?}"
+                );
+            }
         }
     }
 }

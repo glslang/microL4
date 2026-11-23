@@ -11,3 +11,10 @@ publish.workspace = true
 # provides the memory a dump describes.
 l4core = { path = "../core", features = ["testing"] }
 miniz_oxide = "0.9"
+
+[dev-dependencies]
+# The screendump goldens' host render (`hostrender.rs`): term's renderer
+# on an fb::Surface, drawing tui's App, as the guest's term does.
+fb = { path = "../user/fb" }
+term = { path = "../user/term" }
+tui = { path = "../user/tui" }
