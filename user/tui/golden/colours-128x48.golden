@@ -1,0 +1,383 @@
+# tui-colours on Hyper-V's 1024x768 framebuffer.
+size: 128x48
+keys: \e[B\e[B\r
+screen:
+| microL4 terminal demo                                                                                                   128x48 |
+|                                                                                                                                |
+| ╭─ Menu ───────────────╮ ╔═ Colours ═════════════════════════════════════════════════════════════════════════════════════════╗ |
+| │   1 Overview         │ ║                                                                                                   ║ |
+| │   2 Attributes       │ ║ The 16 colours as backgrounds, SGR 40 to 47 and 100 to 107:                                       ║ |
+| │ > 3 Colours          │ ║    0     1     2     3     4     5     6     7                                                    ║ |
+| │   4 Boxes            │ ║    8     9    10    11    12    13    14    15                                                    ║ |
+| │   5 Keys             │ ║ As text, SGR 30 to 37 and 90 to 97: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15                         ║ |
+| │   6 Quit             │ ║                                                                                                   ║ |
+| ╰──────────────────────╯ ║ The 6 x 6 x 6 cube, SGR 48;5 from 16 to 231:                                                      ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║ The 24 greys, 232 to 255:                                                                         ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║ 24 true colours from red to blue, SGR 48;2, as term maps them:                                    ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║ Text in 256 and true colours: 38;5;208  38;2;255;0;255  38;5;16 on 48;5;229                       ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ╚═══════════════════════════════════════════════════════════════════════════════════════════════════╝ |
+|━━ Log ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━|
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|key 1: Down                                                                                                                     |
+|key 2: Down                                                                                                                     |
+|key 3: Enter                                                                                                                    |
+|>                                                                                                                               |
+| Up/Down j/k: move  Enter: open  1-6: jump  q: quit                                                                     frame 4 |
+attrs:
+|AAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAB|
+|                                                                                                                                |
+|   CCCCCC                   CCCCCCCCC                                                                                           |
+|                                                                                                                                |
+|                                                                                                                                |
+|  DDDDDDDDDDDDDDDDDDDDDD    EEEEEEFFFFFFGGGGGGHHHHHHIIIIIIJJJJJJKKKKKKLLLLLL                                                    |
+|                            MMMMMMNNNNNNOOOOOOPPPPPPQQQQQQRRRRRRSSSSSSTTTTTT                                                    |
+|                                                                UUVVWWXXYYZZaabbccddeeefffggghhhiiijjj                          |
+|                                                                                                                                |
+|                                                                                                                                |
+|                            klmnopqrstuvwxyz0123456789!"#$%&'()*                                                                |
+|                            +,-./:;<=>?@[\]^_`{}~ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎ                                                                |
+|                            ÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòó                                                                |
+|                            ôõöøùúûüýþÿĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘ                                                                |
+|                            ęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļ                                                                |
+|                            ĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠ                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                            ššŢŢţţŤŤťťŦŦŧŧŨŨũũŪŪūūŬŬŭŭŮŮůůŰŰűűŲŲųųŴŴŵŵŶŶŷŷŸŸ                                                    |
+|                                                                                                                                |
+|                                                                                                                                |
+|                            ĽĽĽĽęęęęęęĚĚõõõõõõõõÐÐÑÑÑÑ----......//oooooopppp                                                    |
+|                                                                                                                                |
+|                                                          ŹŹŹŹŹŹŹŹ  źźźźźźźźźźźźźź  ŻŻŻŻŻŻŻŻŻŻŻŻŻŻŻŻŻŻŻ                         |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|  żżżżż                                                                                                                         |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
+key: A = bold fg 15 bg 4
+key: B = bg 4
+key: C = bold
+key: D = inverse
+key: E = fg 15 bg 0
+key: F = fg 15 bg 1
+key: G = fg 0 bg 2
+key: H = fg 0 bg 3
+key: I = fg 15 bg 4
+key: J = fg 15 bg 5
+key: K = fg 0 bg 6
+key: L = fg 0 bg 7
+key: M = fg 15 bg 8
+key: N = fg 0 bg 9
+key: O = fg 0 bg 10
+key: P = fg 0 bg 11
+key: Q = fg 0 bg 12
+key: R = fg 0 bg 13
+key: S = fg 0 bg 14
+key: T = fg 0 bg 15
+key: U = fg 0
+key: V = fg 1
+key: W = fg 2
+key: X = fg 3
+key: Y = fg 4
+key: Z = fg 5
+key: a = fg 6
+key: b = fg 7
+key: c = fg 8
+key: d = fg 9
+key: e = fg 10
+key: f = fg 11
+key: g = fg 12
+key: h = fg 13
+key: i = fg 14
+key: j = fg 15
+key: k = bg 16
+key: l = bg 17
+key: m = bg 18
+key: n = bg 19
+key: o = bg 20
+key: p = bg 21
+key: q = bg 22
+key: r = bg 23
+key: s = bg 24
+key: t = bg 25
+key: u = bg 26
+key: v = bg 27
+key: w = bg 28
+key: x = bg 29
+key: y = bg 30
+key: z = bg 31
+key: 0 = bg 32
+key: 1 = bg 33
+key: 2 = bg 34
+key: 3 = bg 35
+key: 4 = bg 36
+key: 5 = bg 37
+key: 6 = bg 38
+key: 7 = bg 39
+key: 8 = bg 40
+key: 9 = bg 41
+key: ! = bg 42
+key: " = bg 43
+key: # = bg 44
+key: $ = bg 45
+key: % = bg 46
+key: & = bg 47
+key: ' = bg 48
+key: ( = bg 49
+key: ) = bg 50
+key: * = bg 51
+key: + = bg 52
+key: , = bg 53
+key: - = bg 54
+key: . = bg 55
+key: / = bg 56
+key: : = bg 57
+key: ; = bg 58
+key: < = bg 59
+key: = = bg 60
+key: > = bg 61
+key: ? = bg 62
+key: @ = bg 63
+key: [ = bg 64
+key: \ = bg 65
+key: ] = bg 66
+key: ^ = bg 67
+key: _ = bg 68
+key: ` = bg 69
+key: { = bg 70
+key: } = bg 71
+key: ~ = bg 72
+key: À = bg 73
+key: Á = bg 74
+key: Â = bg 75
+key: Ã = bg 76
+key: Ä = bg 77
+key: Å = bg 78
+key: Æ = bg 79
+key: Ç = bg 80
+key: È = bg 81
+key: É = bg 82
+key: Ê = bg 83
+key: Ë = bg 84
+key: Ì = bg 85
+key: Í = bg 86
+key: Î = bg 87
+key: Ï = bg 88
+key: Ð = bg 89
+key: Ñ = bg 90
+key: Ò = bg 91
+key: Ó = bg 92
+key: Ô = bg 93
+key: Õ = bg 94
+key: Ö = bg 95
+key: Ø = bg 96
+key: Ù = bg 97
+key: Ú = bg 98
+key: Û = bg 99
+key: Ü = bg 100
+key: Ý = bg 101
+key: Þ = bg 102
+key: ß = bg 103
+key: à = bg 104
+key: á = bg 105
+key: â = bg 106
+key: ã = bg 107
+key: ä = bg 108
+key: å = bg 109
+key: æ = bg 110
+key: ç = bg 111
+key: è = bg 112
+key: é = bg 113
+key: ê = bg 114
+key: ë = bg 115
+key: ì = bg 116
+key: í = bg 117
+key: î = bg 118
+key: ï = bg 119
+key: ð = bg 120
+key: ñ = bg 121
+key: ò = bg 122
+key: ó = bg 123
+key: ô = bg 124
+key: õ = bg 125
+key: ö = bg 126
+key: ø = bg 127
+key: ù = bg 128
+key: ú = bg 129
+key: û = bg 130
+key: ü = bg 131
+key: ý = bg 132
+key: þ = bg 133
+key: ÿ = bg 134
+key: Ā = bg 135
+key: ā = bg 136
+key: Ă = bg 137
+key: ă = bg 138
+key: Ą = bg 139
+key: ą = bg 140
+key: Ć = bg 141
+key: ć = bg 142
+key: Ĉ = bg 143
+key: ĉ = bg 144
+key: Ċ = bg 145
+key: ċ = bg 146
+key: Č = bg 147
+key: č = bg 148
+key: Ď = bg 149
+key: ď = bg 150
+key: Đ = bg 151
+key: đ = bg 152
+key: Ē = bg 153
+key: ē = bg 154
+key: Ĕ = bg 155
+key: ĕ = bg 156
+key: Ė = bg 157
+key: ė = bg 158
+key: Ę = bg 159
+key: ę = bg 160
+key: Ě = bg 161
+key: ě = bg 162
+key: Ĝ = bg 163
+key: ĝ = bg 164
+key: Ğ = bg 165
+key: ğ = bg 166
+key: Ġ = bg 167
+key: ġ = bg 168
+key: Ģ = bg 169
+key: ģ = bg 170
+key: Ĥ = bg 171
+key: ĥ = bg 172
+key: Ħ = bg 173
+key: ħ = bg 174
+key: Ĩ = bg 175
+key: ĩ = bg 176
+key: Ī = bg 177
+key: ī = bg 178
+key: Ĭ = bg 179
+key: ĭ = bg 180
+key: Į = bg 181
+key: į = bg 182
+key: İ = bg 183
+key: ı = bg 184
+key: Ĳ = bg 185
+key: ĳ = bg 186
+key: Ĵ = bg 187
+key: ĵ = bg 188
+key: Ķ = bg 189
+key: ķ = bg 190
+key: ĸ = bg 191
+key: Ĺ = bg 192
+key: ĺ = bg 193
+key: Ļ = bg 194
+key: ļ = bg 195
+key: Ľ = bg 196
+key: ľ = bg 197
+key: Ŀ = bg 198
+key: ŀ = bg 199
+key: Ł = bg 200
+key: ł = bg 201
+key: Ń = bg 202
+key: ń = bg 203
+key: Ņ = bg 204
+key: ņ = bg 205
+key: Ň = bg 206
+key: ň = bg 207
+key: ŉ = bg 208
+key: Ŋ = bg 209
+key: ŋ = bg 210
+key: Ō = bg 211
+key: ō = bg 212
+key: Ŏ = bg 213
+key: ŏ = bg 214
+key: Ő = bg 215
+key: ő = bg 216
+key: Œ = bg 217
+key: œ = bg 218
+key: Ŕ = bg 219
+key: ŕ = bg 220
+key: Ŗ = bg 221
+key: ŗ = bg 222
+key: Ř = bg 223
+key: ř = bg 224
+key: Ś = bg 225
+key: ś = bg 226
+key: Ŝ = bg 227
+key: ŝ = bg 228
+key: Ş = bg 229
+key: ş = bg 230
+key: Š = bg 231
+key: š = bg 232
+key: Ţ = bg 233
+key: ţ = bg 234
+key: Ť = bg 235
+key: ť = bg 236
+key: Ŧ = bg 237
+key: ŧ = bg 238
+key: Ũ = bg 239
+key: ũ = bg 240
+key: Ū = bg 241
+key: ū = bg 242
+key: Ŭ = bg 243
+key: ŭ = bg 244
+key: Ů = bg 245
+key: ů = bg 246
+key: Ű = bg 247
+key: ű = bg 248
+key: Ų = bg 249
+key: ų = bg 250
+key: Ŵ = bg 251
+key: ŵ = bg 252
+key: Ŷ = bg 253
+key: ŷ = bg 254
+key: Ÿ = bg 255
+key: Ź = fg 208
+key: ź = fg 201
+key: Ż = fg 16 bg 229
+key: ż = faint
+cursor: 47,3
+buffer: alternate

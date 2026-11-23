@@ -1,0 +1,114 @@
+# The Keys panel, opened with Down four times and Enter, with ESC O B and
+# j among them: the key table.
+size: 160x50
+keys: \eOB\e[Bj
+keys: j\r
+screen:
+| microL4 terminal demo                                                                                                                                   160x50 |
+|                                                                                                                                                                |
+| ╭─ Menu ───────────────╮ ╔═ Keys ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗ |
+| │   1 Overview         │ ║                                                                                                                                   ║ |
+| │   2 Attributes       │ ║ Bytes                  Key     Effect                                                                                             ║ |
+| │   3 Colours          │ ║ ESC [ A, ESC O A, k    Up      the selection moves up, stopping at item 1                                                         ║ |
+| │   4 Boxes            │ ║ ESC [ B, ESC O B, j    Down    the selection moves down, stopping at item 6                                                       ║ |
+| │ > 5 Keys             │ ║ CR, LF                 Enter   opens the selected panel; on Quit, quits                                                           ║ |
+| │   6 Quit             │ ║ 1 to 6                         selects that item and opens it                                                                     ║ |
+| ╰──────────────────────╯ ║ q                              quits                                                                                              ║ |
+|                          ║ any other                      logged as an unknown key                                                                           ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║ Keys reach tui through console, where client 4 is raw: Ctrl-T 4 gives                                                             ║ |
+|                          ║ them to term, Ctrl-T Ctrl-T sends one Ctrl-T, and Ctrl-T 1 gives them                                                             ║ |
+|                          ║ back to root. term passes them on as typed, VT sequences and all.                                                                 ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝ |
+|━━ Log ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━|
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|key 1: Down                                                                                                                                                     |
+|key 2: Down                                                                                                                                                     |
+|key 3: Down                                                                                                                                                     |
+|key 4: Down                                                                                                                                                     |
+|key 5: Enter                                                                                                                                                    |
+|>                                                                                                                                                               |
+| Up/Down j/k: move  Enter: open  1-6: jump  q: quit                                                                                                     frame 6 |
+attrs:
+|AAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAB|
+|                                                                                                                                                                |
+|   CCCCCC                   CCCCCC                                                                                                                              |
+|                                                                                                                                                                |
+|                           CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC                                                                                               |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|  DDDDDDDDDDDDDDDDDDDDDD                                                                                                                                        |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|  EEEEE                                                                                                                                                         |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
+key: A = bold fg 15 bg 4
+key: B = bg 4
+key: C = bold
+key: D = inverse
+key: E = faint
+cursor: 49,3
+buffer: alternate

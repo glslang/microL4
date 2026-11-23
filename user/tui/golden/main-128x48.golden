@@ -1,0 +1,109 @@
+# tui-main on Hyper-V's 1024x768 framebuffer.
+size: 128x48
+screen:
+| microL4 terminal demo                                                                                                   128x48 |
+|                                                                                                                                |
+| ╭─ Menu ───────────────╮ ╔═ Overview ════════════════════════════════════════════════════════════════════════════════════════╗ |
+| │ > 1 Overview         │ ║                                                                                                   ║ |
+| │   2 Attributes       │ ║ A terminal emulator drawing on the GOP framebuffer, and this app inside it:                       ║ |
+| │   3 Colours          │ ║ tui writes escape sequences, term parses them into its screen model and                           ║ |
+| │   4 Boxes            │ ║ draws each cell that changed with an 8x16 font.                                                   ║ |
+| │   5 Keys             │ ║                                                                                                   ║ |
+| │   6 Quit             │ ║ Threads, by priority:                                                                             ║ |
+| ╰──────────────────────╯ ║   root     255   builds every server, then waits for their reports                                ║ |
+|                          ║   watch    255   ends the run if a server faults                                                  ║ |
+|                          ║   uart     200   the COM1 driver                                                                  ║ |
+|                          ║   console  150   clients' lines, the focus, and client 4's raw keys                               ║ |
+|                          ║   term     125   the terminal, the only thread that maps the framebuffer                          ║ |
+|                          ║   tui      100   this app, term's one client                                                      ║ |
+|                          ║                                                                                                   ║ |
+|                          ║ Terminal: 128 x 48 cells of 8 x 16 pixels, no scrollback                                          ║ |
+|                          ║                                                                                                   ║ |
+|                          ║ Keys: COM1, uart, console (client 4 is raw), term, tui.                                           ║ |
+|                          ║ Ctrl-T 4 gives term the keyboard; Ctrl-T 1 gives it back to root.                                 ║ |
+|                          ║                                                                                                   ║ |
+|                          ║ Styles: bold faint underline inverse colour                                                       ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ║                                                                                                   ║ |
+|                          ╚═══════════════════════════════════════════════════════════════════════════════════════════════════╝ |
+|━━ Log ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━|
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|>                                                                                                                               |
+| Up/Down j/k: move  Enter: open  1-6: jump  q: quit                                                                     frame 1 |
+attrs:
+|AAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAB|
+|                                                                                                                                |
+|   CCCCCC                   CCCCCCCCCC                                                                                          |
+|  DDDDDDDDDDDDDDDDDDDDDD                                                                                                        |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                    CCCC EEEEE FFFFFFFFF DDDDDDD GGGGGG                                                         |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|  EEEEE                                                                                                                         |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|                                                                                                                                |
+|DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
+key: A = bold fg 15 bg 4
+key: B = bg 4
+key: C = bold
+key: D = inverse
+key: E = faint
+key: F = underline
+key: G = fg 14
+cursor: 47,3
+buffer: alternate

@@ -1,0 +1,58 @@
+# The last moment, tui-quit: the scenario's keys, then q. The main buffer
+# is back, with the banner kept while the alternate buffer was in use and
+# the goodbye below it; the cursor on the next line.
+size: 160x50
+keys: \e[B\e[B\r
+keys: q
+screen:
+|tui: starting on a 160x50 terminal                                                                                                                              |
+|tui: bye after 4 keys                                                                                                                                           |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+cursor: 3,1

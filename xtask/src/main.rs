@@ -199,6 +199,8 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "--package",
             "term",
             "--package",
+            "tui",
+            "--package",
             "root",
             "--lib",
         ])

@@ -1,0 +1,15 @@
+[package]
+name = "tui"
+description = "microL4's terminal demo app: a menu of panels, a scrolling log and a status line, drawn with escape sequences that term renders; host-tested, with the loop the root task runs in a VSpace of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+libsys = { path = "../libsys" }

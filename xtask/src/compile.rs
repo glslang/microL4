@@ -35,7 +35,7 @@ pub const LOADER_TARGET: &str = "x86_64-unknown-uefi";
 /// (`docs/design.md`, "The kernel never touches SSE; the user target").
 pub const USER_TARGET: &str = "x86_64-unknown-none";
 /// The user crates, linted by `cargo xtask clippy`.
-pub const USER_CRATES: &[&str] = &["libsys", "fb", "uart", "console", "term", "root"];
+pub const USER_CRATES: &[&str] = &["libsys", "fb", "uart", "console", "term", "tui", "root"];
 /// The variable whose path the kernel's `include_bytes!` embeds.
 pub const ROOT_IMAGE_ENV: &str = "MICROL4_ROOT_IMAGE";
 /// Flags for the user crates, in place of `.cargo/config.toml`'s for the
@@ -227,6 +227,8 @@ pub fn clippy() -> Result<()> {
             "console",
             "--package",
             "term",
+            "--package",
+            "tui",
             "--package",
             "root",
             "--lib",

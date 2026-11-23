@@ -1,0 +1,113 @@
+# The Boxes panel, opened with 4: light, heavy, double and rounded boxes,
+# junctions, dashes, blocks and shades, and a box in DEC Special Graphics.
+size: 160x50
+keys: 4
+screen:
+| microL4 terminal demo                                                                                                                                   160x50 |
+|                                                                                                                                                                |
+| ╭─ Menu ───────────────╮ ╔═ Boxes ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗ |
+| │   1 Overview         │ ║                                                                                                                                   ║ |
+| │   2 Attributes       │ ║ Light, heavy, double and rounded, with their junctions:                                                                           ║ |
+| │   3 Colours          │ ║                                                                                                                                   ║ |
+| │ > 4 Boxes            │ ║  ┌───┬───┐   ┏━━━┳━━━┓   ╔═══╦═══╗   ╭───────╮                                                                                    ║ |
+| │   5 Keys             │ ║  │   │   │   ┃   ┃   ┃   ║   ║   ║   │       │                                                                                    ║ |
+| │   6 Quit             │ ║  ├───┼───┤   ┣━━━╋━━━┫   ╠═══╬═══╣   │       │                                                                                    ║ |
+| ╰──────────────────────╯ ║  │   │   │   ┃   ┃   ┃   ║   ║   ║   │       │                                                                                    ║ |
+|                          ║  └───┴───┘   ┗━━━┻━━━┛   ╚═══╩═══╝   ╰───────╯                                                                                    ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║ Mixed weights, double with single, and the diagonals:                                                                             ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║  ╒═╤═╕  ╓─╥─╖  ┍━┯━┑  ┎─┰─┒  ┌─┲━┓  ╭─╮                                                                                           ║ |
+|                          ║  ╞═╪═╡  ╟─╫─╢  ┝━┿━┥  ┠─╂─┨  ┢━╅─┦  ╰─╯                                                                                           ║ |
+|                          ║  ╘═╧═╛  ╙─╨─╜  ┕━┷━┙  ┖─┸─┚  ┗━┹─┘  ╱╲╳                                                                                           ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║ Dashes: ┄ ┅ ┆ ┇ ┈ ┉ ┊ ┋ ╌ ╍ ╎ ╏                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║ Blocks: ▁▂▃▄▅▆▇█ ▉▊▋▌▍▎▏ ▔▕ ▀▐ ▖▗▘▙▚▛▜▝▞▟                                                                                         ║ |
+|                          ║ Shades: ░░░ ▒▒▒ ▓▓▓ ███                                                                                                           ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║ DEC Special Graphics, ESC ( 0 to ESC ( B:                                                                                         ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║  ┌───┬───┐                                                                                                                        ║ |
+|                          ║  │   │   │                                                                                                                        ║ |
+|                          ║  ├───┼───┤                                                                                                                        ║ |
+|                          ║  │   │   │                                                                                                                        ║ |
+|                          ║  └───┴───┘                                                                                                                        ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║  ◆ ▒ ° ± · ⎺ ⎻ ─ ⎼ ⎽   diamond, shade, degree, plus-minus, dot, scan lines 1 to 9                                                 ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ║                                                                                                                                   ║ |
+|                          ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝ |
+|━━ Log ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━|
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|key 1: 4                                                                                                                                                        |
+|>                                                                                                                                                               |
+| Up/Down j/k: move  Enter: open  1-6: jump  q: quit                                                                                                     frame 2 |
+attrs:
+|AAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAAAAAB|
+|                                                                                                                                                                |
+|   CCCCCC                   CCCCCCC                                                                                                                             |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|  DDDDDDDDDDDDDDDDDDDDDD                                                                                                                                        |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|  EEEEE                                                                                                                                                         |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|                                                                                                                                                                |
+|DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
+key: A = bold fg 15 bg 4
+key: B = bg 4
+key: C = bold
+key: D = inverse
+key: E = faint
+cursor: 49,3
+buffer: alternate
