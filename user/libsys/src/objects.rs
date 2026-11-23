@@ -120,8 +120,21 @@ impl<'a> UntypedAlloc<'a> {
         })
     }
 
+    /// Where `count` objects of `2^bits` bytes would go in the untyped in
+    /// slot `untyped`, named rather than chosen, device untyped included:
+    /// at its modelled watermark aligned up to the object size, as the
+    /// kernel places them. `None` if BootInfo lists no such untyped or they
+    /// do not fit. Records nothing; [`UntypedAlloc::record`] does.
+    pub fn place(&self, untyped: CPtr, bits: u32, count: u64) -> Option<Placement> {
+        let i = usize::try_from(untyped.checked_sub(self.first)?).ok()?;
+        let d = self.list.get(i)?;
+        let bytes = count.checked_mul(1u64.checked_shl(bits)?)?;
+        let offset = align_up(self.used[i], bits)?;
+        (offset.checked_add(bytes)? <= d.size()).then_some(Placement { untyped, offset })
+    }
+
     /// Records that `count` objects of `2^bits` bytes went where
-    /// [`UntypedAlloc::choose`] said.
+    /// [`UntypedAlloc::choose`] or [`UntypedAlloc::place`] said.
     pub fn record(&mut self, at: Placement, bits: u32, count: u64) {
         let i = (at.untyped - self.first) as usize;
         self.used[i] = at.offset + (count << bits);
@@ -148,6 +161,8 @@ pub enum AllocError {
     NoSlots,
     /// No RAM untyped has room.
     NoUntyped,
+    /// The named untyped is not one BootInfo lists, or has no room.
+    NoRoom,
     /// `Untyped_Retype` failed.
     Kernel(Error),
 }
@@ -158,6 +173,7 @@ impl fmt::Display for AllocError {
             AllocError::BadRequest => f.write_str("bad size or count"),
             AllocError::NoSlots => f.write_str("no free slots left"),
             AllocError::NoUntyped => f.write_str("no RAM untyped has room"),
+            AllocError::NoRoom => f.write_str("the named untyped is not BootInfo's or has no room"),
             AllocError::Kernel(e) => write!(f, "Untyped_Retype: {e}"),
         }
     }
@@ -198,6 +214,43 @@ impl<'a> ObjectAlloc<'a> {
             .untyped
             .choose(bits, count)
             .ok_or(AllocError::NoUntyped)?;
+        self.retype_at(ipc, at, ty, size_bits, bits, count)
+    }
+
+    /// As [`retype`](Self::retype), from the untyped in slot `untyped`,
+    /// named rather than picked: a device untyped, which the picker never
+    /// takes, into frames (the framebuffer's, `ty` `Frame4K` or
+    /// `Frame2M`), or a RAM untyped the caller chose. The objects go at its
+    /// watermark aligned up to their size, which the picker's model
+    /// records, so later picks of a RAM untyped stay right.
+    pub fn retype_from(
+        &mut self,
+        ipc: Ipc,
+        untyped: CPtr,
+        ty: ObjectType,
+        size_bits: u64,
+        count: u64,
+    ) -> Result<CPtr, AllocError> {
+        let bits = object_bits(ty, size_bits).ok_or(AllocError::BadRequest)?;
+        if count == 0 {
+            return Err(AllocError::BadRequest);
+        }
+        let at = self
+            .untyped
+            .place(untyped, bits, count)
+            .ok_or(AllocError::NoRoom)?;
+        self.retype_at(ipc, at, ty, size_bits, bits, count)
+    }
+
+    fn retype_at(
+        &mut self,
+        ipc: Ipc,
+        at: Placement,
+        ty: ObjectType,
+        size_bits: u64,
+        bits: u32,
+        count: u64,
+    ) -> Result<CPtr, AllocError> {
         let first = self.slots.alloc(count).ok_or(AllocError::NoSlots)?;
         untyped_retype(
             ipc,
@@ -315,6 +368,47 @@ mod tests {
         assert_eq!(u.used(17), Some(0x18E0));
         assert_eq!(u.used(18), None);
         assert_eq!(u.used(3), None);
+    }
+
+    /// QEMU's framebuffer untyped lead the list: a 2 MiB one, then smaller
+    /// ones, each retyped by name into frames from its start.
+    #[test]
+    fn a_named_untyped_device_or_ram_places_at_its_watermark() {
+        let list = [
+            device(0x8000_0000, 21),
+            device(0x8020_0000, 20),
+            ram(0x10_0000, 14),
+        ];
+        let mut u = UntypedAlloc::from_list(16, &list);
+        let mut take = |slot, bits, count| {
+            let p = u.place(slot, bits, count)?;
+            u.record(p, bits, count);
+            Some(p.offset)
+        };
+        assert_eq!(take(16, 21, 1), Some(0));
+        assert_eq!(take(16, 12, 1), None, "the 2 MiB untyped is full");
+        assert_eq!(take(17, 12, 256), Some(0));
+        assert_eq!(take(17, 12, 1), None);
+        // A RAM untyped named fills on from its watermark, aligned up, and
+        // the picker sees it used.
+        assert_eq!(take(18, 5, 1), Some(0));
+        assert_eq!(take(18, 11, 2), Some(0x800));
+        assert_eq!(u.used(18), Some(0x1800));
+        assert_eq!(
+            u.choose(12, 1).map(|p| (p.untyped, p.offset)),
+            Some((18, 0x2000))
+        );
+        // Slots BootInfo does not list.
+        assert_eq!(u.place(15, 12, 1), None);
+        assert_eq!(u.place(19, 12, 1), None);
+        assert_eq!(
+            u.place(18, 12, 0),
+            Some(Placement {
+                untyped: 18,
+                offset: 0x2000
+            })
+        );
+        assert_eq!(u.place(18, 64, 1), None);
     }
 
     #[test]
