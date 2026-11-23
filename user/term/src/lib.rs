@@ -4,10 +4,11 @@
 //! term parses its client's bytes as a VT100-family terminal does
 //! ([`parser`], Paul Williams' DEC state machine adapted for UTF-8), keeps a
 //! screen model of two buffers ([`screen`]) and gives the renderer each
-//! cell's look and the cells whose look changed ([`look`]). [`Terminal`]
-//! joins the parser and the screen. Everything here is pure, uses nothing
-//! but `core` and is host-tested against golden screens
-//! (`user/term/golden/`).
+//! cell's look and the cells whose look changed ([`look`]), whose glyphs
+//! come from an 8×16 bitmap font ([`font`], Spleen's ASCII and generated
+//! box drawing). [`Terminal`] joins the parser and the screen. Everything
+//! here is pure, uses nothing but `core` and is host-tested against golden
+//! screens (`user/term/golden/`).
 //!
 //! A server splits its state window with [`split_state`], makes a
 //! [`Terminal`] over the first two grids and a [`Drawn`] over the third,
@@ -21,6 +22,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod font;
 pub mod look;
 pub mod palette;
 pub mod parser;
