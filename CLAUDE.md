@@ -66,7 +66,11 @@ system calls); without it every command boots the selftest kernel.
   `qemu_args:` and `expect:`, a scenario can `send:` input to COM1 once the
   `expect:` lines above it match, `forbid:` text, require with `next:` that
   the line right after an `expect:`'s starts with a text, pick `kernel:
-  release`, and ask for `exit: timeout` (`docs/design.md`, "The harness").
+  release`, ask for `exit: timeout`, and take a `screendump:` of the screen
+  once the line above it matches, which must equal
+  `tests/qemu/golden/<name>.png` pixel for pixel (`cargo xtask test
+  <scenario> --bless` writes the golden; a mismatch keeps the screen and a
+  difference image beside the log) (`docs/design.md`, "The harness").
 - When a scenario fails, xtask prints the tail of COM1 and keeps the full log
   in `target/xtask/scenarios/<name>/serial.log`, beside its `disk.img`; a
   scenario that passes keeps its log but not its 64 MiB disk image.
