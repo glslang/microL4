@@ -7,11 +7,18 @@
 //! printable ASCII and tab as they are, every other byte as a visible
 //! escape, so no client can move the cursor out of its own line to
 //! overwrite another client's or console's status line
-//! (`docs/redteam/m7-console-escapes.md`). M8's raw mode (label `0x125`,
-//! reserved until then) is where a client's bytes would pass as they are.
-//! console's own status lines are in reverse video ([`STATUS_ON`]), which
-//! a client, unable to send ESC, cannot produce: a client's text that
-//! reads like one shows as plain text.
+//! (`docs/redteam/m7-console-escapes.md`). console's own status lines are
+//! in reverse video ([`STATUS_ON`]), which a client, unable to send ESC,
+//! cannot produce: a client's text that reads like one shows as plain
+//! text.
+//!
+//! Client 4 ([`RAW`]) is raw from M8 (`docs/design.md`, "Input and the
+//! term protocol"): while it has focus every byte typed goes to its raw
+//! queue as it is, unedited and unechoed, ESC sequences included, except
+//! the focus keys: Ctrl-T and a digit moves the focus, Ctrl-T Ctrl-T
+//! queues one Ctrl-T, and Ctrl-T and anything else drops both. It has no
+//! input line, so nothing is ever shown, echoed or restored for it. Raw
+//! mode is about input only: its output is shown as every client's.
 
 use libsys::proto::MAX_BYTES;
 
@@ -26,6 +33,12 @@ pub const EDIT: usize = 255;
 pub const WAITING: usize = 512;
 /// The longest name `Attach` takes.
 pub const NAME: usize = 16;
+/// The raw client's index: client 4, term, which fetches its bytes with
+/// `ReadRaw`.
+pub const RAW: usize = 3;
+/// The raw queue: bytes typed for the raw client that `ReadRaw` has not
+/// taken.
+pub const RAW_QUEUE: usize = 512;
 
 const BEL: u8 = 0x07;
 const BS: u8 = 0x08;
@@ -175,6 +188,12 @@ pub struct Terminal {
     after_cr: bool,
     ctrl_t: bool,
     esc: Esc,
+    raw: [u8; RAW_QUEUE],
+    raw_len: usize,
+    /// A byte reached the raw queue since the last [`Terminal::end_of_read`].
+    raw_added: bool,
+    /// A byte found the raw queue full since then, and BEL went out.
+    raw_rang: bool,
 }
 
 impl Default for Terminal {
@@ -194,6 +213,10 @@ impl Terminal {
             after_cr: false,
             ctrl_t: false,
             esc: Esc::None,
+            raw: [0; RAW_QUEUE],
+            raw_len: 0,
+            raw_added: false,
+            raw_rang: false,
         }
     }
 
@@ -219,6 +242,42 @@ impl Terminal {
     /// Client `c`'s edit buffer.
     pub fn edit(&self, c: usize) -> &[u8] {
         &self.clients[c].edit[..self.clients[c].edit_len]
+    }
+
+    /// The raw queue.
+    pub fn raw(&self) -> &[u8] {
+        &self.raw[..self.raw_len]
+    }
+
+    /// `ReadRaw`: everything in the raw queue, possibly nothing, into
+    /// `out`, at once; returns how many bytes. The queue is then empty.
+    pub fn read_raw(&mut self, out: &mut [u8; RAW_QUEUE]) -> usize {
+        let n = self.raw_len;
+        out[..n].copy_from_slice(&self.raw[..n]);
+        self.raw_len = 0;
+        n
+    }
+
+    /// The end of the bytes one uart `Read` returned: whether any reached
+    /// the raw queue, so that the run loop signals term once. A full
+    /// queue's BEL may then ring again.
+    pub fn end_of_read(&mut self) -> bool {
+        self.raw_rang = false;
+        core::mem::replace(&mut self.raw_added, false)
+    }
+
+    /// A byte for the raw queue; past [`RAW_QUEUE`] it is dropped, and the
+    /// first dropped since the last [`end_of_read`](Self::end_of_read)
+    /// sends BEL.
+    fn raw_push(&mut self, b: u8, out: &mut impl Out) {
+        if self.raw_len < RAW_QUEUE {
+            self.raw[self.raw_len] = b;
+            self.raw_len += 1;
+            self.raw_added = true;
+        } else if !self.raw_rang {
+            self.raw_rang = true;
+            out.put(Source::Console, &[BEL]);
+        }
     }
 
     /// `Attach`: client `c`'s name in status lines, [`shown`]; at most
@@ -306,7 +365,8 @@ impl Terminal {
     /// `Read` by client `c`. With a typed line waiting: a flush, and the
     /// line, into `line`. Otherwise `save` moves the reply capability to
     /// the client's slot (`Busy` if it cannot), the held bytes become the
-    /// prompt, and the input line shows if `c` has focus.
+    /// prompt, and the input line shows if `c` has focus. Never for the
+    /// [`RAW`] client, whose `Read` [`crate::decode`] refuses.
     pub fn read(
         &mut self,
         c: usize,
@@ -314,6 +374,7 @@ impl Terminal {
         save: impl FnOnce() -> bool,
         line: &mut [u8; EDIT],
     ) -> ReadAnswer {
+        debug_assert_ne!(c, RAW, "the raw client has no lines");
         if self.clients[c].waiting_len > 0 {
             self.flush(c, out);
             let cl = &mut self.clients[c];
@@ -342,6 +403,8 @@ impl Terminal {
 
     /// A byte typed on the terminal. Returns `(c, n)` when it ends a line
     /// for client `c`'s saved Read: the line is the `n` bytes in `line`.
+    /// While the [`RAW`] client has focus the byte goes to the raw queue
+    /// instead, but for the focus keys.
     pub fn input(
         &mut self,
         b: u8,
@@ -366,10 +429,21 @@ impl Terminal {
             self.ctrl_t = false;
             if (b'1'..=b'8').contains(&b) {
                 self.focus_on(usize::from(b - b'1'), out);
+            } else if b == CTRL_T && self.focus == RAW {
+                self.raw_push(CTRL_T, out);
             }
             return None;
         }
         let f = self.focus;
+        if f == RAW {
+            // Unedited and unechoed: no input line, so nothing shows.
+            if b == CTRL_T {
+                self.ctrl_t = true;
+            } else {
+                self.raw_push(b, out);
+            }
+            return None;
+        }
         match b {
             0x20..=0x7E => {
                 self.typed(f, out);

@@ -1,12 +1,13 @@
 //! The server loop, on the user target: console's thread, which the root
 //! task starts in a VSpace and CSpace of its own, bound to notification
-//! NC.
+//! NC. From M8 it signals term's notification NT after each uart `Read`
+//! that put bytes in the raw queue.
 
 use libsys::invoke::{Slot, cnode_save_caller};
 use libsys::proto::{self, MAX_BYTES, MAX_WORDS, RX_READY, Refusal};
-use libsys::{Event, Ipc, Message, MessageInfo, Received, recv, reply_recv, send};
+use libsys::{Event, Ipc, Message, MessageInfo, Received, recv, reply_recv, send, signal};
 
-use crate::terminal::{Chunks, EDIT, ReadAnswer, Terminal};
+use crate::terminal::{Chunks, EDIT, RAW_QUEUE, ReadAnswer, Terminal};
 use crate::{Request, decode, slot};
 
 /// console's thread: loops for ever, receiving on C. Its slots are
@@ -42,6 +43,11 @@ pub fn run() -> ! {
                     }
                 }
                 out.flush();
+                // Once per Read, however many bytes it queued; NT keeps
+                // the signal until term receives.
+                if term.end_of_read() {
+                    signal(slot::KEYS);
+                }
                 r = recv(slot::ENDPOINT);
             }
             Event::Message(m) => {
@@ -103,6 +109,16 @@ fn handle<F: FnMut(&[u8])>(
                 ReadAnswer::Saved => return None,
                 ReadAnswer::Busy => refusal(Refusal::Busy),
             }
+        }
+        // At once, never saved: term blocks only in calls that answer.
+        Request::ReadRaw => {
+            let raw = buf
+                .first_chunk_mut::<RAW_QUEUE>()
+                .expect("a message holds the raw queue");
+            let n = term.read_raw(raw);
+            // Nothing to send: the reply's words may go in the buffer.
+            out.flush();
+            line_reply(ipc, &raw[..n])
         }
         Request::Sync => {
             term.flush(c, out);

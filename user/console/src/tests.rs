@@ -1,8 +1,9 @@
 //! The terminal's rules (`docs/design.md`, "Output" and "Input"): golden
 //! byte transcripts for every row of the event and input tables, how a
-//! client's control bytes are shown, the `console` scenario's input, and a
-//! proptest of eight clients' random writes, flushes, reads and typed
-//! bytes against a model of their lines.
+//! client's control bytes are shown, the `console` scenario's input, the
+//! raw client's rules (`raw`), and a proptest of eight clients' random
+//! writes, flushes, reads and typed bytes against a model of their lines
+//! and of client 4's raw queue.
 
 use std::collections::VecDeque;
 use std::string::String;
@@ -14,6 +15,7 @@ use proptest::prelude::*;
 
 use super::*;
 
+mod raw;
 mod redteam;
 
 /// Everything the terminal sent, with where each byte came from.
@@ -474,7 +476,9 @@ fn requests_check_label_then_badge_then_length() {
     let mut buf = [0; MAX_BYTES];
     let words = [2u64, u64::from_le_bytes(*b"hi\0\0\0\0\0\0")];
     let w = |i: usize| words[i];
-    assert_eq!(decode(0x125, 1, 2, w, &mut buf), Err(Refusal::BadLabel));
+    // 0x125 is ReadRaw from M8 (`raw`): client 4's only.
+    assert_eq!(decode(0x125, 1, 2, w, &mut buf), Err(Refusal::BadBadge));
+    assert_eq!(decode(0x127, 1, 2, w, &mut buf), Err(Refusal::BadLabel));
     assert_eq!(decode(0x110, 1, 2, w, &mut buf), Err(Refusal::BadLabel));
     assert_eq!(decode(0x126, 1, 2, w, &mut buf), Err(Refusal::BadLabel));
     for badge in [0, 9, 1 << 32] {
@@ -546,6 +550,9 @@ enum Op {
     Write(usize, Vec<u8>),
     Flush(usize),
     Read(usize),
+    /// Client 4's `ReadRaw`.
+    ReadRaw,
+    /// The bytes of one uart `Read`.
     Type(Vec<u8>),
 }
 
@@ -574,13 +581,38 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(0x1Bu8),
         1 => Just(b'['),
         1 => Just(0x01u8),
+        1 => any::<u8>(),
     ];
+    // Ctrl-T and a digit first, often 4, so that client 4 has focus for a
+    // good share of the typing.
+    let focus = prop_oneof![
+        3 => Just(None),
+        2 => Just(Some(b'4')),
+        1 => (b'1'..=b'8').prop_map(Some),
+    ];
+    let typed = |len: core::ops::Range<usize>| {
+        (
+            focus.clone(),
+            prop::collection::vec(typed_byte.clone(), len),
+        )
+            .prop_map(|(f, mut b)| {
+                if let Some(d) = f {
+                    b.splice(0..0, [0x14, d]);
+                }
+                Op::Type(b)
+            })
+    };
     prop_oneof![
         5 => (client.clone(), prop::collection::vec(out_byte.clone(), 0..40)).prop_map(|(c, b)| Op::Write(c, b)),
         1 => (client.clone(), prop::collection::vec(out_byte, 400..700)).prop_map(|(c, b)| Op::Write(c, b)),
         1 => client.clone().prop_map(Op::Flush),
-        2 => client.prop_map(Op::Read),
-        3 => prop::collection::vec(typed_byte, 1..30).prop_map(Op::Type),
+        // Client 4 has no lines: its Read is refused before the terminal,
+        // so it reads raw.
+        2 => client.prop_map(|c| if c == RAW { Op::ReadRaw } else { Op::Read(c) }),
+        1 => Just(Op::ReadRaw),
+        3 => typed(1..30),
+        // Long enough to fill the raw queue, but under Miri.
+        1 => typed(if cfg!(miri) { 30..60 } else { 300..700 }),
     ]
 }
 
@@ -619,6 +651,25 @@ struct Model {
     after_cr: bool,
     ctrl_t: bool,
     esc: u8,
+    // The raw client.
+    raw: Vec<u8>,
+    /// Every byte that reached the raw queue, in order.
+    raw_all: Vec<u8>,
+    /// A byte reached the queue in this Read, and BEL rang in it.
+    raw_added: bool,
+    raw_rang: bool,
+}
+
+/// What a typed byte did, beyond any line it ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Typed {
+    /// An editor's byte, or a focus key.
+    Other,
+    /// In the raw queue, with nothing on the terminal.
+    Queued,
+    /// Dropped from a full raw queue: BEL on the terminal if it was the
+    /// first in its Read, else nothing.
+    Dropped { bel: bool },
 }
 
 impl Model {
@@ -679,8 +730,51 @@ impl Model {
         Ok(None)
     }
 
-    fn typed(&mut self, b: u8) -> Option<(usize, Vec<u8>)> {
+    fn raw_push(&mut self, b: u8) -> Typed {
+        if self.raw.len() < RAW_QUEUE {
+            self.raw.push(b);
+            self.raw_all.push(b);
+            self.raw_added = true;
+            Typed::Queued
+        } else {
+            let bel = !self.raw_rang;
+            self.raw_rang = true;
+            Typed::Dropped { bel }
+        }
+    }
+
+    fn end_of_read(&mut self) -> bool {
+        self.raw_rang = false;
+        core::mem::replace(&mut self.raw_added, false)
+    }
+
+    fn typed(&mut self, b: u8) -> (Option<(usize, Vec<u8>)>, Typed) {
         let after_cr = core::mem::replace(&mut self.after_cr, false);
+        // Escapes are skipped only for a client with an input line; raw
+        // bytes never start one.
+        if self.focus == RAW && self.esc == 0 {
+            if self.ctrl_t {
+                self.ctrl_t = false;
+                return match b {
+                    b'1'..=b'8' => {
+                        self.focus = usize::from(b - b'1');
+                        (None, Typed::Other)
+                    }
+                    0x14 => (None, self.raw_push(b)),
+                    _ => (None, Typed::Other),
+                };
+            }
+            if b == 0x14 {
+                self.ctrl_t = true;
+                return (None, Typed::Other);
+            }
+            return (None, self.raw_push(b));
+        }
+        (self.edited(b, after_cr), Typed::Other)
+    }
+
+    /// A byte for a client with an input line, as in M7.
+    fn edited(&mut self, b: u8, after_cr: bool) -> Option<(usize, Vec<u8>)> {
         match self.esc {
             1 => {
                 self.esc = if b == b'[' { 2 } else { 0 };
@@ -742,6 +836,8 @@ fn check(ops: &[Op]) -> Result<(), TestCaseError> {
     let mut model = Model::new();
     let mut rec = Rec::default();
     let mut line = [0; EDIT];
+    let mut raw_read = Vec::new();
+    let mut raw = [0; RAW_QUEUE];
     for op in ops {
         match op {
             Op::Write(c, b) => {
@@ -763,16 +859,42 @@ fn check(ops: &[Op]) -> Result<(), TestCaseError> {
                     (g, w) => prop_assert!(false, "Read by {}: {:?}, the model {:?}", c, g, w),
                 }
             }
+            Op::ReadRaw => {
+                let n = term.read_raw(&mut raw);
+                prop_assert_eq!(&raw[..n], &model.raw[..]);
+                raw_read.extend_from_slice(&raw[..n]);
+                model.raw.clear();
+            }
             Op::Type(bytes) => {
                 for &b in bytes {
+                    let before = rec.0.len();
                     let got = term
                         .input(b, &mut rec, &mut line)
                         .map(|(c, n)| (c, line[..n].to_vec()));
-                    prop_assert_eq!(got, model.typed(b), "typed {:#x}", b);
+                    let (want, typed) = model.typed(b);
+                    prop_assert_eq!(got, want, "typed {:#x}", b);
+                    // Unechoed: a raw byte shows nothing, a dropped one at
+                    // most the Read's one BEL.
+                    let shown: Vec<u8> = rec.0[before..].iter().map(|e| e.1).collect();
+                    match typed {
+                        Typed::Queued | Typed::Dropped { bel: false } => {
+                            prop_assert!(shown.is_empty(), "raw {:#x} showed {:?}", b, shown)
+                        }
+                        Typed::Dropped { bel: true } => prop_assert_eq!(&shown[..], b"\x07"),
+                        Typed::Other => {}
+                    }
                 }
+                prop_assert_eq!(term.raw(), &model.raw[..]);
+                prop_assert_eq!(term.end_of_read(), model.end_of_read(), "the signal");
             }
         }
     }
+    // Client 4's typed bytes reached the raw queue once each, in order,
+    // as typed: everything ReadRaw returned, then what is left.
+    raw_read.extend_from_slice(term.raw());
+    prop_assert_eq!(&raw_read, &model.raw_all);
+    // Raw mode is input only: nothing ever showed client 4's input line.
+    prop_assert!(term.owner() != Owner::Input(RAW));
     // No client's byte, in its output or its prompt, reaches the terminal
     // as a control byte: only tab, and the CR LF console ends its lines
     // with.
