@@ -1,8 +1,9 @@
-//! The `uart` and `console` protocols (`docs/design.md`, "The uart
-//! protocol" and "Protocols"): request labels, the byte-string encoding,
-//! the error labels and `uart`'s `Stats`. Both ends are built into one root
-//! image, so this module is the protocols' only definition; it is not part
-//! of `docs/abi.md`.
+//! The `uart`, `console` and `term` protocols (`docs/design.md`, "The
+//! uart protocol", "Protocols" and "Input and the term protocol"): request
+//! labels, the byte-string encoding, the error labels, `uart`'s and
+//! `term`'s `Stats`, `term`'s `Size`, and the notification badges. Both
+//! ends are built into one root image, so this module is the protocols'
+//! only definition; it is not part of `docs/abi.md`.
 //!
 //! A byte string travels as MR0 = its length `n` and MR1 to MR⌈`n`/8⌉ =
 //! its bytes, eight per word, little-endian: byte `i` is bits 8(`i` mod 8)
@@ -49,8 +50,25 @@ pub mod label {
     pub const CONSOLE_READ: u64 = 0x123;
     /// `console`: answered once everything emitted has left the UART.
     pub const CONSOLE_SYNC: u64 = 0x124;
-    /// `console`: reserved for M8's raw mode; `BadLabel` until then.
-    pub const CONSOLE_RAW: u64 = 0x125;
+    /// `console`: everything in client 4's raw queue, possibly nothing, at
+    /// once; never saved. `BadBadge` for any badge but 4 (M8).
+    pub const CONSOLE_READ_RAW: u64 = 0x125;
+
+    /// tui's report to root on endpoint D: a byte string, the first 255
+    /// bytes it read from term. Root never answers it.
+    pub const TUI_REPORT: u64 = 0x131;
+
+    /// `term`: a byte string of at most 952 bytes for the parser; answered
+    /// with MR0 its length once every byte is applied and the frame drawn.
+    pub const TERM_WRITE: u64 = 0x140;
+    /// `term`: its input queue, all of it (at most 512 bytes), at once if
+    /// it holds anything, else once bytes arrive.
+    pub const TERM_READ: u64 = 0x141;
+    /// `term`: MR0 columns, MR1 rows, MR2 width and MR3 height in pixels
+    /// ([`super::TermSize`]).
+    pub const TERM_SIZE: u64 = 0x142;
+    /// `term`: the counters ([`super::TermStats`]); any badge.
+    pub const TERM_STATS: u64 = 0x143;
 }
 
 /// A server's refusal: the reply's label, with `length` 0.
@@ -104,6 +122,14 @@ impl fmt::Display for Refusal {
 pub const RX_READY: u64 = 1 << 32;
 /// The badge of the IRQ 4 handler's notification capability.
 pub const IRQ: u64 = 1 << 32;
+/// The badge of console's capability to term's notification NT, which it
+/// signals once per uart `Read` that put bytes in its raw queue: bit 32,
+/// above term's client badges, as [`RX_READY`] is above console's.
+pub const KEYS: u64 = 1 << 32;
+/// console's raw client: client 4, term.
+pub const CONSOLE_RAW_CLIENT: u64 = 4;
+/// The badge of term's one client; `Write`, `Read` and `Size` need it.
+pub const TERM_CLIENT: u64 = 1;
 
 /// The words a byte string of `n` bytes takes, MR0 included.
 pub const fn words_for(n: usize) -> usize {
@@ -220,6 +246,101 @@ impl fmt::Display for UartStats {
             self.line_errors,
             self.writes_held,
             self.cut_short
+        )
+    }
+}
+
+/// `term`'s `Size` reply, MR0 to MR3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermSize {
+    /// MR0, MR1: the screen in cells.
+    pub cols: u64,
+    pub rows: u64,
+    /// MR2, MR3: the framebuffer in pixels.
+    pub width: u64,
+    pub height: u64,
+}
+
+impl TermSize {
+    /// The reply's words.
+    pub const WORDS: usize = 4;
+
+    pub const fn to_words(&self) -> [u64; Self::WORDS] {
+        [self.cols, self.rows, self.width, self.height]
+    }
+
+    pub const fn from_words(w: [u64; Self::WORDS]) -> TermSize {
+        TermSize {
+            cols: w[0],
+            rows: w[1],
+            width: w[2],
+            height: w[3],
+        }
+    }
+}
+
+/// `term`'s counters, the reply to `Stats` as MR0 to MR6.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermStats {
+    /// MR0: bytes its client wrote.
+    pub written: u64,
+    /// MR1: frames drawn, one after each `Write` and the first.
+    pub frames: u64,
+    /// MR2: cells drawn.
+    pub cells: u64,
+    /// MR3: sequences the parser or the screen model ignored.
+    pub ignored: u64,
+    /// MR4: bytes `ReadRaw` brought from console.
+    pub from_console: u64,
+    /// MR5: bytes dropped because its input queue was full.
+    pub dropped: u64,
+    /// MR6: bytes of DSR and DA replies queued as input.
+    pub replies: u64,
+}
+
+impl TermStats {
+    /// The reply's words.
+    pub const WORDS: usize = 7;
+
+    pub const fn to_words(&self) -> [u64; Self::WORDS] {
+        [
+            self.written,
+            self.frames,
+            self.cells,
+            self.ignored,
+            self.from_console,
+            self.dropped,
+            self.replies,
+        ]
+    }
+
+    pub const fn from_words(w: [u64; Self::WORDS]) -> TermStats {
+        TermStats {
+            written: w[0],
+            frames: w[1],
+            cells: w[2],
+            ignored: w[3],
+            from_console: w[4],
+            dropped: w[5],
+            replies: w[6],
+        }
+    }
+}
+
+/// What root's `term: stats:` line shows: `, <n> ignored,` and `, <n>
+/// dropped` are what the `tui` scenario matches.
+impl fmt::Display for TermStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} bytes written, {} frames drawn, {} cells drawn, {} ignored, {} bytes from console, {} dropped, {} reply bytes queued",
+            self.written,
+            self.frames,
+            self.cells,
+            self.ignored,
+            self.from_console,
+            self.dropped,
+            self.replies
         )
     }
 }
@@ -344,9 +465,19 @@ mod tests {
             label::CONSOLE_FLUSH,
             label::CONSOLE_READ,
             label::CONSOLE_SYNC,
-            label::CONSOLE_RAW,
+            label::CONSOLE_READ_RAW,
+            label::TUI_REPORT,
+            label::TERM_WRITE,
+            label::TERM_READ,
+            label::TERM_SIZE,
+            label::TERM_STATS,
         ];
         assert!(all.iter().all(|&l| l > 0x8F));
+        // Distinct, and none an error label.
+        for (i, a) in all.iter().enumerate() {
+            assert!(all[i + 1..].iter().all(|b| b != a), "{a:#x}");
+            assert_eq!(Refusal::from_label(*a), None);
+        }
         for r in [
             Refusal::BadLabel,
             Refusal::BadLength,
@@ -359,6 +490,11 @@ mod tests {
         assert_eq!(Refusal::from_label(0), None);
         assert_eq!(Refusal::from_label(0x105), None);
         assert_eq!(RX_READY & 0xFFFF_FFFF, 0);
+        // term's notification bit lies above every badge its endpoint's
+        // capabilities carry (its client 1, root's Stats 2).
+        assert_eq!(KEYS & 0xFFFF_FFFF, 0);
+        assert_eq!(TERM_CLIENT & !0xFFFF_FFFF, 0);
+        assert_eq!(CONSOLE_RAW_CLIENT, 4);
     }
 
     #[test]
@@ -382,5 +518,42 @@ mod tests {
         };
         assert_eq!(s.to_words(), [1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(UartStats::from_words(s.to_words()), s);
+        let t = TermStats {
+            written: 1,
+            frames: 2,
+            cells: 3,
+            ignored: 4,
+            from_console: 5,
+            dropped: 6,
+            replies: 7,
+        };
+        assert_eq!(t.to_words(), [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(TermStats::from_words(t.to_words()), t);
+        let z = TermSize {
+            cols: 160,
+            rows: 50,
+            width: 1280,
+            height: 800,
+        };
+        assert_eq!(TermSize::from_words(z.to_words()), z);
+    }
+
+    /// The `tui` scenario expects `, 0 ignored,` and `, 0 dropped` on
+    /// root's `term: stats:` line.
+    #[test]
+    fn term_stats_show_what_the_scenario_matches() {
+        let t = TermStats {
+            written: 9000,
+            frames: 12,
+            cells: 8000,
+            from_console: 8,
+            ..TermStats::default()
+        };
+        let s = std::format!("term: stats: {t}");
+        assert_eq!(
+            s,
+            "term: stats: 9000 bytes written, 12 frames drawn, 8000 cells drawn, 0 ignored, 8 bytes from console, 0 dropped, 0 reply bytes queued"
+        );
+        assert!(s.contains(", 0 ignored,") && s.contains(", 0 dropped"));
     }
 }

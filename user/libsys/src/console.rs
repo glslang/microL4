@@ -18,6 +18,8 @@ use crate::syscall::{CPtr, Ipc};
 pub const MAX_NAME: usize = 16;
 /// The longest line [`Client::read_line`] returns.
 pub const MAX_LINE: usize = 255;
+/// The most bytes [`Client::read_raw`] returns: console's raw queue.
+pub const MAX_RAW: usize = 512;
 
 /// A console client capability, used from one thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,15 @@ impl Client {
     /// another thread of this client already waits in one.
     pub fn read_line(&self, out: &mut [u8; MAX_LINE]) -> Result<usize, CallError> {
         let r = self.0.call(label::CONSOLE_READ, None)?;
+        self.0.bytes(&r, out)
+    }
+
+    /// `ReadRaw`, for client 4 only (term): everything in console's raw
+    /// queue, the bytes typed while client 4 had focus but the focus keys,
+    /// into `out`, at once; possibly nothing. Returns how many bytes.
+    /// Any other client is refused with `BadBadge`.
+    pub fn read_raw(&self, out: &mut [u8; MAX_RAW]) -> Result<usize, CallError> {
+        let r = self.0.call(label::CONSOLE_READ_RAW, None)?;
         self.0.bytes(&r, out)
     }
 
