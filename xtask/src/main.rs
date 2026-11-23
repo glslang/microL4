@@ -191,6 +191,8 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "--package",
             "libsys",
             "--package",
+            "fb",
+            "--package",
             "uart",
             "--package",
             "console",

@@ -1,0 +1,12 @@
+[package]
+name = "fb"
+description = "microL4's GOP framebuffer: its geometry and pixel formats, the plan of frames the root task maps it with, and a write-only surface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
