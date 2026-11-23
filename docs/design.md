@@ -4689,7 +4689,7 @@ harms only the service it provides.
 
 | `root` keeps | Why |
 | --- | --- |
-| IRQControl and IOPortControl | the servers of M8 and M9 |
+| IRQControl and IOPortControl | later servers: M8's need neither, M9's drivers will |
 | the original IRQHandler and COM1 IOPort | revoking one takes uart's copy back; `watch` writes a failure line through the IOPort |
 | the original of every object it retyped for a server | revoking stops the server and reclaims its memory |
 | endpoint C's original, and a client capability with badge 1 | root is console's client 1 |
@@ -5001,8 +5001,8 @@ key before its text routes deterministically however its input races the
 clients. A focus key rather than a per-line prefix also works for raw
 keystrokes, which M8's `term` needs. Ctrl-T because QEMU's `-nographic`
 multiplexer, which `cargo xtask run` uses, takes Ctrl-A, and Ctrl-T has no
-role in a line editor; Ctrl-T Ctrl-T is left for M8's raw mode to pass a
-literal Ctrl-T.
+role in a line editor; Ctrl-T Ctrl-T is how M8's raw mode passes a literal
+Ctrl-T ([Input and the term protocol](#input-and-the-term-protocol)).
 
 #### Back-pressure
 
@@ -5074,8 +5074,8 @@ fault of root or of `watch`, which have no handler and print nothing.
 
 ### The harness
 
-Five new scenario directives and values (`xtask/src/scenario.rs`); a scenario
-without them runs exactly as before.
+Five new scenario directives and values in M7, and `screendump:` in M8
+(`xtask/src/scenario.rs`); a scenario without them runs exactly as before.
 
 | Directive | Meaning |
 | --- | --- |
@@ -5084,7 +5084,7 @@ without them runs exactly as before.
 | `forbid: <text>` | no line of the transcript may contain `<text>`; checked as each line arrives and reported when the run ends, naming the first such line |
 | `next: <text>` | right after an `expect:` or another `next:` (a parse error otherwise): the serial line right after the one that step matched must start with `<text>`, so no line came between them; any other line there fails the scenario, naming it, and ends the boot at once, since nothing after it can match. `release` and `release_fault` put the root task's first line next after the loader's `entering kernel`, so a release kernel that prints anything at boot fails them, whatever it prints |
 | `exit: timeout` | beside `success` and `failure`: the guest must still be running when the scenario's `timeout:`, which it then needs, ends the boot, with every `expect:` matched. For a kernel with no exit of its own; no scenario uses it now that `release` ends through `isa-debug-exit` |
-| `screendump: <name>` | (M8) right after an `expect:` or `next:` (a parse error otherwise): once that step has matched, and before any later `send:` is written, xtask takes the screen through QEMU's QMP `screendump`, and when the boot has ended compares it pixel for pixel with `tests/qemu/golden/<name>.png`. QEMU connects to a loopback port xtask listens on (`-qmp tcp:127.0.0.1:<port>`), and such a scenario boots with `-parallel none`, so that a machine without a display device fails rather than giving the parallel port's text console. The screen stays beside `serial.log` as `<name>.png`; a mismatch fails the scenario, saying how many pixels differ and in what box, or that the sizes differ, and adds `<name>.diff.png`, the golden at a quarter of its brightness with each differing pixel magenta. `cargo xtask test <scenario> --bless` writes a screen that differs, or has no golden, as the golden, but only in a run that passed everything else; nothing else writes one. A name is lowercase letters, digits, `-` and `_`, used by one scenario only. Goldens are PNG, palette-indexed at 256 colours or fewer, with QEMU's version as their `Source` text, which a mismatch names when it differs. The comparison is exact, with no tolerance or mask: the guest must keep the screen still from the line the screendump follows until it is taken, say by waiting for a `send:` after it, and so cannot blink a cursor. `screendump` takes q35's std VGA, which OVMF sets to 1280x800 from its EDID (`-vga std -global VGA.xres=640 -global VGA.yres=480` gives 640x480); OVMF's own text is drawn as its lines reach COM1, so a screendump before the loader runs can catch it part drawn |
+| `screendump: <name>` | (M8) right after an `expect:` or `next:` (a parse error otherwise): once that step has matched, and before any later `send:` is written, xtask takes the screen through QEMU's QMP `screendump`, and when the boot has ended compares it pixel for pixel with `tests/qemu/golden/<name>.png`. QEMU connects to a loopback port xtask listens on (`-qmp tcp:127.0.0.1:<port>`), and such a scenario boots with `-parallel none`, so that a machine without a display device fails rather than giving the parallel port's text console. The screen stays beside `serial.log` as `<name>.png`; a mismatch fails the scenario, saying how many pixels differ and in what box, or that the sizes differ, and adds `<name>.diff.png`, the golden at a quarter of its brightness with each differing pixel magenta. `cargo xtask test <scenario> --bless` (only `test` takes `--bless`) writes a screen that differs, or has no golden, as the golden, but only in a run that passed everything else, and never over a golden whose `Source` text is `microL4 host render`: it leaves that one as it is and the scenario fails, saying the golden is the host's (host test `bless_leaves_a_host_render_golden_as_it_is`). Besides `--bless`, only xtask's host test `tui_screendumps_are_the_host_render` writes a golden, with `MICROL4_BLESS=1`: the `tui` scenario's, which the host draws ([The screendump goldens](#golden-tests)); nothing else writes one. A name is lowercase letters, digits, `-` and `_`, used by one scenario only, and every file in `tests/qemu/golden/` must be a screendump some scenario takes (host test `repo_goldens_are_used_and_read`). Goldens are PNG, palette-indexed at 256 colours or fewer, with QEMU's version as their `Source` text, or `microL4 host render` for the host's, which a mismatch names when it differs. The comparison is exact, with no tolerance or mask: the guest must keep the screen still from the line the screendump follows until it is taken, say by waiting for a `send:` after it, and so cannot blink a cursor. `screendump` takes q35's std VGA, which OVMF sets to 1280x800 from its EDID (`-vga std -global VGA.xres=640 -global VGA.yres=480` gives 640x480); OVMF's own text is drawn as its lines reach COM1, so a screendump before the loader runs can catch it part drawn |
 
 **Timing.** A `send:` must have an `expect:` above it (a parse error
 otherwise): until the guest's uart has started, OVMF reads COM1, where a key
@@ -5093,16 +5093,17 @@ arrived. A guest line that the `expect:` before a `send:` names is printed
 through uart, so uart is running when the text is written. Text is written
 all at once: QEMU feeds the UART only as its FIFO has room, so nothing is
 lost however fast it arrives. Each `send:` is logged in `serial.log` as an
-`xtask: sent "<text>"` line at the point it was written; neither the matcher
-nor `forbid:` reads those lines.
+`xtask: sent "<text>"` line at the point it was written, and each screendump
+as `xtask: screendump "<name>"`; neither the matcher nor `forbid:` reads
+those lines.
 
 **Implementation.** The scenario becomes a list of steps (`expect`, `send`,
-`next`); the matcher, unchanged in what `expect:` matches, returns the sends
-it reaches as it advances, takes a `next:` only at the start of the line after
-its step's, and stays broken once one fails, and the main loop writes them to
-QEMU's stdin, which is piped for scenarios with a `send:` and stays
-`/dev/null` for the others. Matching stays line-based: a prompt without a
-newline is never seen, so a test makes the line before each `send:` a whole
+`next` and, from M8, `screendump`); the matcher, unchanged in what `expect:`
+matches, returns the sends it reaches as it advances, takes a `next:` only
+at the start of the line after its step's, and stays broken once one fails,
+and the main loop writes them to QEMU's stdin, which is piped for scenarios
+with a `send:` and stays `/dev/null` for the others. Matching stays
+line-based: a prompt without a newline is never seen, so a test makes the line before each `send:` a whole
 one and checks echo with host tests. xtask builds the release kernel beside
 the selftest one and copies it out to
 `target/xtask/release-kernel/<profile>/kernel.elf`, since a feature change
@@ -5311,15 +5312,19 @@ servers keep theirs.
 
 A server gets no arguments in M7; term gets three, in `rdi`, `rsi` and `rdx`:
 `width | height << 32`, `stride | format << 32`, and the first pixel's offset
-in the window. Its entry stub in `user/root/src/servers.rs` checks them
-again (`fb::Geometry::from_words`) and makes a `&'static mut [u32]` of
-`stride × height` pixels at the first pixel and a `&'static mut [u64]` of the
-state's words. With the pixel slice of root's write-combining check
-([`fb`](#fb)), these are the only `unsafe` blocks M8 adds outside libsys.
-Their `SAFETY:` comments rest on root having mapped exactly those pages
-there, read-write, in this VSpace and no other, and on every bit pattern
-being a valid `u32` and `u64`. Then it calls `term::run`, which, like `uart` and `console`, is
-`#![forbid(unsafe_code)]`.
+in the window (`fb::Geometry::to_words`). Its entry stub in
+`user/root/src/servers.rs`, `term_main`, resets `libsys::output` (its
+statics are a copy of root's), checks the words again
+(`fb::Geometry::from_words`, which returns `None` for words it refuses, and
+term panics) and makes a `&'static mut [u32]` of `stride × height` pixels at
+the first pixel and a `&'static mut [u64]` of the state's words. With the
+pixel slice of root's write-combining check (`clear` in
+`user/root/src/tui.rs`, [`fb`](#fb)), these are the only `unsafe` blocks M8
+adds outside libsys, whose one more is `libsys::cpu::store_fence`'s
+`sfence`. Their `SAFETY:` comments rest on root having mapped exactly those
+pages there, read-write, in this VSpace and no other, and on every bit
+pattern being a valid `u32` and `u64`. Then it calls `term::run`, which,
+like `uart` and `console`, is `#![forbid(unsafe_code)]`.
 
 #### Capabilities
 
@@ -5362,11 +5367,13 @@ parser.
 | notification NT's original | |
 | endpoint D | tui's report and its faults |
 
-The slot cost on QEMU, by this note's estimate: 489 framebuffer frames, 107
-for term's state and its page table, one page table for the framebuffer
-window, and about 155 for each of the four servers' VSpaces and CNodes once
-the image carries term's and tui's code; with the boot regions, about 1,600
-of the root CNode's 4,096. `test=tui` prints the count ([Open
+The slot cost on QEMU, as `test=tui` measures it: 489 framebuffer frames
+and the window's one page table, 107 for term's state and its page table,
+and 128 for each of the four servers' VSpaces and CNodes with the 145-frame
+image; with the boot regions (about 280 slots, as the untyped count varies)
+and the endpoints, notifications, TCBs and CNodes, about 1,405 of the root
+CNode's 4,096. `test=tui` prints the count, `servers: term and tui started;
+root CNode 1407 of 4096 slots used` in one run ([Open
 questions](#open-questions)).
 
 #### Failures
@@ -5396,9 +5403,17 @@ the geometry or the reason there is none, checking in this order:
 | `framebuffer_untyped` is empty | `NotHandedOut` | `fb: none: the kernel kept it (see its boot summary)`, as [ADR 0024](adr/0024-framebuffer-untyped-rejections.md) allows |
 | `format` is neither 1 (RGB) nor 2 (BGR) | `Format` | the number |
 | `width` below 640 or `height` below 384, 80 × 24 cells | `TooSmall` | the size |
-| `stride` below `width`, `base` not 4-byte aligned, or 4 × `stride` × `height` above `size` | `Geometry` | the fields |
-| the untyped are not all device memory, or do not tile the page-rounded `[base, base + size)` in order | `Untyped` | the first that does not |
+| `stride` below `width`, `base` not 4-byte aligned, 4 × `stride` × `height` above `size`, or `base` + `size` past the address space | `Geometry` | the fields |
+| the untyped are not all device memory of at least a page, each aligned to its size, tiling the page-rounded `[base, base + size)` in order | `Untyped` | the first that does not, or where they end short |
 | the window, from `WINDOW` to the visible bytes' end rounded up to 2 MiB, would pass `0x4000_0000` | `TooLarge` | the size |
+
+`Geometry::to_words` gives the three words root passes term, and
+`Geometry::from_words` checks them again on term's side: a known format, at
+least 640 × 384, a stride of at least the width, an offset 4-byte aligned and
+below 2 MiB, and a window below `0x4000_0000`; anything else is `None`.
+`Geometry::new` makes a geometry for a host buffer, any size from 1 × 1
+whose window fits, without the 640 × 384 minimum, so that host tests can
+draw on small surfaces; root and term never use it.
 
 **Pixel formats.** A colour `(r, g, b)` is the `u32` `r | g << 8 | b << 16`
 for RGB (byte 0 red) and `b | g << 8 | r << 16` for BGR (byte 0 blue); byte 3
@@ -5419,31 +5434,43 @@ window. On QEMU the six untyped give one 2 MiB frame and 488 4 KiB frames
 under one page table. On Hyper-V, 4 × 1024 × 768 bytes is 3 MiB, which would
 need two untyped, but the M5 Hyper-V check's log reports one, so the GOP
 reports a larger power-of-two size there; with 4 MiB or more the plan is two
-2 MiB frames and no page table. The M8 log's `fb:` line prints the size.
+2 MiB frames and no page table. Root's `fb:` line is the plan's `Display`
+and term's grid, with the GOP's size; on QEMU it reads `fb: 1280x800 BGR,
+stride 1280, 4000 KiB at 0x80000000: 6 untyped, 1 2 MiB and 488 4 KiB
+frames; 160x50 cells`. Root retypes each `Plan::retypes` entry from its
+untyped, named rather than chosen (`libsys::ObjectAlloc::retype_from`), so
+the frames land in consecutive slots in the plan's order
+(`servers::framebuffer_objects`).
 
-**The surface.** `fb::Surface` is the geometry and the pixel slice. It fills
-the visible area and writes an 8×16 block of pixels at a cell's position,
-each bounds-checked against `width` and `height`, never the stride's padding.
+**The surface.** `fb::Surface` is the geometry and the pixel slice, which
+`Surface::new` refuses if it holds fewer than `stride × height` pixels. It
+fills the visible area and writes an 8×16 block of pixels at a cell's
+position, each bounds-checked against `width` and `height`, never the
+stride's padding: a cell past the right or bottom edge is cut there.
 It has no read method: nothing reads the framebuffer, which is slow
 uncached and write-combining memory, and the renderer keeps what it drew in
 the state window instead.
 
 **No framebuffer.** Root prints the reason and starts neither term nor tui.
-console's client 4 stays raw with nothing reading it ([Input](#input-and-the-term-protocol)).
-`test=tui` then fails with the reason; `test=nofb` passes.
+console's client 4 stays raw, with nothing attached as it and nothing
+reading its queue ([Input](#input-and-the-term-protocol)). `test=tui` then
+fails with the reason; `test=nofb` passes.
 
-**The write-combining check, H10.** Before term starts, `test=tui` maps
-every framebuffer frame into root's own VSpace at `WINDOW`, first
-`Uncached`, fills the visible area once with 0 and times it with the TSC,
-unmaps, then does the same `WriteCombining`, ending with `sfence` before the
-second TSC read, and prints `fb: full clear: uncached <n> us,
-write-combining <m> us`. The page tables move to term's VSpace afterwards
-(Map takes an unmapped, empty structure). QEMU's TCG has no cache model, so
-the two times mean nothing there; on Hyper-V a write-combining clear several
-times faster than the uncached one confirms that a PAT type of WC wins over
-the firmware's MTRR type for the framebuffer [H10]. Only a single mapping of
-each frame exists at any time, apart from the direct map's UC alias, which
-the kernel never touches ([Mapping](#mapping)).
+**The write-combining check, H10.** Before term starts, `test=tui`
+(`write_combining_check` in `user/root/src/tui.rs`) maps the window's page
+tables and every framebuffer frame into root's own VSpace at `WINDOW`,
+first `Uncached`, fills the visible area once with 0 and times it with the
+TSC, unmaps the frames, then does the same `WriteCombining`; each fill ends
+with `sfence` before its second TSC read. Root prints `fb: full clear:
+uncached <n> us, write-combining <m> us`. `PageTable_Unmap`
+(`libsys::vspace::unmap_table`) then leaves the page tables unmapped and
+empty, so they move to term's VSpace (Map takes an unmapped, empty
+structure). QEMU's TCG has no cache model, so the two times, about a
+millisecond each, mean nothing there; on Hyper-V a write-combining clear
+several times faster than the uncached one confirms that a PAT type of WC
+wins over the firmware's MTRR type for the framebuffer [H10]. Only a single
+mapping of each frame exists at any time, apart from the direct map's UC
+alias, which the kernel never touches ([Mapping](#mapping)).
 
 ### The font
 
@@ -5461,31 +5488,32 @@ pixel; 266 glyphs, 4,256 bytes of read-only data in `term::font`.
 | every other code point, U+FFFD included | the replacement glyph, an outline box over rows 2 to 13 and columns 1 to 6 | generated |
 
 **Spleen.** [Spleen](https://github.com/fcambus/spleen), by Frederic Cambus,
-is released under the BSD 2-Clause licence: the `LICENSE` on the
-repository's default branch, read on 2026-11-23, is that licence, with the
+is released under the BSD 2-Clause licence. The glyphs come from its tag
+`2.3.0` (commit `b2d04a6180d4`), whose `LICENSE` is that licence, with the
 line `Copyright (c) 2018-2026, Frederic Cambus`, the clauses for source and
-binary redistributions and the disclaimer. That is the branch, not a
-release, so the builder still reads the `LICENSE` of the tag it takes the
-font from before copying a glyph, and copies that one. The builder converts
-`spleen-8x16.bdf` from a tagged release into
-`user/term/src/font/spleen.rs`: one entry per glyph, each row a binary
-literal so that a glyph reads as a picture, under a header that names the
-tag, the BDF's SHA-256 and the licence. The licence text, with its copyright
-line, goes in `user/term/src/font/LICENSE-spleen`, and `cargo xtask image`
-copies it to `\licenses\spleen.txt` on the ESP, since the VHDX is a binary
-redistribution, for which the licence's second clause asks that the notice
-come with it. If the tag's licence is not that one, the builder draws the 95
-ASCII glyphs as data instead, under the repository's licence.
+binary redistributions and the disclaimer. `tools/spleen.py` fetches that
+tag's `spleen-8x16.bdf` and `LICENSE` (or takes local copies), refuses
+either unless its SHA-256 is the one pinned in the script, and writes
+`user/term/src/font/spleen.rs`: the 100 glyphs above, one entry per glyph,
+each row a binary literal so that a glyph reads as a picture, under a
+header that names the tag, the commit, the BDF's SHA-256 and the licence
+text, with an FNV-1a checksum of the rows. It copies the `LICENSE`
+verbatim to `user/term/src/font/LICENSE-spleen`; the output depends only on
+the two inputs. `cargo xtask image` copies `LICENSE-spleen` to
+`\licenses\spleen.txt` on the ESP (`xtask::image::LICENCES`), since the
+VHDX is a binary redistribution, for which the licence's second clause asks
+that the notice come with it. Moving to another tag means reading its
+`LICENSE` first, then updating the script's tag, commit and hashes.
 
 **Generated glyphs.** The others are computed by `const fn` from a
 description, so they need no font's coverage and always join across cells:
 
 | Glyphs | Rule |
 | --- | --- |
-| box drawing | four arms, up, right, down and left, each none, light, heavy or double, drawn from the cell's edge to its centre: light vertical in column 3 and light horizontal in row 7; heavy in columns 3 and 4 and rows 7 and 8; double in columns 2 and 5 and rows 6 and 9. A light or heavy arm runs from its edge through the centre square, column 3 or row 7 for light and columns 3 and 4 or rows 7 and 8 for heavy, so heavy corners such as U+251B have no notch. Each of a double arm's two lines runs from its edge to the arm beside it on that line's side: to that arm's nearer line if there is one (row 9 for a down arm's left line beside a double left arm), else to the farther line of the arm on the other side (row 6 for that line beside only a double right arm, as in U+2554), else to the centre row or column. So U+2554 draws an outer corner at column 2, row 6 and an inner one at column 5, row 9, and U+256C four inner corners. A glyph is the union of its arms, so every arm meets its neighbour's at the same column or row. Dashed forms (U+2504 to U+250B, U+254C to U+254F) are their line with evenly spaced gaps; the rounded corners U+256D to U+2570 are drawn as the light corners; U+2571 to U+2573 are lines corner to corner |
+| box drawing | four arms, up, right, down and left, each none, light, heavy or double, drawn from the cell's edge to its centre: light vertical in column 3 and light horizontal in row 7; heavy in columns 3 and 4 and rows 7 and 8; double in columns 2 and 5 and rows 6 and 9. A light or heavy arm runs from its edge through the centre square, column 3 or row 7 for light and columns 3 and 4 or rows 7 and 8 for heavy, so heavy corners such as U+251B have no notch. Each of a double arm's two lines runs from its edge to the arm beside it on that line's side: to that arm's nearer line if there is one (row 9 for a down arm's left line beside a double left arm), else to the farther line of the arm on the other side (row 6 for that line beside only a double right arm, as in U+2554), else to the centre row or column. So U+2554 draws an outer corner at column 2, row 6 and an inner one at column 5, row 9, and U+256C four inner corners. A light arm beside a double one (no glyph mixes heavy and double) runs to the double's farther line, so that a corner such as U+2556 or U+2558 closes, but stops at its nearer line when the double runs straight through the cell, a double arm on each side of the light one, and no arm continues the light one beyond it, so that a T such as U+255F or U+2564 stops at the double line. A glyph is the union of its arms, so every arm meets its neighbour's at the same column or row. Dashed forms are their line cut into 2 (U+254C to U+254F), 3 (U+2504 to U+2507) or 4 (U+2508 to U+250B) dashes per cell, each followed by a gap of an eighth of the cell's length, one pixel across or two rows down; the rounded corners U+256D to U+2570 are drawn as the light corners; U+2571 to U+2573 are lines corner to corner, one pixel per row and two rows per column |
 | block elements | eighths: U+2581 to U+2588 fill the bottom 2, 4, ... 16 rows and U+2589 to U+258F the left 7 down to 1 columns; U+2594 the top 2 rows and U+2595 column 7; halves at row 8 and column 4; quadrants of 4 × 8 pixels; the shades U+2591 (`(x + 2y) mod 4 = 0`), U+2592 (`x + y` even) and U+2593 (the complement of U+2591) |
 | scan lines | a light line in row 1, 4, 10 or 13, so with U+2500 in row 7 the five DEC scan lines are evenly spaced |
-| U+25C6 | a filled diamond centred on the cell |
+| U+25C6 | a filled diamond centred on the cell: the pixels whose centres lie within 3 of the cell's centre, (3.5, 7.5), in the L1 norm, 6 pixels wide in columns 1 to 6 and 6 tall in rows 5 to 10 |
 
 ### `term`: the parser
 
@@ -5520,12 +5548,16 @@ is ignored. A string ends with ESC `\`: the ESC leaves the string state, and
 collected intermediates (a private marker `<` to `?` is collected like one)
 and up to 16 parameters, each saturating at 65,535, with an empty parameter
 read as 0; parameters after the 16th are dropped and the sequence still
-dispatches, and a sequence with more than two intermediates is dispatched
-as unknown. A `:` anywhere in a CSI or DCS sequence sends it to its ignore
-state, so xterm's colon forms of SGR (`38:2::r:g:b`) are ignored whole.
-Every dispatch the screen model does not act on, a CSI ignore, every DCS and
-SOS, PM or APC string, and an OSC other than 0 and 2 counts as an ignored
-sequence in term's `Stats`.
+dispatches, and a sequence with more than two intermediates is not
+dispatched but ignored. A `:` anywhere in a CSI or DCS sequence sends it to
+its ignore state, so xterm's colon forms of SGR (`38:2::r:g:b`) are ignored
+whole. Every dispatch the screen model does not act on, a CSI ignore, a
+sequence with too many intermediates, every DCS and SOS, PM or APC string,
+and an OSC other than 0 and 2 counts as an ignored sequence in term's
+`Stats`. An SGR, SM, RM, DECSET or DECRST counts as ignored only if none of
+its parameters acted. A CSI or ESC sequence cut short by CAN, SUB or ESC
+never dispatches and does not count; a string cut short that way ends as at
+ST, so a DCS or SOS, PM or APC string counts and an OSC string dispatches.
 
 | Williams | term | Why |
 | --- | --- | --- |
@@ -5561,7 +5593,7 @@ writes cells into a grid of words and queues replies.
 | tab stops | one bit per column, every eighth column (1, 9, 17, ...) at reset |
 | character sets | G0 and G1, each ASCII or DEC Special Graphics; GL is G0 after SI and G1 after SO |
 | modes | below |
-| title | the bytes after `0;` or `2;` among the first 64 bytes of the last OSC 0 or 2 string, so at most 62, not decoded; shown nowhere, kept for tests |
+| title | the bytes after `0;` or `2;` among the first 64 bytes of the last OSC string whose number, before its first `;`, is exactly `0` or `2`, however the string ended (ST, BEL, CAN, SUB or ESC), so at most 62, not decoded; shown nowhere, kept for tests |
 | replies | bytes term owes its client (DSR and DA answers), queued as input ([Input](#input-and-the-term-protocol)) |
 
 Rows and columns count from 1 in sequences and in this section.
@@ -5583,9 +5615,13 @@ Every code point takes one cell: there are no wide or combining characters
 ([Open questions](#open-questions)).
 
 **The pending wrap** is set only by a print into the last column with DECAWM
-on, and cleared by every action that moves the cursor, to the same cell or not, by
-ICH, DCH, ECH, EL, ED, IL, DL and DECSTBM, and by a print; DECRC restores
-the saved one.
+on, and cleared by every action that moves the cursor, to the same cell or
+not, by ICH, DCH, ECH, EL, ED but ED 3, IL and DL inside the region and a
+DECSTBM that sets a region, and by a print; DECRC restores the saved one.
+Everything else keeps it: SU, SD, HTS, TBC, DSR, DA, SGR, a buffer switch
+without DECRC (47, 1047) and a change of DECAWM among them. With DECAWM
+reset, a pending wrap does nothing: the next print writes the last column
+again.
 
 | Control | Effect |
 | --- | --- |
@@ -5605,7 +5641,7 @@ the saved one.
 | `ESC H` | HTS | a tab stop at the cursor's column |
 | `ESC M` | RI | up one, stopping at row 1; on the region's top row, scroll the region down one instead |
 | `ESC c` | RIS | power-on state: both buffers blank, main active, cursor home with the default pen, every mode at its default, the full screen as region, tab stops every eight columns, ASCII in G0 and G1, no title, both saved cursors gone |
-| `ESC # 8` | DECALN | every cell an `E` in the default pen, the full screen as region, cursor home |
+| `ESC # 8` | DECALN | every cell an `E` in the default pen, whatever the pen, which itself stays as it was; the full screen as region, cursor home |
 | `ESC ( 0`, `ESC ( B`, `ESC ) 0`, `ESC ) B` | SCS | G0 or G1 becomes DEC Special Graphics or ASCII |
 | `ESC =`, `ESC >` | DECKPAM, DECKPNM | stored only: input passes through as typed |
 | `ESC \` | ST | nothing |
@@ -5614,7 +5650,9 @@ the saved one.
 In CSI sequences `Pn` defaults to 1, and 0 counts as 1; `Ps` defaults to 0.
 A position past the screen stops at its last row or column. A count larger
 than the cells or lines it can act on (ICH, DCH, ECH, IL, DL, SU, SD) acts
-as that number, so one sequence costs at most a pass over the region. Home
+as that number, so one sequence costs at most a pass over the region; CHT
+and CBT stop at the screen's edge, so one reads at most `cols`² tab bits,
+and REP is bounded as its row says. Home
 is where `CUP 1;1` puts the cursor: row 1 column 1, or with DECOM the
 region's top row.
 
@@ -5635,7 +5673,7 @@ region's top row.
 | `Pn P` | DCH | delete `Pn` cells at the cursor; blanks enter at the right |
 | `Pn S`, `Pn T` | SU, SD | scroll the region up or down `Pn` lines; the cursor stays |
 | `Pn X` | ECH | blank `Pn` cells from the cursor, not past the line's end; the cursor stays |
-| `Pn b` | REP | print the last printed code point `Pn` more times, if the action just before was a print; else nothing |
+| `Pn b` | REP | print the last printed code point `Pn` more times, if the action just before was a print; else nothing, so a REP after a REP does nothing. It makes only as many prints as leave the state `Pn` prints would: without DECAWM at most `cols`; with it, `Pn` up to `s` = `cols` × (2 × `rows` + 2), and past that `s` + (`Pn` − `s`) mod `cols`, since from there the state repeats every `cols` prints, IRM or not |
 | `Ps c` | DA | for 0 only: reply `CSI ? 1 ; 2 c`, a VT100 with advanced video |
 | `Pn d` | VPA | row `Pn`, counted as CUP counts it |
 | `Ps g` | TBC | 0: clear the stop at the cursor; 3: clear every stop |
@@ -5644,7 +5682,7 @@ region's top row.
 | `Ps ; ... m` | SGR | below |
 | `Ps n` | DSR | 5: reply `CSI 0 n`; 6: reply `CSI <row> ; <column> R`, with DECOM the row counted from the region's top |
 | `Pt ; Pb r` | DECSTBM | `Pb` past the last row counts as the last row, as in xterm; then, if `Pt` is less than `Pb` (defaults 1 and the last row), the region becomes rows `Pt` to `Pb` and the cursor goes home; else nothing, the cursor included |
-| `s`, `u` | SCOSC, SCORC | as DECSC, DECRC |
+| `s`, `u` | SCOSC, SCORC | with no parameter, as DECSC, DECRC; with any, ignored |
 | `Ps SP q` | DECSCUSR | 0 to 2: block; 3, 4: underline; 5, 6: bar. The cursor never blinks |
 | any other final, or a listed one with another private marker or intermediate | | ignored |
 
@@ -5693,11 +5731,13 @@ xterm's 6 × 6 × 6 cube, `16 + 36r + 6g + b` with levels `00`, `5F`, `87`,
 foreground is `AAAAAA` and the default background `000000`, the same as 7
 and 0 but kept apart in the model, so SGR 39 and 49 can be tested. A true
 colour maps to the cube's nearest entry (per channel, the nearest level,
-ties to the lower) or the ramp's (the nearest level to the channels'
-mean, ties to the lower), whichever is nearer by squared distance, the cube
-on a tie. A cell keeps nine bits per colour, the default or an index, so it
-stays one word; 256 colours and the mapping are enough for every app here.
-Bold draws the glyph overstruck and does not brighten its colour.
+ties to the lower) or the ramp's (the level nearest the channels' exact
+mean, found by comparing `r + g + b` with three times each level, ties to
+the lower), whichever is nearer by squared distance, the cube on a tie
+(`term::palette::nearest`). A cell keeps nine bits per colour, the default
+or an index, so it stays one word; 256 colours and the mapping are enough
+for every app here. Bold draws the glyph overstruck and does not brighten
+its colour.
 
 **Scrolling** moves lines only inside the region. A line that leaves the
 screen is gone: there is no scrollback.
@@ -5709,15 +5749,22 @@ ignored.
 
 ### The renderer
 
-`term::render` draws the screen model on an `fb::Surface`. After each
-`Write`, once every byte is applied, it draws a frame: for each cell of the
-active buffer it computes the cell's look and compares it with what it last
-drew there, kept in the state window's third grid; it draws exactly the
-cells whose look changed, records them, and ends with `sfence`
-(`libsys::cpu::store_fence` on the target), so write-combining buffers have
-drained before term replies. Damage is computed, not tracked: no action has
-to remember to mark a cell dirty, and a change that leaves a cell looking
-the same draws nothing.
+`term::render` draws the screen model on a `term::Surface`, a trait of three
+methods: `fill`, the whole visible area in one colour; `cell`, an 8×16 cell's
+bits in two colours; and `fence`, called once at the end of every frame. On
+the target the surface is `term::Pixels`, which adapts `fb::Surface`, with
+its bounds checks and pixel format, and whose `fence` is `sfence`
+(`libsys::cpu::store_fence`); on the host it is a buffer. After each
+`Write`, once every byte is applied, `Renderer::frame` draws a frame: for
+each cell of the active buffer it computes the cell's look
+(`term::look`) and compares it with what it last drew there, kept in the
+state window's third grid (`term::Drawn`); it draws exactly the cells whose
+look changed, records them, and ends with `Surface::fence`, so
+write-combining buffers have drained before term replies. Damage is
+computed, not tracked: no action has to remember to mark a cell dirty, and a
+change that leaves a cell looking the same draws nothing. `render::full`
+draws a whole screen whatever was drawn before, which the host render and
+the damage checks compare frames with.
 
 | Step | Look |
 | --- | --- |
@@ -5730,17 +5777,22 @@ the same draws nothing.
 | pixels | each colour through the surface's format |
 
 A look is a glyph index, two 24-bit colours and five flags, so it fits one
-word and the comparison is one per cell. At start term fills the whole
-visible area, margins included, with the default background, records every
-cell as a blank, puts the model in RIS's power-on state (the state window's
-zeroed words are not taken for blanks), and draws its first frame, which
-shows the cursor at home; nothing the firmware or root's write-combining
-check drew survives. Italic and blink are kept in the model
-and the goldens but drawn upright and steady: there is no italic font, and a
-blink or a blinking cursor would need a timer and make every screendump
-depend on when it was taken. The renderer never reads the framebuffer, so
-scrolling redraws the cells whose looks moved; a full redraw at 160 × 50 is
-8,000 cells, 4 MB of pixel writes.
+word and the comparison is one per cell. `term::Session` is term's screen on
+the framebuffer: the parser, the screen model and the renderer over
+`term::Pixels`. `Session::start` is term's whole start-up, which
+`term::run` and the host render both call: the grid is `term::cells` of the
+geometry, its whole cells up to 240 × 75; it fills the whole visible area,
+margins included, with the default background, records every cell as a
+blank, puts the model in RIS's power-on state (the state window's words,
+zeroed or not, are not taken for blanks), and draws its first frame, which
+shows the cursor, a block, at home; nothing the firmware or root's
+write-combining check drew survives. `Session::write` applies one
+`Write`'s bytes and draws the frame, and keeps the counts `Stats` reports.
+Italic and blink are kept in the model and the goldens but drawn upright and
+steady: there is no italic font, and a blink or a blinking cursor would need
+a timer and make every screendump depend on when it was taken. The renderer
+never reads the framebuffer, so scrolling redraws the cells whose looks
+moved; a full redraw at 160 × 50 is 8,000 cells, 4 MB of pixel writes.
 
 ### Input and the term protocol
 
@@ -5754,10 +5806,11 @@ its bytes, so in [Output](#output)'s event table its typed bytes are "any
 other typed byte" and restoring does nothing while it has focus. After
 each uart `Read` that added a byte to the queue, console signals slot 5
 (NT, `KEYS`) once, as uart signals console with `RX_READY`. A byte that
-finds the queue full is dropped, and console sends BEL to COM1 once for that
-`Read`, as Enter does in M7 with no room. Raw mode is about input only:
-console shows its raw client's output as it shows every client's
-([Output](#output)), so no client can put an escape sequence on COM1, and
+finds the queue full is dropped, and console sends BEL to COM1 at the first
+byte a uart `Read` drops, once per `Read`, as Enter does in M7 with no room.
+Raw mode is about input only: console shows its raw client's output as it
+shows every client's ([Output](#output)), so no client can put an escape
+sequence on COM1, and
 M7's red-team guarantee holds unchanged. Client 4 is raw because of its
 number, not because of a request, so routing stays a function of the byte
 stream alone, as M7 requires; with no term running, its bytes wait in the
@@ -5769,11 +5822,17 @@ queue and the excess is dropped.
 
 client 4's `Read` is also `BadBadge`: it never has a line to read. Its
 `Attach`, `Write`, `Flush` and `Sync` work as any client's; term attaches
-as `term`, so the focus line reads `[console] focus 4 (term)`.
+as `term`, so the focus line reads `[console] focus 4 (term)`. With no term
+nothing attaches as client 4, and the line reads `[console] focus 4 (client
+4)`, as in `test=nofb`.
 
-**term's loop.** term is bound to NT and receives on T. At start it fills
-the screen and draws its first frame ([The renderer](#the-renderer)), then
-attaches to console. A signal with `KEYS` makes it call `ReadRaw` once and
+**term's loop.** term is bound to NT and receives on T. `term::server`
+makes the protocol's decisions, pure and host-tested (`decode`,
+`Server::request`, `Server::release` and the input queue, `Input`), and
+`term::run`, on the target only, does the system calls around them. At
+start term resets `libsys::output`, fills the screen and draws its first
+frame (`Session::start`, [The renderer](#the-renderer)), then attaches to
+console. A signal with `KEYS` makes it call `ReadRaw` once and
 append the bytes to its input queue (512 bytes; past that they are dropped
 and counted). NT exists from console's spawn, so a signal console sent
 before term ran waits there, and term's first receive returns it. A message
@@ -5787,7 +5846,7 @@ always answers at once; it never waits for its client.
 | `0x140` | `Write` | a byte string of at most 952 bytes | MR0 `n`, once every byte is applied and the frame is drawn | `BadLength` |
 | `0x141` | `Read` | none | a byte string of at most 512 bytes: the input queue, all of it, at once if it holds anything; else the reply is saved in slot 5 (`CNode_SaveCaller`) and sent when bytes arrive | `Busy` |
 | `0x142` | `Size` | none | MR0 columns, MR1 rows, MR2 width and MR3 height in pixels | |
-| `0x143` | `Stats` | none | MR0 bytes written, MR1 frames drawn, MR2 cells drawn, MR3 sequences ignored, MR4 bytes from console, MR5 bytes dropped, MR6 reply bytes queued | |
+| `0x143` | `Stats` | none | MR0 bytes written, MR1 frames drawn (the first included), MR2 cells drawn, MR3 sequences ignored, MR4 bytes `ReadRaw` brought from console (dropped ones included), MR5 bytes dropped from the full input queue, keys and replies alike, MR6 reply bytes queued (not those dropped) | |
 
 `Write`, `Read` and `Size` need badge 1, term's one client; `Stats` takes any
 badge, and root's has 2. Labels, the byte-string encoding and the errors are
@@ -5801,12 +5860,12 @@ VT sequences for its keys.
 
 | Part | What |
 | --- | --- |
-| `libsys::proto` | `TERM_WRITE` to `TERM_STATS`, `CONSOLE_READ_RAW` (`0x125`, which replaces `CONSOLE_RAW`), `KEYS`, `TermStats`; `UartStats` gains MR8, uart's burst (15 with working FIFOs, 1 without), for the Hyper-V check |
+| `libsys::proto` | `TERM_WRITE` to `TERM_STATS`, `CONSOLE_READ_RAW` (`0x125`, which replaces `CONSOLE_RAW`), `TUI_REPORT` (`0x131`), `KEYS`, `CONSOLE_RAW_CLIENT` (4), `TERM_CLIENT` (1), `TermSize`, `TermStats` and its `term: stats:` text; `UartStats` gains MR8, uart's burst (15 with working FIFOs, 1 without), for the Hyper-V check, and its text ends `, burst <n>`, so every uart line root prints does |
 | `libsys::term::Client` | `write` (split at 952 bytes), `read`, `size`, `stats`, and `core::fmt::Write` |
 | `libsys::console::Client::read_raw` | console's `ReadRaw` |
-| `libsys::cpu::store_fence` | `sfence`, after a frame's pixel writes |
-| `libsys::vspace` | the `UNCACHED` (3) and `WRITE_COMBINING` (4) attributes words, and mapping a 2 MiB frame |
-| `libsys::objects` | retyping a named untyped, device untyped included, into frames |
+| `libsys::cpu::store_fence` | `sfence`, after a frame's pixel writes and after each of root's timed clears; a sequentially consistent fence under Miri |
+| `libsys::vspace` | the `UNCACHED` (3) and `WRITE_COMBINING` (4) attributes words, mapping a 2 MiB frame, and `unmap_table`, `PDPT_Unmap` to `PageTable_Unmap` |
+| `libsys::objects` | retyping a named untyped, device untyped included, into frames (`ObjectAlloc::retype_from`) |
 
 The term protocol is not in `docs/abi.md`, for the reason M7's are not: both
 ends are in one root image, and `libsys::proto` is its only definition.
@@ -5818,63 +5877,73 @@ and each key into the bytes of a frame, and `tui::run`, its loop on the
 target. Every byte `run` writes to term comes from `App`, the banner and the
 goodbye included, so a host test that feeds term `App`'s output renders
 exactly what the guest's term was sent. It asks term's `Size`, attaches to
-console as `tui` and prints `tui: <cols>x<rows> terminal`, writes `tui:
+console as `tui` and prints `tui: <cols>x<rows> terminal`; `App::new`
+refuses a size outside 80 × 24 to 240 × 75. `App::start` writes `tui:
 starting on a <cols>x<rows> terminal` and CR LF on the main screen, enters
-the alternate buffer with `CSI ? 1049 h`, and draws its first frame. Then it
-loops: `Read` from term, decode keys, and for each key a frame, after which
-it prints `tui: frame <n> drawn: <panel>, item <k>` through console. That
-line goes out only after term has answered the frame's last `Write`, so when
-the harness sees it, the framebuffer holds the frame and nothing will change
-it until the next key.
+the alternate buffer with `CSI ? 1049 h`, clears it with `CSI 2 J`, sets a
+block cursor with `CSI 2 SP q` and the log's region with DECSTBM, and draws
+its first frame. Then `run` loops: `Read` from term, decode keys, and for
+each key a frame, after which it prints `tui: frame <n> drawn: <panel>, item
+<k>` through console, as it did for the first. That line goes out only after
+term has answered the frame's last `Write`, so when the harness sees it, the
+framebuffer holds the frame and nothing will change it until the next key.
 
 | Rows | Columns | What |
 | --- | --- | --- |
-| 1 | all | title bar: ` microL4 terminal demo` and, right-aligned, `<cols>x<rows>`, bold bright white on blue, the rest of the row blue through EL |
-| 3 to 10 | 2 to 25 | the menu: a light box with rounded corners in UTF-8, ` Menu ` in bold, items `1 Overview`, `2 Attributes`, `3 Colours`, `4 Boxes`, `5 Keys` and `6 Quit` on rows 4 to 9, the selected one with `> ` in reverse video |
+| 1 | all | title bar: ` microL4 terminal demo` and `<cols>x<rows>`, right-aligned one cell short of the right edge, matching the one blank cell the title starts with; bold bright white on blue, the rest of the row blue through EL (`App::title`) |
+| 2 | all | blank, through EL |
+| 3 to 10 | 2 to 25 | the menu: a light box with rounded corners in UTF-8, ` Menu ` in bold, items `1 Overview`, `2 Attributes`, `3 Colours`, `4 Boxes`, `5 Keys` and `6 Quit` on rows 4 to 9; the selected one reads ` > <n> <name>`, its whole row inside the box in reverse video |
 | 3 to `rows` − 11 | 27 to `cols` − 1 | the open panel: a double-line box in UTF-8, its name in bold, its content inside |
 | `rows` − 10 | all | a heavy rule with ` Log ` in faint |
-| `rows` − 9 to `rows` − 2 | all | the log, DECSTBM's region: each key appends `key <n>: <name>` at its bottom row, and LF scrolls it |
+| `rows` − 9 to `rows` − 2 | all | the log, DECSTBM's region: each key appends `key <n>: <name>` at its bottom row, and LF scrolls it; `<name>` is `Up`, `Down`, `Enter`, the digit, or `unknown` and the key's bytes, escaped as `send:` writes them (the first 8, then `...`) |
 | `rows` − 1 | all | the prompt `> ` with the cursor, a visible block, after it |
-| `rows` | all | the status line in reverse video: ` Up/Down j/k: move  Enter: open  1-6: jump  q: quit`, and `frame <n>` right-aligned |
+| `rows` | all | the status line in reverse video: ` Up/Down j/k: move  Enter: open  1-6: jump  q: quit`, and `frame <n>` right-aligned one cell short of the right edge, as the title's size is (`App::status`) |
 
 | Panel | Content |
 | --- | --- |
 | Overview | what the demo is, the threads and their priorities (root 255, watch 255, uart 200, console 150, term 125, tui 100), the size in cells, how keys reach it, and one line with a word in each of bold, faint, underline, inverse and a colour |
 | Attributes | a line per SGR attribute, on and off, and combinations; italic and blink labelled as drawn upright and steady |
-| Colours | colours 0 to 15 as swatches labelled in a contrasting foreground; the 216-colour cube as six rows of 36 cells; the 24 greys; 24 true colours from red to blue, as mapped |
+| Colours | colours 0 to 15 as swatches labelled in a contrasting foreground, and as text; the 216-colour cube as six rows of 36 cells; the 24 greys; 24 true colours from red to blue, as mapped; text in 256 and true colours |
 | Boxes | light, heavy, double and rounded boxes, their junctions, the block elements and shades, and one box drawn in DEC Special Graphics (`ESC ( 0` ... `ESC ( B`) |
 | Keys | the key table below |
 
-Every frame but the log is drawn whole each time, and term's renderer
-draws only what changed; the log is only appended to, so the region's
-scrolling runs on the machine too. Every byte tui writes depends only on the
-size and the keys typed, and tui uses only sequences term acts on, so
-term's ignored count stays 0: CR and LF; CUP, EL and ED 2; SGR, every row
-of its table but 6, 21 and the ignored forms; DECSTBM; DECTCEM and
-DECSCUSR; `?1049`; and SCS
-`ESC ( 0` and `ESC ( B`. A frame goes out in `Write`s of at most 952 bytes, each drawn as term
-answers it, so a viewer may glimpse a frame half drawn; the screendumps never
-do. The layout needs 80 × 24 cells, which `fb` guarantees.
+Every row but the log's is drawn whole each frame, from its first column to
+its last, row 2 and the margins between and beside the boxes included, with
+the cursor hidden (DECTCEM reset) until the frame ends at the prompt, and
+term's renderer draws only what changed; the log is only appended to, so
+the region's scrolling runs on the machine too. Every byte tui writes
+depends only on the size and the keys typed, and tui uses only sequences
+term acts on, so term's ignored count stays 0: CR and LF; CUP, EL and ED 2;
+SGR, every row of its table but 6, 21 and the ignored forms; DECSTBM;
+DECTCEM and DECSCUSR; `?1049`; and SCS `ESC ( 0` and `ESC ( B`. A frame
+goes out in `Write`s of at most 952 bytes, each drawn as term answers it,
+so a viewer may glimpse a frame half drawn; the screendumps never do. The
+layout needs 80 × 24 cells, which `fb` guarantees.
 
 | Bytes | Key | Effect |
 | --- | --- | --- |
 | `ESC [ A`, `ESC O A`, `k` | Up | the selection moves up, stopping at item 1 |
 | `ESC [ B`, `ESC O B`, `j` | Down | the selection moves down, stopping at item 6 |
-| CR, LF | Enter | opens the selected panel; on Quit, quits |
+| CR, LF | Enter | each of them: opens the selected panel; on Quit, quits. So CR LF is two Enters |
 | `1` to `6` | | selects that item and opens it |
 | `q` | | quits |
 | any other | | logged as an unknown key |
 
-The decoder is a function of the byte stream: ESC followed by `[` or `O` and
-a final byte, with any parameters between, is a key; ESC followed by anything
-else is dropped and the byte after it decoded afresh; a sequence unfinished at
+The decoder (`tui::Decoder`) is a function of the byte stream: ESC followed
+by `[` or `O` and a final byte (`0x40` to `0x7E`), with any parameter and
+intermediate bytes (`0x20` to `0x3F`) between, is one key, Up or Down for
+`A` or `B` with nothing between, else an unknown key; ESC followed by
+anything else is dropped and the byte after it decoded afresh; so is a
+sequence cut short by any other byte, a control, DEL or a byte from `0x80`,
+which is how a second ESC starts a new sequence; a sequence unfinished at
 the end of a `Read` waits for the next. Quitting writes `CSI r`, giving the
 whole screen back as the region, which the buffers share, then `CSI ? 1049
 l`, so the main buffer and its cursor come back, then `tui: bye after <n>
 keys` and CR LF on the main screen below the banner; prints `tui: quit
-after <n> keys`; and reports to root with a
-`Call` on D, label `0x131`, carrying the first 255 bytes it read from term
-as a byte string. Root never answers, so tui stays blocked there. A fault
+after <n> keys`; and reports to root with a `Call` on D, label `0x131`,
+carrying the first 255 bytes it read from term as a byte string, those of
+the quitting `Read` after the `q` included. Root never answers, so tui
+stays blocked there. A fault
 arrives on the same capability with a fault label, 1 to 5, so root tells the
 two apart by the label, as in `test=console`.
 
@@ -5914,19 +5983,24 @@ cursor: 2,2
 | `reply: <text>` | the bytes queued for the client, escaped as `input:`; none otherwise |
 | `title: <text>` | the title's bytes, escaped as `input:`; empty otherwise |
 | `ignored: <n>` | sequences ignored; 0 otherwise |
+| `modes: <words>` | the modes away from their defaults that no other line shows, in this order: `insert` (IRM), `newline` (LNM), `cursor-keys` (DECCKM), `reverse` (DECSCNM), `origin` (DECOM), `no-autowrap` (DECAWM reset) and `keypad` (DECKPAM); none otherwise |
+| `region: <top>,<bottom>` | a scroll region other than the whole screen, from 1; the whole screen otherwise |
 
 `size:` (1 to 240 columns by 1 to 75 rows), `screen:` and `cursor:` are
 required. A case without one of them, a grid row of the wrong width, a key
-used in `attrs:` but not defined, or a line of no kind above is a parse
-error that fails its group, so no case passes by leaving its expectation
-out; every line left out has the stated default, which is checked.
+used in `attrs:` but not defined, or a line of no kind above is an error
+that fails its group, so no case passes by leaving its expectation out; a
+case of only its comment, `size:` and `input:` lines fails too, until
+`MICROL4_BLESS=1` fills it in. Every line left out has the stated default,
+which is checked.
 
 `user/term/src/tests/golden.rs` runs every case four ways: one `Write` per
 `input:` line, all of it in one `Write`, one byte per `Write`, and split at
 points drawn from a generator seeded with the file's name. Each run must
-give the expected state, and after each run the frames the renderer drew
-after every `Write` must equal a full render of the final state, on a
-`Surface` over a host buffer. So each case checks the parser's independence
+give the expected state, and after each run the frames drawn after every
+`Write` must equal a full render of the final state, both as looks and as
+the pixels the renderer draws with the font on a `Surface` over a host
+buffer. So each case checks the parser's independence
 from write boundaries and the renderer's damage as well as the model. The
 test runs one group per `#[test]`, reports every failing case with a
 side-by-side diff of its grids, and is skipped under Miri, which cannot read
@@ -5946,55 +6020,83 @@ files.
 | `modes` | 25 | DECTCEM, DECSCNM, DECOM, LNM, the four alternate-buffer modes, DECSC and DECRC per buffer, RIS, DECALN, DECSCUSR |
 | `charsets` | 8 | DEC Special Graphics in G0 and G1, SO and SI, its whole table |
 | `reports` | 6 | DSR 5 and 6, with DECOM and with the pending wrap, DA |
-| total | 316 | |
+| `programs` | 6 | realistic output of programs, beyond the note's twelve groups |
+| total | 322 | |
 
-A group's `#[test]` also fails with fewer cases than its minimum, so a case
-deleted by mistake shows. The test writer writes them from this note alone, without reading the
+As built the groups hold 479 cases. A group's `#[test]` also fails with
+fewer cases than its minimum, and `every_group_directory_is_tested` fails a
+directory under `golden/` that no test runs, so a case deleted by mistake
+shows. The test writer writes them from this note alone, without reading the
 implementation, as PLAN.md's role says, and the reviewer reads them: a case's
 grids show what the screen must look like. `MICROL4_BLESS=1 cargo xtask test`
-rewrites the expected lines of each failing case from the result, keeping its
-comment, `size:` and `input:`, and naming keys in the order cells first use
-them; it is for intended changes, and the commit's diff of the cases is what
-the reviewer checks.
+rewrites the expected lines of each failing case whose four runs agree from
+the result, keeping its comment, `size:` and `input:`, and naming keys in the
+order cells first use them, with the letters the case already gave a key of
+the same meaning; it is for intended changes, and the commit's diff of the
+cases is what the reviewer checks.
 
 Beside the goldens: a proptest of random byte streams, weighted toward ESC,
 `[`, digits, `;`, finals and UTF-8 lead and continuation bytes (512 cases of
 up to 4 KiB), checking that nothing panics, the cursor and every write stay
 in the grid and the region rules hold, the four ways of writing agree, and
-damage equals a full render; a test that walks every state and every byte
-`0x00` to `0xFF` through the parser against a transcription of the table
-above, written in the test, not taken from the parser; and the renderer's
-pixel tests, one per row of its table, against hand-drawn 8×16 cells.
+damage equals a full render
+(`random_streams_keep_the_invariants_however_they_are_split`, in
+`user/term/src/tests/props.rs`, with `rep_acts_as_its_count_of_prints`
+beside it); a test that walks every state and every byte `0x00` to `0xFF`
+through the parser against a transcription of the table above, written in
+the test, not taken from the parser
+(`every_state_and_byte_follows_the_table`, `tests/table.rs`); and the
+renderer's pixel tests, one per row of its table, against hand-drawn 8×16
+cells (`tests/render.rs`).
 
-**tui's goldens.** `user/tui/golden/` holds, in the same format, the screens
-of every panel at 160 × 50 and the scenario's three moments (below) at
-160 × 50 and 128 × 48, with `keys:` lines in place of `input:` that `App`
-turns into bytes.
+**tui's goldens.** `user/tui/golden/<name>-<cols>x<rows>.golden` holds, in
+the same format, the screens of every panel at 160 × 50 and the scenario's
+three moments (below), `main`, `colours` and `quit`, at 160 × 50 and
+128 × 48, with `keys:` lines in place of `input:`: each one `Read`'s bytes,
+which `App` turns into frames after its start. `user/tui/src/tests/golden.rs`
+(`the_panels_and_the_scenario_s_moments`) feeds `App`'s whole output to
+`term::Terminal` in the `Write`s `run` makes, at most 952 bytes each, and
+term's screen must be the file's, `modes:` and `region:` included, with
+nothing ignored after any frame. The same bytes also go through a reference
+model of the sequences tui writes (`user/tui/src/tests/screen.rs`), written
+apart from term, which panics on any sequence tui may not send and must leave
+the same screen; `MICROL4_BLESS=1` rewrites a failing case from term's
+screen, but never one the two models disagree on.
 
 **The screendump goldens.** xtask's host test
-`tui_screendumps_are_the_host_render` makes each screendump's golden image
-without QEMU. For each of the three moments it starts term as the guest's
-term starts, filling the whole surface with the default background, feeds
-it `App`'s output up to that moment (the banner, the frames for the keys
-typed by then and, for `tui-quit`, the goodbye), renders it with term's
-renderer on an `fb::Surface`
-over a BGR host buffer, converts that to RGB and compares it with the
+`tui_screendumps_are_the_host_render` (`xtask/src/hostrender.rs`) makes each
+screendump's golden image without QEMU. For each of the three moments,
+`tui-main`, `tui-colours` and `tui-quit` (`hostrender::MOMENTS`), it starts
+term as the guest's term starts (`term::Session::start` on an `fb::Surface`
+over a BGR host buffer), writes it `App`'s output up to that moment in the
+`Write`s tui's `run` makes (the banner, the frames for the keys typed by
+then and, for `tui-quit`, the goodbye), requires that term ignored nothing,
+owes tui no reply and drew by damage exactly what `render::full` draws,
+converts the pixels to RGB and compares them, exactly, with the
 golden: at 1280×800 with `tests/qemu/golden/<name>.png`, which the `tui`
 scenario's `screendump:` compares the guest's screen with, and at 1024×768
 with `tools/hyperv/golden/<name>.png`, for the Hyper-V check (the harness
 allows only goldens a QEMU scenario takes in `tests/qemu/golden/`). It lives
 in xtask because xtask's PNG code (`xtask/src/screen.rs`, on `miniz_oxide`)
 reads and writes every golden image; `fb`, `term` and `tui` are its
-host-only dev-dependencies. `MICROL4_BLESS=1` writes each image whose pixels
-differ, through that encoder (a palette at 256 colours or fewer), with the
-`Source` text `microL4 host render` in place of QEMU's version. So a change
-that changes the screen changes the PNG in the same commit, and the reviewer
-sees the new image in the PR. The guest's screen is thus compared with an
-image only the host drew: `cargo xtask test tui --bless` refuses a golden
-whose `Source` names the host render, and a QEMU capture put there any other
-way fails this host test unless it equals the host render, so QEMU cannot
-bless itself. `--bless` stays for goldens no host model can draw, such as
-`screendump`'s `ovmf`, OVMF's own screen.
+host-only dev-dependencies. A golden passes only if its pixels are the host
+render's and its `Source` text is `microL4 host render`. Otherwise the test
+fails, keeping the host render, and a difference image where the sizes
+agree, under `target/xtask/host-render/`; `MICROL4_BLESS=1` instead writes
+each such golden through that encoder (a palette at 256 colours or fewer),
+with that `Source` text in place of QEMU's version. So a change that changes
+the screen changes the PNG in the same commit, and the reviewer sees the new
+image in the PR. The guest's screen is thus compared with an image only the
+host drew: `cargo xtask test tui --bless` leaves a golden whose `Source`
+names the host render as it is and fails, and a QEMU capture put there any
+other way fails this host test, which requires the host render's `Source`
+as well as its pixels, so QEMU cannot bless itself. `--bless` stays for goldens no host model can draw,
+such as `screendump`'s `ovmf`, OVMF's own screen. Beside it,
+`the_moments_are_the_scenarios_screendumps` checks that the moments are the
+screendumps of `tests/qemu/tui.scenario`, which pins 1280×800, and of
+`tools/hyperv/m8-tui.scenario`, and that `tools/hyperv/golden/` holds
+nothing else; `the_host_render_fills_the_framebuffer_and_its_margins` checks
+the grid and the margins at both sizes and at one that is not whole cells.
 
 ### Scenarios
 
@@ -6005,11 +6107,14 @@ goldens' size does not rest on QEMU's default). Root prints its
 summary, starts `watch`, uart and console, attaches as client 1, points its
 output at console, checks the framebuffer and prints its `fb:` line, runs
 the write-combining check, starts term and tui and prints `servers: term
-and tui started; root CNode <k> of 4096 slots used`, then waits on D:
+and tui started; root CNode <k> of 4096 slots used`, then waits on D. The
+scenario (`tests/qemu/tui.scenario`) expects:
 
 ```text
+expect: root: cmdline "test=tui"
 expect: fb: 1280x800 BGR, stride 1280, 4000 KiB at 0x80000000: 6 untyped, 1 2 MiB and 488 4 KiB frames; 160x50 cells
 expect: fb: full clear: uncached
+expect: servers: term and tui started; root CNode
 expect: tui: 160x50 terminal
 expect: tui: frame 1 drawn: Overview, item 1
 screendump: tui-main
@@ -6026,18 +6131,27 @@ expect: , 0 ignored,
 expect: , 0 dropped
 expect: root: the TUI has quit; Ctrl-T 1 and Enter end the test
 screendump: tui-quit
-send: \x141\r
+send: \x141\r                      # Ctrl-T 1, Enter: root's line
 expect: [console] focus 1 (root)
 expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
 forbid: TEST FAIL
 ```
 
+On QEMU the lines read, for example, `fb: full clear: uncached 1082 us,
+write-combining 927 us`, `servers: term and tui started; root CNode 1407 of
+4096 slots used` and `term: stats: 35394 bytes written, 41 frames drawn,
+4291 cells drawn, 0 ignored, 8 bytes from console, 0 dropped, 0 reply bytes
+queued`; tui also prints frames 2 and 3, for the two Downs.
+
 Root checks that tui read exactly the bytes the harness typed for client 4,
-the focus keys excluded (`root::check::tui`), and prints them from tui's
-report as `tui: read <n> bytes: <bytes>`, escaped as `send:` writes them;
-asks term's `Stats`, prints them on one `term: stats:` line and requires no
-sequence ignored and no byte dropped; and, after the line that names the
-last screendump, reads one line as client 1 so the run waits for it. The
+the focus keys excluded (`root::check::tui::report`), and prints them from
+tui's report as `tui: read <n> bytes: <bytes>`, escaped as `send:` writes
+them; asks term's `Stats`, prints them on one `term: stats:` line and
+requires (`check::tui::stats`) no sequence ignored, no byte dropped, exactly
+the 8 typed bytes from console, no reply bytes queued, and at least 6
+frames, some bytes and some cells; and, after the line that names the last
+screendump, reads one line as client 1 so the run waits for it. The
 three images are the main screen, the Colours panel after two moves and
 Enter (the menu highlight moved, the panel replaced, three log lines
 scrolled in), and the main buffer after quitting, with the banner kept while
@@ -6062,16 +6176,19 @@ display, the loader passes no framebuffer, and root prints `fb: none: the
 loader found no GOP framebuffer`, starts no term and no tui, prints `nofb:
 type a line` and reads one. The harness sends `\x144abc\e[A\x141hi\r`: the
 bytes for client 4 wait in its raw queue with nothing reading them, and the
-line reaches root, which prints `nofb: read "hi"` and `TEST PASS`.
+line reaches root, which prints `nofb: read "hi"` and `TEST PASS`. Nothing
+attached as client 4, so the scenario expects `[console] focus 4 (client 4)`
+before `[console] focus 1 (root)`, and ends with `DEBUG HALT 0 from TCB`.
 
-**`release`**: root's uart line gains `burst <n>`, from `Stats` MR8, and the
-scenario expects `burst 15`. `test=release` starts no term, so the
-`screendump` scenario's golden `ovmf`, which shows what OVMF left on the
-screen during that test, stays valid.
+**`release`**: every line root prints of uart's `Stats`, `test=release`'s
+and `test=console`'s, ends `, burst <n>`, from MR8, and the scenario expects
+`, burst 15`. `test=release` starts no term, so the `screendump` scenario's
+golden `ovmf`, which shows what OVMF left on the screen during that test,
+stays valid.
 
 **What the scenarios take from the harness.** `screendump:` is in xtask
 (4d9d067, [The harness](#the-harness)); the `tui` scenario relies on this of
-it, and adds one rule:
+it, and on one rule its goldens added:
 
 | Behaviour | Why it matters here |
 | --- | --- |
@@ -6080,7 +6197,7 @@ it, and adds one rule:
 | the image is compared with `tests/qemu/golden/<name>.png`, one size per scenario; a name belongs to one scenario; a screen of another size fails, saying that the sizes differ | the `tui` goldens are 1280×800, pinned by its `qemu_args:`; another size fails loudly rather than comparing against the wrong image |
 | exact: every pixel's red, green and blue equal, with no tolerance or mask | the guest writes exact palette colours, QEMU's 32-bit surface keeps them, and nothing scales or blends |
 | a mismatch reports how many pixels differ and their bounding box, and keeps `<name>.png` and `<name>.diff.png` (the golden dimmed, differing pixels magenta) beside `serial.log` | the box's corner divided by 8 and 16 is the first cell to look at; the images show the rest |
-| new: `--bless` refuses a golden whose `Source` text is `microL4 host render` | the `tui` goldens come from the host render only ([The screendump goldens](#golden-tests)); [The harness](#the-harness)'s "nothing else writes one" then gains that host test as the second writer |
+| `--bless` leaves a golden whose `Source` text is `microL4 host render` as it is and fails the scenario, saying the golden is the host render's (`bless_leaves_a_host_render_golden_as_it_is`) | the `tui` goldens come from the host render only ([The screendump goldens](#golden-tests)); [The harness](#the-harness) names that host test as the one other writer of a golden |
 
 ### The Hyper-V check
 
@@ -6088,39 +6205,56 @@ CI uploads `microl4-vhdx-m8-check`: `tui/disk.vhdx` (`test=tui`, the
 selftest kernel), `release/disk.vhdx` (`test=release`, the release kernel),
 the 1024×768 goldens (`tools/hyperv/golden/`), and
 `tools/hyperv/m8-tui.scenario` and `m8-release.scenario`: the QEMU
-scenarios' steps with what differs on
-Hyper-V, the sizes (1024x768, 128x48) and frame counts in the `fb:` line,
-which the GOP's size decides, and `release`'s exit port, which root issues
-only under QEMU. `Test-L4Vhdx.ps1` gains `-Scenario <file>`, which follows
-its `expect:`, `next:`, `send:` and `forbid:` lines over the named pipe and,
-at each `screendump:`, saves the VM's screen through Hyper-V's thumbnail API
+scenarios' steps with what differs on Hyper-V, the sizes (1024x768, 128x48)
+and frame counts in the `fb:` line, which the GOP's size decides, and
+`release`'s exit port, which root issues only under QEMU. xtask parses both
+(`the_moments_are_the_scenarios_screendumps`). `Test-L4Vhdx.ps1` gains
+`-Scenario <file>`, which follows its `expect:`, `next:`, `send:` and
+`forbid:` lines over the named pipe, as xtask's matcher does, and, at each
+`screendump:`, saves the VM's screen through Hyper-V's thumbnail API
 (`Msvm_VirtualSystemManagementService.GetVirtualSystemThumbnailImage` at
-1024×768, from memory) as `l4-<name>.png`, and `-ConnectAfterSeconds <n>`,
-which starts the VM and opens the pipe only after `n` seconds.
+1024×768) as `l4-<name>.png`, keeping the bytes the API returned beside it
+as `l4-<name>.rgb565`; a screen it cannot save fails the run, which goes
+on to the end so that the log is whole. `-ConnectAfterSeconds <n>` starts
+the VM and opens the pipe only after `n` seconds; with `-Scenario`, the
+script then types the scenario's first `send:` at once, since the line that
+releases it was printed with no client on the pipe, requires only the steps
+after it, and prints how many of the `expect:` lines above that `send:`
+arrived once it connected. `Read-L4Com1.ps1` takes the script's two
+callbacks, one when the pipe connects and one per line, and writes its log
+even if one fails. `m8-release.scenario` expects `, burst 1`, which both
+`burst 15` and `burst 1` match, and forbids `, 0 THRE bursts`.
 
 | Image | Run | The log must show | It settles |
 | --- | --- | --- | --- |
 | `tui` | `-Scenario m8-tui.scenario` | `cpu: hypervisor Hyper-V`; `bootinfo: framebuffer 0xf8000000-...`; `fb: 1024x768 BGR, stride 1024, ... ; 128x48 cells` with the GOP's size; `fb: full clear: uncached <n> us, write-combining <m> us`; `tui: 128x48 terminal`; `tui: frame 1 drawn`; `[console] focus 4 (term)` and `tui: frame 4 drawn` after the script's keys; `tui: quit after 4 keys`; `tui: read 8 bytes`; `term: stats:` with 0 ignored and 0 dropped; `TEST PASS`. The owner attaches the three thumbnails, which must match `tools/hyperv/golden/tui-*.png` by eye | the framebuffer found, handed out and mapped write-combining on Hyper-V; WC faster than UC [H10]; keys through the named pipe; Hyper-V's video window showing the GOP framebuffer after `ExitBootServices` |
 | `release` | `-Scenario m8-release.scenario`, the script typing the line | uart's line with `burst 15` (working FIFOs) or `burst 1`; `14 bytes received` and the line read whole, though its last 6 bytes stay below the receive trigger of 8, which only the character timeout delivers; THRE bursts above 0 | M7's 16550 questions: FIFOs, the character timeout, THRE interrupts |
-| `release` | again with `-ConnectAfterSeconds 20` | whether the lines written before the pipe had a client arrive once it connects (the transmitter waits) or are missing (it drains), and that the run then goes on when the line is typed | whether a transmitter with no client on the pipe stalls uart's writes |
+| `release` | again with `-ConnectAfterSeconds 20` | the script's `Of the N expect: lines above the first send:, K arrived` line: whether the lines written before the pipe had a client arrive once it connects (K = N, the transmitter waits) or are missing (K = 0, it drains), and that the run then goes on when the line is typed | whether a transmitter with no client on the pipe stalls uart's writes |
 
-The thumbnail is 16-bit colour (from memory), so the check compares by eye;
-an exact comparison against the goldens reduced to RGB565 is an [open
-question](#open-questions).
+The API's documentation calls the thumbnail "raw RGB 565", two bytes a
+pixel, but gives no byte or row order: the script reads it as Windows'
+`Format16bppRgb565` bitmaps are laid out (little-endian words, red in the
+top five bits, rows from the top) and keeps the raw bytes in case that is
+wrong. RGB 565 keeps 5 or 6 bits a channel, so the check compares by eye;
+an exact comparison against the goldens reduced to RGB 565 is an [open
+question](#open-questions). The PowerShell has not yet run on a Windows
+host.
 
 ### Code and tests
 
 | Part | Where | Host tests |
 | --- | --- | --- |
-| Geometry, pixel formats, the frame plan, the surface | crate `fb` (`user/fb`), `no_std`, `#![forbid(unsafe_code)]`, no dependencies | each row of the checks; QEMU's and Hyper-V's recorded framebuffers, Hyper-V's with sizes of 3, 4 and 8 MiB; the plan's frames and addresses for each (489 frames under one page table on QEMU), for a base not aligned to 2 MiB and for untyped that do not tile; both pixel formats; the surface's bounds |
-| Parser, screen model, font, renderer; the term protocol, the input queue and the saved `Read`; `term::run`, the loop | crate `term` (`user/term`), `no_std`, `#![forbid(unsafe_code)]`; the parser and the screen model use nothing but `core`; `run` on the target only | the goldens, the proptest and the parser's table test above; the font: every code point of its table, the arms of every box glyph at the edge columns and rows, the double corners and junctions (U+2554 and U+256C among them) and a heavy corner (U+251B) against hand-drawn cells, the replacement glyph for an unlisted code point and U+FFFD, a checksum of the Spleen table against its header; the renderer's pixel tests; requests decoded and refused in M7's order, `Read` answered at once, saved and released by keys or by a reply, `Busy`, the queue's limit |
-| The raw client | crate `console` | goldens for each raw rule (focus keys, Ctrl-T Ctrl-T, ESC passing, the full queue's BEL, `ReadRaw` and `Read` badges); the proptest's model gains client 4, whose typed bytes it checks reach the raw queue once, in order, unedited and unechoed |
-| The app | crate `tui` (`user/tui`), `no_std`, `#![forbid(unsafe_code)]`; `run` on the target only | the key decoder over every split of its sequences; each panel and the scenario's moments as goldens at both sizes; every byte `run` writes comes from `App`; no frame uses a sequence term ignores |
-| Starting term and tui; the write-combining check; the verdicts | `user/root/src/servers.rs`, `user/root/src/tui.rs`, `user/root/src/nofb.rs`; `root::check::tui` | the bytes tui must report; the `fb:` and `term: stats:` lines; `watch`'s line for badge 3 |
-| `screendump:` and the golden images | `xtask/src/scenario.rs`, `screen.rs` and `qemu.rs` (in xtask from 4d9d067); from M8's TUI builder, `--bless` refusing a host-render golden and the host test `tui_screendumps_are_the_host_render` | as landed: parsing and placement, the comparison, sizes and failure report, QMP against a fake QEMU; new: `--bless` leaving a golden whose `Source` is the host render as it is, and the three moments at both sizes against `tests/qemu/golden/` and `tools/hyperv/golden/` |
+| Geometry, pixel formats, the frame plan, the surface | crate `fb` (`user/fb`), `no_std`, `#![forbid(unsafe_code)]`, no dependencies: `Geometry`, `Format`, `Rgb`, `Fields`, `Untyped` and `Unusable` in `lib.rs`, `Plan` and `Retype` in `plan.rs`, `Surface` in `surface.rs` | `user/fb/src/tests.rs`: each row of the checks, in order (`no_format_or_no_base_is_no_framebuffer` to `a_window_past_one_gib_is_too_large`); QEMU's recorded framebuffer, 489 frames under one page table (`qemu_s_framebuffer_is_one_2mib_and_488_4kib_frames_under_one_page_table`), and Hyper-V's at 3, 4 and 8 MiB (`hyper_v_s_framebuffer_at_each_gop_size`); a base not aligned to 2 MiB; the plan stopping at the visible bytes and within the fan-out limit; `random_tilings_keep_the_plan_s_invariants`; `the_words_round_trip_and_are_checked_again`; both pixel formats; the surface's bounds and padding (`fill_writes_every_visible_pixel_and_no_padding`, `cells_are_cut_at_the_right_and_bottom_edges`, `a_surface_needs_its_pixels`) |
+| Parser, screen model, palette, looks, font, renderer; term's session; the term protocol, the input queue and the saved `Read`; `term::run`, the loop | crate `term` (`user/term`), `no_std`, `#![forbid(unsafe_code)]`, on `fb` and `libsys`: `parser`, `screen`, `palette`, `look`, `font` (with `font/spleen.rs`, from `tools/spleen.py`), `render`, `session` (`Session`, `Pixels`, `cells`), `server`, and `Terminal`, `layout` and `slot` in `lib.rs`; the parser and the screen model use nothing but `core`; `run` on the target only | `user/term/src/tests/`: the goldens (`golden.rs`), the proptests (`props.rs`) and the parser's table test (`table.rs`) above; unit tests of the parser's limits, UTF-8, the palette and its mapping, cell and look words and each look step (`unit.rs`); the font (`font.rs`): every code point of its table, the arms of every box glyph against its Unicode name, the dashes, the double corners and junctions (U+2554 and U+256C among them) and a heavy corner (U+251B) against hand-drawn cells, light lines meeting double ones, the diagonals and the diamond, the blocks, shades and scan lines, the replacement glyph for every unlisted code point, U+FFFD included, and the Spleen table's checksum against its header; the renderer's pixel tests in both formats, margins and padding, the first frame and damage (`render.rs`); the session's start and frames, and requests decoded and refused in M7's order, `Read` answered at once, saved and released by keys or by a reply, `Busy`, the queue's order and limit (`server.rs`) |
+| The raw client | crate `console` | `user/console/src/tests/raw.rs`, goldens for each raw rule: bytes unedited and unechoed, ESC sequences passing whole, the focus keys, Ctrl-T Ctrl-T, Ctrl-T and anything else, the full queue's BEL once per `Read`, `ReadRaw` at once, and the `ReadRaw` and `Read` badges; the proptest `eight_clients_against_a_model_of_their_lines`, whose model gains client 4 and `ReadRaw`, and checks its typed bytes reach the raw queue once, in order, unedited and unechoed |
+| The app | crate `tui` (`user/tui`), `no_std`, `#![forbid(unsafe_code)]`, on `libsys`: `App`, `Panel` and the console lines in `lib.rs`, the decoder in `keys.rs`, the sequences in `draw.rs`, the panels in `panels.rs`; `run` on the target only | `user/tui/src/tests.rs`: every key of the table, sequences with parameters, ESC and anything else, `every_split_of_every_sequence_decodes_the_same`, unknown keys' escapes, the size limits, `the_scenario_s_byte_stream`, the report's 255 bytes, `no_frame_uses_a_sequence_term_ignores`, `every_frame_draws_all_but_the_log`, the log's scrolling and quitting; the goldens (`tests/golden.rs`) on term and on the reference model (`tests/screen.rs`) |
+| The term protocol in libsys; the fence, attributes, `unmap_table` and retyping a named untyped | `libsys::proto`, `libsys::term`, `libsys::console`, `libsys::cpu`, `libsys::vspace`, `libsys::objects` | `TermSize` and `TermStats` round trips and `term_stats_show_what_the_scenario_matches`; `UartStats`'s text with its burst; `the_queues_match`; `the_store_fence_runs`; `attribute_words_are_the_abis`; `a_named_untyped_device_or_ram_places_at_its_watermark` |
+| Starting term and tui; the write-combining check; the verdicts | `user/root/src/servers.rs` (`start`'s NT, `framebuffer_objects`, `FbObjects`, `start_terminal`, `term_main`, `TERM_PRIORITY`, `TUI_PRIORITY`), `user/root/src/tui.rs` (`run`, `write_combining_check`), `user/root/src/nofb.rs`; `root::check::tui` (`user/root/src/check/tui.rs`) and `watch`'s line in `root::process` | `the_fb_line_on_qemu`, `the_fb_line_on_hyper_v`, `no_framebuffer`, `the_clear_and_started_lines`, `tui_must_report_the_typed_bytes`, `terms_counts`, `nofbs_line`; `watchs_line_for_each_fault`, with badge 3 |
+| `screendump:`, the golden images and the host render; the licence on the ESP | `xtask/src/scenario.rs`, `screen.rs` and `qemu.rs` (in xtask from 4d9d067), with `--bless` leaving a host-render golden; `xtask/src/hostrender.rs`, a test module; `xtask/src/image.rs`'s `LICENCES` | `parses_screendumps`, `screendump_names_are_unique_across_scenarios`, `matcher_releases_screendumps_in_step_order`, `checks_screens_against_goldens`, `bless_leaves_a_host_render_golden_as_it_is`, `repo_goldens_are_used_and_read`; PPM, PNG and comparison tests in `screen.rs`; QMP against a fake QEMU in `qemu.rs`; `tui_screendumps_are_the_host_render`, `the_moments_are_the_scenarios_screendumps` and `the_host_render_fills_the_framebuffer_and_its_margins`; `the_spleen_licence_goes_on_the_esp` |
 
 `cargo xtask test` runs the new crates' host tests beside M7's, and `cargo
-xtask clippy` lints them for the host and the target. Every golden image is
+xtask clippy` lints them for the host and the target. Plain `cargo test`
+runs xtask's tests, the host render among them. Every golden image is
 read and written by xtask's own PNG code, on `miniz_oxide`; `fb`, `term`
 and `tui` are xtask's host-only dev-dependencies. QEMU covers
 what the host cannot: device frames retyped and mapped write-combining, 2
@@ -6131,18 +6265,18 @@ tui, and what QEMU's display shows.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Only term's VSpace maps the framebuffer, read-write and write-combining; root maps it in its own VSpace only for the write-combining check, before term exists, and never two mappings of a frame at once; no other thread holds a capability that names a framebuffer frame | `servers.rs` maps the frames from `fb::Plan` into term's VSpace alone and fills term's and tui's CNodes only from their slot tables, which hold no frame; the check unmaps every frame before term's mapping; review | M8 |
-| No page is writable in two VSpaces, and no thread M8 adds holds a TCB, VSpace, untyped, paging, frame or Grant capability | as M7's invariant, with term's state frames fresh and mapped once; review | M8 |
-| Every pixel term writes lies in the visible area, inside the framebuffer's frames; term never reads the framebuffer | `fb::Surface`'s bounds checks against `width` and `height` and its lack of a read method; `fb::Geometry::check` requires 4 × `stride` × `height` within `size` and the untyped tiling it; host tests of the surface's bounds | M8 |
-| When term replies to a `Write`, the framebuffer shows exactly the screen model's active buffer, cursor included, and the frame's writes have left the CPU's write-combining buffers | `term::render` after every `Write`, then `store_fence`; the goldens' render check after every `Write`, the proptest's damage check; the `tui` scenario's screendumps, taken after frames drawn by damage, against full host renders | M8 |
-| Every byte stream is accepted: the parser never panics, takes bounded work per byte, keeps the cursor and every write in the grid, and acts the same however the stream is split into writes | the parser's fixed limits; the proptest; the goldens' four runs; the table test | M8 |
-| term never blocks except in its receive on T and in calls to console, which always reply at once; it answers its client only by `ReplyRecv` or by `Send` on its saved slot | `term::run`; console's `ReadRaw` is never saved; review | M8 |
-| Every byte typed while client 4 has focus, but the focus keys, reaches term's client once, in order, unedited and unechoed, unless a queue was full, when it is dropped: with BEL on COM1 in console's queue, counted in term's | console's raw rules and term's queue; console's proptest with client 4; term's host tests; the `tui` scenario, where root checks the 8 bytes tui read | M8 |
-| Routing stays a function of the byte stream alone, and no client can put an escape sequence on COM1 | client 4 is raw by its number; raw mode changes input only, and console shows client 4's output as every client's (M7's invariants hold unchanged); console's goldens and proptest | M7, M8 |
-| Priorities: console above term above tui | `servers.rs`'s `TERM_PRIORITY` (125) and `TUI_PRIORITY` (100), set with `TCB_SetSchedParams` with an equal MCP | M8 |
-| A term fault ends the run with failure, whatever root waits on, and a tui fault reaches root | term's fault endpoint F, badge 3, to `watch`; tui's D; host test of `watch`'s line for badge 3 | M8 |
-| What the screen shows depends only on the framebuffer's size and the bytes typed | `tui::App` is pure; term draws no time, address or count; no cursor blink; the tui goldens at both sizes; the screendumps | M8 |
-| The font's glyphs come from Spleen, whose licence notice travels with the source and the image, or are generated in the repository | `user/term/src/font/spleen.rs`'s header, `LICENSE-spleen`, `\licenses\spleen.txt` on the ESP; review | M8 |
+| Only term's VSpace maps the framebuffer, read-write and write-combining; root maps it in its own VSpace only for the write-combining check, before term exists, and never two mappings of a frame at once; no other thread holds a capability that names a framebuffer frame | `servers::start_terminal` maps `fb::Plan`'s frames, which root keeps (`FbObjects`), into term's VSpace alone (`FbObjects::map_frames` with `WRITE_COMBINING`) and fills term's and tui's CNodes only from the entries it lists against `term::slot` and `tui::slot`, none a frame; `write_combining_check` (`user/root/src/tui.rs`) unmaps every frame after each clear (`FbObjects::unmap_frames`) and the page tables before `start_terminal` maps them again; `Frame_Map` refuses a frame capability already mapped; the `tui` scenario runs it; review. No test checks the mappings themselves | M8 |
+| No page is writable in two VSpaces, and no thread M8 adds holds a TCB, VSpace, untyped, paging, frame or Grant capability | as M7's invariant: `root::process::Plan` for the image (host test `m6s_image`) and `fill` against the slot tables, with no Grant in any right `start_terminal` gives; term's state frames retyped fresh and mapped once, in term's VSpace; review | M8 |
+| Every pixel term writes lies in the visible area, inside the framebuffer's frames; term never reads the framebuffer | `fb::Surface::fill` and `cell`, which bounds-check against `width` and `height`, and its lack of a read method; `Surface::new`, which needs `stride` × `height` pixels; `fb::Geometry::check`, which requires 4 × `stride` × `height` within `size` and the untyped tiling it, and `Geometry::from_words` in `term_main`; host tests `fill_writes_every_visible_pixel_and_no_padding`, `cells_are_cut_at_the_right_and_bottom_edges`, `a_surface_needs_its_pixels`, `a_stride_alignment_or_size_that_does_not_hold_the_pixels_is_bad_geometry`, `untyped_must_be_device_memory_tiling_the_framebuffer_in_order`, `the_words_round_trip_and_are_checked_again`, and term's `margins_stay_the_default_background_and_padding_is_never_written` | M8 |
+| When term replies to a `Write`, the framebuffer shows exactly the screen model's active buffer, cursor included, and the frame's writes have left the CPU's write-combining buffers | `term::Session::write`, which draws `Renderer::frame` and ends with `Surface::fence` (`term::Pixels`: `libsys::cpu::store_fence`) before `term::run` replies; the goldens' check of looks and pixels after every `Write` (`tests/golden.rs`); the proptests `random_streams_keep_the_invariants_however_they_are_split` and `frames_after_random_writes_equal_a_full_render`; `frames_after_each_write_leave_what_a_full_render_leaves`; the host render's check that frames drawn by damage equal `render::full`; the `tui` scenario's screendumps against the host render | M8 |
+| Every byte stream is accepted: the parser never panics, takes bounded work per byte, keeps the cursor and every write in the grid, and acts the same however the stream is split into writes | the parser's fixed limits (`MAX_PARAMS`, `MAX_PARAM`, `MAX_INTERMEDIATES`, `MAX_OSC`); the screen model's clamped counts, CHT's and CBT's stop at the edge and REP's `rep_prints`; the proptest `random_streams_keep_the_invariants_however_they_are_split` and `rep_acts_as_its_count_of_prints`; the goldens' four runs; the table test `every_state_and_byte_follows_the_table` | M8 |
+| term never blocks except in its receive on T and in calls to console, which always reply at once; it answers its client only by `ReplyRecv` or by `Send` on its saved slot | `term::run` (`user/term/src/run.rs`) receives with `recv` and `reply_recv` on slot 2, sends only on slot 5, and calls only console's `Attach` and `ReadRaw`; console answers `ReadRaw` at once and never saves it (`console::run`; host test `read_raw_takes_everything_at_once_possibly_nothing`); review | M8 |
+| Every byte typed while client 4 has focus, but the focus keys, reaches term's client once, in order, unedited and unechoed, unless a queue was full, when it is dropped: with BEL on COM1 in console's queue, counted in term's | console's `Terminal::input` and its raw queue; term's `server::Input`; console's raw goldens (`user/console/src/tests/raw.rs`, `a_full_queue_drops_and_rings_bel_once_per_read` among them) and the proptest `eight_clients_against_a_model_of_their_lines` with client 4; term's `keys_and_replies_queue_in_order` and `bytes_past_the_queues_512_are_dropped_and_counted`; the `tui` scenario, where `root::check::tui::report` requires the 8 bytes tui read and `check::tui::stats` 8 bytes from console and none dropped (host tests `tui_must_report_the_typed_bytes`, `terms_counts`) | M8 |
+| Routing stays a function of the byte stream alone, and no client can put an escape sequence on COM1 | client 4 is raw by its number (`console::RAW`; `console::decode` refuses its `Read` and any other client's `ReadRaw`); raw mode changes input only, and console shows client 4's output as every client's (M7's invariants hold unchanged); goldens `only_client_4_reads_raw_and_it_never_reads_lines` and `client_4_has_no_input_line_and_its_output_is_shown`, and the proptest | M7, M8 |
+| Priorities: console above term above tui | `servers.rs`'s `TERM_PRIORITY` (125) and `TUI_PRIORITY` (100), set by `spawn_server` with `TCB_SetSchedParams` with an equal MCP; review. Unlike M7's, no scenario prints them | M8 |
+| A term fault ends the run with failure, whatever root waits on, and a tui fault reaches root | term's fault endpoint F, badge `fault_badge::TERM` (3), to `watch`; tui's D (`tui::slot::REPORT`), on which root's `tui::run` fails anything but the report's label and badge; host test `watchs_line_for_each_fault`, with term's line; review. No scenario makes term or tui fault | M8 |
+| What the screen shows depends only on the framebuffer's size and the bytes typed | `tui::App` is pure; term draws no time, address or count; no cursor blink and no timer redraw; tui's goldens at both sizes (`the_panels_and_the_scenario_s_moments`) and `the_scenario_s_byte_stream`; the screendumps, which equal the host render | M8 |
+| The font's glyphs come from Spleen, whose licence notice travels with the source and the image, or are generated in the repository | `tools/spleen.py`, which takes the pinned tag's BDF and `LICENSE` only if their SHA-256s match; `user/term/src/font/spleen.rs`'s header and `LICENSE-spleen`; `xtask::image::LICENCES`, which puts it on the ESP as `\licenses\spleen.txt`; host tests `the_spleen_table_matches_its_header` and `the_spleen_licence_goes_on_the_esp` | M8 |
 
 ### Compared with seL4
 
@@ -6196,14 +6330,14 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | What if Remote IRR stays set on an I/O APIC older than version `0x20`, which has no EOI register? | Issuing the pin fails with `RevokeFirst` until the stale delivery arrives, and on such an I/O APIC it may never arrive | M7 (answered) | Decided by the M7 spec check ([ADR 0027](adr/0027-stale-remote-irr.md)) and answered in M7 on QEMU: both paths clear a stranded Remote IRR, the EOI register in the `irq_stale` scenario and the trigger toggle in `irq_stale_0x11` (`-global ioapic.version=0x11`), and the host tests run both against the I/O APIC model, with `RevokeFirst` when nothing clears it. QEMU's I/O APIC is version `0x20`, Hyper-V's `0x11` (the M3 Hyper-V check). Normal operation needs nothing: the local APIC's EOI broadcast clears Remote IRR on any version, as in seL4, because a pin keeps its vector and trigger. For a stale one, issue writes the entry level-triggered and masked, then writes the old vector to the EOI register from version `0x20`, or below it switches the entry to edge-triggered and back, as Linux's `__eoi_ioapic_pin` does (from memory). Masking and unmasking leaves Remote IRR set, and the local APIC broadcasts an EOI only for a vector in service, so neither is an option. `test=irq_stale` runs both paths on QEMU, whose I/O APIC takes `version=0x11`. Hyper-V's path stays unchecked: no planned driver there uses a level pin (COM1 is edge; VMBus uses SINTs) |
 | Must a driver of an edge pin Ack before it services, not after? | [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) give every driver the loop wait, service, Ack, and say that an edge lost while masked comes after a signal the driver has not yet handled; but two deliveries whose signals merge before the driver's receive mask the pin, and a cause after its last poll then loses its edge with no signal pending on an I/O APIC that drops edges while masked, as QEMU 8.2's does (`test=irq`; [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) then said QEMU latched them) | M7 (answered) | Answered in M7: yes (ADR 0028). A driver of an edge pin loops wait, Ack, service, and one of a level pin wait, service, Ack; [IRQHandler](abi.md#irqhandler) and [IRQControl and IRQHandler](#irqcontrol-and-irqhandler) now say so. The kernel's behaviour does not change. The Ack-first loop loses nothing whether an I/O APIC latches an edge on a masked pin or drops it; `test=irq` shows that QEMU 8.2's drops it, and the `uart` host tests show the old loop stranding uart against a model that does (`servicing_before_the_ack_strands_uart`) |
 | Should handlers see another thread's FP state? | An `#MF` or `#XM` handler cannot read FSW or MXCSR, and a debugger cannot show FP registers | M8 | No; if needed, a `TCB_CopyRegisters` flag copies the XSAVE area |
-| Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 | Yes; raise the radix to 13 if not. The M8 design estimates about 1,600 slots on QEMU: 489 framebuffer frames, 107 for term's state, and about 155 for each of four servers ([Capabilities](#capabilities-2)); the font is 4 KiB of read-only data. `test=tui` prints the count |
-| Does M8's `term` read keystrokes through console's raw mode (label `0x125`) or straight from `uart`? | Focus switching keeps working only if console sees every byte | M8 (answered) | Decided in the M8 design: through console. Client 4 is raw by its number, so routing stays a function of the byte stream; console signals term's notification and term fetches with `ReadRaw`, which never waits, so uart keeps one reader and term never blocks on console. Raw mode is input only: console's output, and every client's, stays on COM1 ([Input and the term protocol](#input-and-the-term-protocol)) |
+| Is a 4096-slot root CNode with an 8 MiB root image enough once `root` carries every server and the terminal font? | Boot or the xtask size check would fail | M8 (answered) | Answered in M8: yes, and the radix stays 12. `test=tui` on QEMU uses about 1,405 of 4,096 slots (`servers: term and tui started; root CNode 1407 of 4096 slots used`): 489 framebuffer frames and one page table, 107 for term's state, 128 for each of the four servers' VSpaces and CNodes, and about 280 for the boot regions ([Capabilities](#capabilities-2)), where the design had estimated 1,600 with 155 a server. The root image's 145 frames are far inside 8 MiB, and the font is 4 KiB of read-only data in it |
+| Does M8's `term` read keystrokes through console's raw mode (label `0x125`) or straight from `uart`? | Focus switching keeps working only if console sees every byte | M8 (answered) | Decided in the M8 design, and built so: through console. Client 4 is raw by its number, so routing stays a function of the byte stream; console signals term's notification and term fetches with `ReadRaw`, which never waits, so uart keeps one reader and term never blocks on console. Raw mode is input only: console's output, and every client's, stays on COM1 ([Input and the term protocol](#input-and-the-term-protocol)). The `tui` scenario's keys reach tui this way |
 | Does QEMU's `screendump` with `-display none` capture the framebuffer as the guest left it? | The done-when compares it with a golden image | M8, first (answered) | Answered in M8 by the harness builder (4d9d067, 7cb611f): yes. QMP's `screendump` with `-display none` takes q35's std VGA as the guest last wrote it, the same in every run once the loader runs; `tests/qemu/screendump.scenario` compares OVMF's screen with `tests/qemu/golden/ovmf.png`. Only a screendump taken while OVMF is still drawing its text varies |
 | Does OVMF on CI's runner pick 1280x800, as on this image? | The goldens are pinned to the screendump's size | M8 (answered) | Answered in M8 by the harness builder: OVMF takes the mode from the std VGA's EDID, 1280x800 by default, so the size is QEMU's to set; `tui` pins it with `-vga std -global VGA.xres=1280 -global VGA.yres=800`, and a screen of another size fails, the harness saying the sizes differ. The goldens are one size per scenario, `tests/qemu/golden/<name>.png` |
-| Does Hyper-V's COM1 behave as a 16550A for `uart`: FIFOs (IIR bits 6 and 7), the character timeout, a THRE interrupt when THRI is set with the FIFO empty, OUT2 gating the line, and a transmitter that drains with no client on the named pipe? | `uart`'s setup, its 15-byte burst and its lost-interrupt reasoning assume it ([`uart`](#uart)); a transmitter that stalls without a pipe client would hold console's writes, and every client's, for good | M8 Hyper-V check | Yes, as Linux guests' 8250 driver assumes there (from memory); without FIFOs `uart` falls back to 1-byte bursts. The M8 check boots `test=release` with the script typing its line, where uart's `Stats` MR8 shows the burst and the 14-byte line needs the character timeout, then once with the pipe opened 20 seconds late ([The Hyper-V check](#the-hyper-v-check)) |
-| Does Hyper-V's video window show the GOP framebuffer after `ExitBootServices`, with no synthetic video driver? | Without it nothing term draws is visible on Hyper-V | M8 Hyper-V check | Yes, as Linux's `efifb` works on Generation 2 guests (from memory); the owner's thumbnails show it |
-| Does a write-combining mapping of the framebuffer take effect on Hyper-V [H10]? | A UC framebuffer works but every frame is slower | M8 Hyper-V check | Yes: `fb: full clear` shows the WC clear several times faster than the UC one. If not, nothing breaks; note the times |
-| Can the Hyper-V check compare the screen exactly? | The QEMU check is exact; the owner's is by eye | M8 Hyper-V check | No: Hyper-V's thumbnail is 16-bit colour (from memory). An exact comparison against the goldens reduced to RGB565 could follow if the thumbnail at the native size is not scaled |
+| Does Hyper-V's COM1 behave as a 16550A for `uart`: FIFOs (IIR bits 6 and 7), the character timeout, a THRE interrupt when THRI is set with the FIFO empty, OUT2 gating the line, and a transmitter that drains with no client on the named pipe? | `uart`'s setup, its 15-byte burst and its lost-interrupt reasoning assume it ([`uart`](#uart)); a transmitter that stalls without a pipe client would hold console's writes, and every client's, for good | M8 Hyper-V check | Yes, as Linux guests' 8250 driver assumes there (from memory); without FIFOs `uart` falls back to 1-byte bursts. The M8 check boots `test=release` with the script typing its line, where uart's line ends `, burst <n>` from `Stats` MR8, THRE bursts must be above 0 and the 14-byte line needs the character timeout, then once with the pipe opened 20 seconds late, when the script reports how many of the lines before its first `send:` arrived ([The Hyper-V check](#the-hyper-v-check)). Open until the owner's check |
+| Does Hyper-V's video window show the GOP framebuffer after `ExitBootServices`, with no synthetic video driver? | Without it nothing term draws is visible on Hyper-V | M8 Hyper-V check | Yes, as Linux's `efifb` works on Generation 2 guests (from memory); the owner's thumbnails show it. Open until the owner's check |
+| Does a write-combining mapping of the framebuffer take effect on Hyper-V [H10]? | A UC framebuffer works but every frame is slower | M8 Hyper-V check | Yes: `fb: full clear` shows the WC clear several times faster than the UC one. If not, nothing breaks; note the times. Open until the owner's check: QEMU's TCG, with no cache model, prints about a millisecond for each |
+| Can the Hyper-V check compare the screen exactly? | The QEMU check is exact; the owner's is by eye | M8 Hyper-V check | Not yet. The thumbnail API's documentation calls its image "raw RGB 565", but not its byte or row order, which the script assumes and keeps the raw bytes for ([The Hyper-V check](#the-hyper-v-check)). Once the owner's thumbnails confirm the layout, and that one taken at the native 1024×768 is not scaled, an exact comparison against `tools/hyperv/golden/` reduced to RGB 565 could follow; until then the check is by eye |
 | Must `vmbus` send VMBus `UNLOAD` before `INITIATE_CONTACT` because the firmware left a connection open? | Contact fails or channels are stale if the host still sees the firmware's session | M9 | Yes, as other guests do after kexec; confirm against FreeBSD's `vmbus.c` |
 | Which value goes into `HV_X64_MSR_GUEST_OS_ID`? | The TLFS asks open-source guests for an OS type Microsoft allocates; microL4 has none | M9 | Bit 63 (open source) set, OS type 0, version 0, build = the kernel's build number |
 | Should an MSI vector be quarantined after its handler is deleted? | A device that keeps sending gives the vector's next owner spurious signals | M9 | No: drivers treat signals as hints, and an MSI-capable driver is trusted with the machine anyway |
