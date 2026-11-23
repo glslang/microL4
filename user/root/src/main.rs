@@ -37,7 +37,12 @@
 //!   ([`console`], [`servers`]);
 //! - `test=release`: the same servers on a kernel without `debug`, where
 //!   the root task makes no debug system call and ends the run through
-//!   `isa-debug-exit` ([`release`]).
+//!   `isa-debug-exit` ([`release`]);
+//! - `test=tui`: the TUI app runs inside the terminal emulator, which
+//!   draws to the framebuffer mapped write-combining, with keys the
+//!   harness types ([`tui`], [`servers`]);
+//! - `test=nofb`: with no display, root starts no terminal and still
+//!   reads its line ([`nofb`]).
 //!
 //! Every test ends the run with `libsys::exit`: status 0 after `TEST
 //! PASS`, 1 after a `TEST FAIL` line, through `DebugHalt` unless the test
@@ -55,6 +60,7 @@ mod ioport;
 mod ipcntfn;
 mod irq;
 mod isolation;
+mod nofb;
 mod pingpong;
 mod redteam;
 mod release;
@@ -63,6 +69,7 @@ mod servers;
 mod spawn;
 mod threads;
 mod tlb;
+mod tui;
 
 use libsys::bootinfo::{CAP_INIT_CNODE, SlotRegion};
 use libsys::ipc::word;
@@ -111,6 +118,8 @@ fn main(bi: &'static BootInfo) -> ! {
         Some("console") => console::run(bi),
         Some("release") => release::run(bi),
         Some("release_fault") => release_fault::run(bi),
+        Some("tui") => tui::run(bi),
+        Some("nofb") => nofb::run(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
     }

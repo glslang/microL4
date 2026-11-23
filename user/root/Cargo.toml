@@ -21,5 +21,8 @@ bench = false
 
 [dependencies]
 console = { path = "../console" }
+fb = { path = "../fb" }
 libsys = { path = "../libsys" }
+term = { path = "../term" }
+tui = { path = "../tui" }
 uart = { path = "../uart" }

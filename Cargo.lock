@@ -194,7 +194,10 @@ name = "root"
 version = "0.1.0"
 dependencies = [
  "console",
+ "fb",
  "libsys",
+ "term",
+ "tui",
  "uart",
 ]
 

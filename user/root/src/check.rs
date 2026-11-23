@@ -1,5 +1,5 @@
 //! The verdicts of `test=threads` and `test=fault`, from what the threads
-//! recorded and the messages they received; M6's and M7's tests have a
+//! recorded and the messages they received; M6's, M7's and M8's tests have a
 //! module each.
 
 use core::fmt;
@@ -12,6 +12,7 @@ pub mod captransfer;
 pub mod console;
 pub mod ipcntfn;
 pub mod pingpong;
+pub mod tui;
 
 /// The names of `test=threads`' threads, by index.
 pub const NAMES: [char; 2] = ['A', 'B'];

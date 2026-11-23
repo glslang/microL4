@@ -1,0 +1,50 @@
+# M8's done-when on QEMU with the selftest kernel (user/root/src/tui.rs;
+# docs/design.md, "Scenarios" under "Framebuffer, terminal and TUI"): a
+# TUI app runs inside a terminal emulator that draws to the framebuffer,
+# and the screendumps of it match the host render. The root task starts
+# watch, uart and console, attaches as client 1 and prints through
+# console; checks the framebuffer (the std VGA, pinned at 1280x800 below
+# so the goldens' size does not rest on QEMU's default) and prints its
+# frame plan; times a full clear mapped uncached, then write-combining
+# [H10] (TCG has no cache model, so the times mean nothing here); starts
+# term (125), with the framebuffer mapped write-combining in its VSpace
+# alone, and tui (100); then waits on endpoint D. tui asks term's Size,
+# writes its banner, enters the alternate buffer and draws its first
+# frame. Keys typed for console's raw client 4 (Ctrl-T 4 focuses it)
+# reach term through ReadRaw and tui through term's Read: Down, Down,
+# Enter opens the Colours panel; q quits, back to the main buffer with
+# the banner and the goodbye. Root checks tui read exactly the 8 bytes
+# typed for it, and term's Stats: nothing ignored, nothing dropped. Each
+# screendump follows a line printed only after term answered the frame's
+# last Write, and is taken while every thread that could draw is blocked:
+# the screen holds still until the send: after it. The goldens come from
+# the host render (xtask's tui_screendumps_are_the_host_render), never
+# from QEMU.
+cmdline: test=tui
+exit: success
+qemu_args: -vga std -global VGA.xres=1280 -global VGA.yres=800
+expect: root: cmdline "test=tui"
+expect: fb: 1280x800 BGR, stride 1280, 4000 KiB at 0x80000000: 6 untyped, 1 2 MiB and 488 4 KiB frames; 160x50 cells
+expect: fb: full clear: uncached
+expect: servers: term and tui started; root CNode
+expect: tui: 160x50 terminal
+expect: tui: frame 1 drawn: Overview, item 1
+screendump: tui-main
+send: \x144                        # Ctrl-T 4: focus term
+expect: [console] focus 4 (term)
+send: \e[B\e[B\r                   # Down, Down, Enter
+expect: tui: frame 4 drawn: Colours, item 3
+screendump: tui-colours
+send: q
+expect: tui: quit after 4 keys
+expect: tui: read 8 bytes: \e[B\e[B\rq
+expect: term: stats:
+expect: , 0 ignored,
+expect: , 0 dropped
+expect: root: the TUI has quit; Ctrl-T 1 and Enter end the test
+screendump: tui-quit
+send: \x141\r                      # Ctrl-T 1, Enter: root's line
+expect: [console] focus 1 (root)
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
+forbid: TEST FAIL
