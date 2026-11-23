@@ -214,6 +214,9 @@ if ($Scenario) {
     $scn = @{
         Steps = $parsed.Steps; Forbid = $parsed.Forbid; Next = 0
         Broken = $null; Forbidden = $null
+        # The first screendump that could not be saved: the run goes on, so
+        # the rest of the log is kept, but it fails.
+        Unsaved = $null
         # With -ConnectAfterSeconds: the expects above the first send, and
         # how many of them arrived.
         Early = @(); EarlyNext = 0
@@ -234,6 +237,7 @@ if ($Scenario) {
             Save-L4Screen -VMName $VMName -Path $png
             "l4: screendump $($step.Text) saved as $png"
         } catch {
+            if ($null -eq $scn.Unsaved) { $scn.Unsaved = "could not save screendump $($step.Text): $_" }
             "l4: screendump $($step.Text) failed: $_"
         }
     }
@@ -331,6 +335,8 @@ if ($scn) {
         $why = $scn.Broken
     } elseif ($scn.Forbidden) {
         $why = $scn.Forbidden
+    } elseif ($scn.Unsaved) {
+        $why = $scn.Unsaved
     } else {
         $waiting = @($scn.Steps | Select-Object -Skip $scn.Next | Where-Object Kind -in 'expect', 'next')
         if ($waiting.Count -gt 0) { $missing = $waiting[0].Text }
