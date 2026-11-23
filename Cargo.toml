@@ -6,6 +6,7 @@ members = [
     "loader",
     "model",
     "user/console",
+    "user/fb",
     "user/libsys",
     "user/root",
     "user/term",
