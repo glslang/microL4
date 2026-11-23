@@ -16,7 +16,18 @@
 //! each `Write` ([`Terminal::write`]) draws a frame with
 //! [`Renderer::frame`], which draws each cell whose [`Look`] changed
 //! ([`Drawn::frame`]) and fences; [`palette`] gives the colours a look is
-//! made of.
+//! made of. [`Session`] does exactly that on an `fb::Surface`
+//! ([`Pixels`]): [`Session::start`] is term's start-up, which host tests
+//! call as the guest's term does.
+//!
+//! The term server (`docs/design.md`, "Input and the term protocol") is
+//! [`server`], pure and host-tested: requests decoded and refused in M7's
+//! order, the input queue of keys and replies, the saved `Read` and its
+//! release. [`run`], its loop, exists only on the user target, where the
+//! root task starts it in a VSpace and CSpace of its own with the
+//! capabilities [`slot`] lists, its state window at [`layout::STATE`] and
+//! the framebuffer at `fb::WINDOW`, bound to notification NT, which
+//! console signals with `KEYS` when keys wait.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -29,14 +40,60 @@ pub mod look;
 pub mod palette;
 pub mod parser;
 pub mod render;
+#[cfg(target_os = "none")]
+mod run;
 pub mod screen;
+pub mod server;
+pub mod session;
 #[cfg(test)]
 mod tests;
 
 pub use look::{Drawn, Look};
 pub use parser::Parser;
 pub use render::{Renderer, Surface};
+#[cfg(target_os = "none")]
+pub use run::run;
 pub use screen::{Cell, Screen};
+pub use server::{Answer, Input, Request, Server, decode};
+pub use session::{Pixels, Session, cells};
+
+/// term's address space beyond root's image (`docs/design.md`, "Where it
+/// runs").
+pub mod layout {
+    /// The state window: three grids of [`crate::GRID_WORDS`] words, the
+    /// main screen, the alternate screen and what the renderer last drew,
+    /// in fresh RAM frames mapped RW, NX, write-back. Below `fb::WINDOW`,
+    /// in the first GiB, and 2 MiB-aligned, so one page table maps it.
+    pub const STATE: u64 = 0x0800_0000;
+    /// Its pages: 106, 434,176 bytes for 432,000.
+    pub const STATE_PAGES: u64 = 106;
+    /// Bytes in a page.
+    pub const PAGE: u64 = 0x1000;
+
+    const _: () = assert!(STATE_PAGES * PAGE >= 8 * crate::STATE_WORDS as u64);
+    const _: () = assert!((STATE_PAGES - 1) * PAGE < 8 * crate::STATE_WORDS as u64);
+    const _: () = assert!(STATE.is_multiple_of(1 << 21) && STATE_PAGES <= 512);
+    const _: () = assert!(STATE + STATE_PAGES * PAGE <= fb::WINDOW);
+}
+
+/// term's CSpace: a 16-slot CNode with guard 0 of size 60, so `CPtr` `n`
+/// is slot `n` (`docs/design.md`, "Capabilities" under "Framebuffer,
+/// terminal and TUI").
+pub mod slot {
+    pub const RADIX: u64 = 4;
+    pub const GUARD_BITS: u64 = 64 - RADIX;
+    /// Its own CNode, with the same guard, for `CNode_SaveCaller`.
+    pub const CNODE: u64 = 1;
+    /// Endpoint T, term's requests, with Read.
+    pub const ENDPOINT: u64 = 2;
+    /// Endpoint C, with Write, GrantReply and badge 4: console's raw
+    /// client.
+    pub const CONSOLE: u64 = 3;
+    /// Endpoint F, its fault endpoint, badge `TERM` (3).
+    pub const FAULT: u64 = 4;
+    /// Empty: its client's saved `Read`.
+    pub const SAVED_READ: u64 = 5;
+}
 
 /// The widest screen: 1920 pixels of 8-pixel cells.
 pub const MAX_COLS: usize = 240;

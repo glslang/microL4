@@ -1,6 +1,6 @@
 [package]
 name = "term"
-description = "microL4's terminal emulator: the DEC parser, the screen model and the looks its renderer draws, host-tested against golden screens"
+description = "microL4's terminal emulator: the DEC parser, the screen model, the font and the renderer, host-tested against golden screens, and the term server the root task runs in a VSpace of its own"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,12 @@ publish.workspace = true
 path = "src/lib.rs"
 bench = false
 doctest = false
+
+[dependencies]
+# The framebuffer term draws on; the term protocol, the console client and
+# the store fence.
+fb = { path = "../fb" }
+libsys = { path = "../libsys" }
 
 [dev-dependencies]
 # The proptest of random byte streams. `std` alone: no forking, timeouts or
