@@ -3,13 +3,15 @@
 //! random byte streams, unit tests of the palette, the cell and look words
 //! and the renderer's look steps, the font's glyphs, the renderer's
 //! pixels, and the session and the term protocol; and the M8 red team's
-//! attacks (`redteam`, `docs/redteam/m8-*.md`).
+//! attacks (`redteam`, `docs/redteam/m8-*.md`); and the M8 fresh review's
+//! (`review`).
 
 mod font;
 mod golden;
 mod props;
 mod redteam;
 mod render;
+mod review;
 mod server;
 mod table;
 mod unit;
