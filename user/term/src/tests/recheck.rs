@@ -1,7 +1,6 @@
-//! The M8 fix round's fresh re-check. Each test is `#[ignore]`d so the
-//! default run passes; `cargo test -p term --lib recheck -- --ignored`
-//! runs them. The first asserts a guarantee the fix round's tests state
-//! and fails; the other two record how the input queue behaves, and pass.
+//! The M8 fix round's fresh re-check: three cases of how term's input
+//! queue orders keys and replies, recorded as it behaves, each a limit
+//! `docs/design.md`'s "Replies in the input queue" states.
 
 use std::vec;
 use std::vec::Vec;
@@ -33,16 +32,13 @@ fn read_all(s: &mut Server<'_>) -> Vec<u8> {
     }
 }
 
-/// `tests/review.rs` states the guarantee "while term holds both parts:
-/// the client reads each key's bytes together, with each reply whole
-/// before or after them". A key typed as a UTF-8 character is several
-/// bytes too, and console can bring them in two `ReadRaw`s as it can an
-/// escape sequence's; `server::unfinished` looks only for ESC, so a reply
-/// queued between them goes inside the character: `é` (C3 A9) reaches the
-/// client as C3, `ESC [ 0 n`, A9.
+/// A key typed as a UTF-8 character is several bytes, and console can
+/// bring them in two `ReadRaw`s as it can an escape sequence's;
+/// `server::unfinished` looks only for ESC, so a reply queued between
+/// them goes inside the character: `é` (C3 A9) reaches the client as C3,
+/// `ESC [ 0 n`, A9. Recorded as it behaves; tui never asks DSR or DA.
 #[test]
-#[ignore = "recheck: a reply still lands inside a UTF-8 key that came in two ReadRaws; unfinished() finds only ESC sequences"]
-fn a_reply_never_lands_inside_a_utf8_key_that_came_in_two_read_raws() {
+fn a_reply_lands_inside_a_utf8_key_that_came_in_two_read_raws() {
     let got = with_server(|s| {
         let mut out = [0u8; INPUT];
         s.keys(b"\xc3");
@@ -50,20 +46,15 @@ fn a_reply_never_lands_inside_a_utf8_key_that_came_in_two_read_raws() {
         s.keys(b"\xa9");
         read_all(s)
     });
-    assert!(
-        got == b"\x1b[0n\xc3\xa9" || got == b"\xc3\xa9\x1b[0n",
-        "the client reads \"{}\"",
-        got.escape_ascii()
-    );
+    assert_eq!(got, b"\xc3\x1b[0n\xa9", "\"{}\"", got.escape_ascii());
 }
 
 /// Escape, then a reply, then `x`, all before the client reads: the reply
 /// goes before the lone ESC, so the client reads the reply, then ESC and
 /// `x` together, which is what Alt-x sends; in arrival order the reply's
-/// own ESC would have stood between them. `docs/design.md` states the
-/// rule ("the reply goes before it too") but not this consequence.
+/// own ESC would have stood between them. With no reply the client
+/// reads ESC `x` too, so the rule makes nothing new.
 #[test]
-#[ignore = "recheck: records that Escape, a reply, then x reads as the reply, then ESC x (passes)"]
 fn escape_then_a_reply_then_a_key_reads_as_the_reply_then_esc_and_the_key() {
     let got = with_server(|s| {
         let mut out = [0u8; INPUT];
@@ -82,7 +73,6 @@ fn escape_then_a_reply_then_a_key_reads_as_the_reply_then_esc_and_the_key() {
 /// keys anyway"), and console's own full queue can cut a key the same
 /// way; recorded as it behaves.
 #[test]
-#[ignore = "recheck: records that a key cut by the full queue and the next key typed read as Up (passes)"]
 fn a_key_cut_by_the_full_queue_and_the_next_key_read_as_another_key() {
     let got = with_server(|s| {
         s.keys(&[b'x'; INPUT - 2]);

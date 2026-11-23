@@ -75,8 +75,10 @@ impl Client {
         Ok(TermSize::from_words(words))
     }
 
-    /// `Stats`: the counters; those past MR3 read 0 without an IPC buffer.
-    /// `BadReply` if the reply has fewer than [`TermStats::WORDS`] words.
+    /// `Stats`: the counters. It needs an IPC buffer: the reply carries
+    /// [`TermStats::WORDS`] words, the kernel delivers at most four to a
+    /// thread without one (`docs/abi.md`), and a reply with fewer words is
+    /// `BadReply`.
     pub fn stats(&self) -> Result<TermStats, CallError> {
         let r = self.0.call(label::TERM_STATS, None)?;
         self.stats_from(&r)
@@ -139,7 +141,8 @@ mod tests {
     }
 
     /// A `Stats` reply with fewer than seven words is `BadReply`, not
-    /// zeros; with seven and no IPC buffer, MR4 to MR6 read 0.
+    /// zeros. (This host client has no IPC buffer, so its words past MR3
+    /// read 0; on the target seven words arrive only through one.)
     #[test]
     fn a_stats_reply_needs_its_seven_words() {
         let c = Client::new(9, None);
@@ -152,20 +155,13 @@ mod tests {
         );
     }
 
-    /// M8 re-check: `stats`' doc says the words past MR3 read 0 without an
-    /// IPC buffer, but the kernel delivers at most 4 words to a thread
-    /// without one (`docs/abi.md`, "Either side has no usable IPC buffer":
-    /// "delivered `length` at most 4"), so such a client's reply always
-    /// has length 4 and `stats_from` refuses it: its `Stats` is always
-    /// `BadReply`. The seven-word reply without a buffer that the test
-    /// above accepts never arrives.
+    /// A client without an IPC buffer gets at most four words back
+    /// (`docs/abi.md`, "Either side has no usable IPC buffer"), so its
+    /// `Stats` is always `BadReply`: `stats` needs a buffer, as its doc
+    /// says (found by the M8 re-check).
     #[test]
-    #[ignore = "recheck: without an IPC buffer a Stats reply has length 4, which stats_from refuses, though stats' doc says MR4 to MR6 read 0"]
-    fn a_stats_reply_without_an_ipc_buffer_reads_zeros_past_mr3() {
+    fn a_stats_reply_without_an_ipc_buffer_is_bad_reply() {
         let c = Client::new(9, None);
-        assert_eq!(
-            c.stats_from(&reply(4, [1, 2, 3, 4])),
-            Ok(TermStats::from_words([1, 2, 3, 4, 0, 0, 0]))
-        );
+        assert_eq!(c.stats_from(&reply(4, [1, 2, 3, 4])), Err(bad(4)));
     }
 }
