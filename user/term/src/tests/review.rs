@@ -48,9 +48,10 @@ fn read_all(s: &mut Server<'_>) -> Vec<u8> {
 /// any that drops a sequence another ESC cuts short) reads as an unknown
 /// key and the keys `5` and `~`, and `5` opens tui's Keys panel; Up (`ESC
 /// [ A`) split after its ESC became the keys `[` and `A`. The guarantee,
-/// while term holds both parts: the client reads each key's bytes
-/// together, with each reply whole before or after them. It failed before
-/// the fix round, `#[ignore]`d.
+/// while term holds both parts: the client reads each escape sequence's
+/// bytes together, with each reply whole before or after them (a UTF-8
+/// character is not covered: `tests/recheck.rs`). It failed before the
+/// fix round, `#[ignore]`d.
 #[test]
 fn a_reply_never_lands_inside_a_key_that_came_in_two_read_raws() {
     for (first, ask, reply, rest, key) in [

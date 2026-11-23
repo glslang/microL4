@@ -181,7 +181,8 @@ from `root: cmdline` on, arrived, each counted wherever it comes, and how
 the line was typed. The loader's lines do not count: its polled writes
 give up after 100,000 polls a byte (`loader/src/serial.rs`), so a
 transmitter that waits loses most of them too. The reader's 30-second
-limit starts once the pipe connects.
+limit starts when the reader starts, after the 20-second wait, so in
+practice when the pipe connects.
 
 Paste the three logs into the PR and attach the three screens. The screens
 must match `m8-check\golden\tui-*.png` by eye: RGB 565 keeps 5 or 6 bits a
