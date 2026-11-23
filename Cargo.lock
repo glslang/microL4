@@ -202,6 +202,8 @@ dependencies = [
 name = "term"
 version = "0.1.0"
 dependencies = [
+ "fb",
+ "libsys",
  "proptest",
 ]
 
