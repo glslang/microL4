@@ -4,8 +4,8 @@
 //! that no frame uses a sequence term ignores; that every frame draws all
 //! but the log whole; the log's scrolling; and the goldens (`golden`),
 //! every panel at 160 x 50 and the scenario's moments at 160 x 50 and
-//! 128 x 48, checked on a reference model of the sequences tui writes
-//! (`screen`).
+//! 128 x 48, checked on term's screen model and on a reference model of
+//! the sequences tui writes (`screen`), which the other tests here use.
 
 use std::string::{String, ToString};
 use std::vec::Vec;
@@ -61,6 +61,16 @@ impl Run {
             }
         }
         self
+    }
+
+    /// What each step wrote, in order: the start (the banner and the
+    /// first frame), then each key's frame or the goodbye. `run` flushes
+    /// its `Write`s at the end of each.
+    fn outputs(&self) -> Vec<&[u8]> {
+        let keys: usize = self.steps.iter().map(|(_, b)| b.len()).sum();
+        let mut out = vec![&self.bytes[..self.bytes.len() - keys]];
+        out.extend(self.steps.iter().map(|(_, b)| b.as_slice()));
+        out
     }
 
     /// The reference screen of everything written.

@@ -107,3 +107,4 @@ key: F = underline
 key: G = fg 14
 cursor: 47,3
 buffer: alternate
+region: 39,46
