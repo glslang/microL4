@@ -4,7 +4,7 @@
 //! at points drawn from a generator seeded with the file's name. Each run
 //! must give the expected state, and after each run the looks drawn frame by
 //! frame, one frame after every `Write`, must equal the final state's full
-//! render. `MICROL4_BLESS=1` rewrites the expected lines of each failing
+//! render, and so must the pixels the renderer drew with the font. `MICROL4_BLESS=1` rewrites the expected lines of each failing
 //! case whose four runs agree, keeping its comment, `size:` and `input:`
 //! lines.
 //!
@@ -576,6 +576,12 @@ pub fn run(cols: usize, rows: usize, writes: &[Vec<u8>]) -> (Snapshot, Vec<(usiz
             if drawn.get(r, c) != t.screen().look(r, c, glyph) {
                 damage.push((r + 1, c + 1));
             }
+        }
+    }
+    // And in pixels: the font's glyphs through the renderer.
+    for cell in super::render::damage_in_pixels(cols, rows, writes) {
+        if !damage.contains(&cell) {
+            damage.push(cell);
         }
     }
     (Snapshot::of(&t, reply), damage)
