@@ -13,7 +13,7 @@ use core::fmt;
 use crate::client::{CallError, Endpoint};
 use crate::console::split;
 use crate::proto::{TermSize, TermStats, label};
-use crate::syscall::{CPtr, Ipc};
+use crate::syscall::{CPtr, Ipc, Message};
 
 /// The most bytes one [`Client::read`] returns: term's input queue.
 pub const MAX_READ: usize = 512;
@@ -44,12 +44,15 @@ impl Client {
     pub fn write(&self, bytes: &[u8]) -> Result<(), CallError> {
         for chunk in split(bytes, self.0.max_bytes()) {
             let r = self.0.call(label::TERM_WRITE, Some(chunk))?;
-            if self.0.word(&r, 0) != Some(chunk.len() as u64) {
-                return Err(CallError::BadReply {
-                    label: 0,
-                    length: r.info.length(),
-                });
-            }
+            self.written(&r, chunk.len())?;
+        }
+        Ok(())
+    }
+
+    /// A `Write`'s reply: MR0 must be `n`, the bytes the request carried.
+    fn written(&self, r: &Message, n: usize) -> Result<(), CallError> {
+        if self.0.word(r, 0) != Some(n as u64) {
+            return Err(bad_reply(r));
         }
         Ok(())
     }
@@ -67,19 +70,33 @@ impl Client {
         let r = self.0.call(label::TERM_SIZE, None)?;
         let mut words = [0; TermSize::WORDS];
         for (i, w) in words.iter_mut().enumerate() {
-            *w = self.0.word(&r, i).ok_or(CallError::BadReply {
-                label: 0,
-                length: r.info.length(),
-            })?;
+            *w = self.0.word(&r, i).ok_or_else(|| bad_reply(&r))?;
         }
         Ok(TermSize::from_words(words))
     }
 
     /// `Stats`: the counters; those past MR3 read 0 without an IPC buffer.
+    /// `BadReply` if the reply has fewer than [`TermStats::WORDS`] words.
     pub fn stats(&self) -> Result<TermStats, CallError> {
         let r = self.0.call(label::TERM_STATS, None)?;
-        let words = core::array::from_fn(|i| self.0.word(&r, i).unwrap_or(0));
+        self.stats_from(&r)
+    }
+
+    /// The counters a `Stats` reply carries.
+    fn stats_from(&self, r: &Message) -> Result<TermStats, CallError> {
+        if (r.info.length() as usize) < TermStats::WORDS {
+            return Err(bad_reply(r));
+        }
+        let words = core::array::from_fn(|i| self.0.word(r, i).unwrap_or(0));
         Ok(TermStats::from_words(words))
+    }
+}
+
+/// A success reply without the words its request answers with.
+fn bad_reply(r: &Message) -> CallError {
+    CallError::BadReply {
+        label: 0,
+        length: r.info.length(),
     }
 }
 
@@ -99,5 +116,39 @@ mod tests {
     fn the_queues_match() {
         assert_eq!(crate::console::MAX_RAW, MAX_READ);
         assert_eq!(TermStats::WORDS, 7);
+    }
+
+    fn reply(length: u64, mr: [u64; 4]) -> Message {
+        Message::new(l4core::ipc::MessageInfo::new(0, 0, 0, length), mr)
+    }
+
+    fn bad(length: u64) -> CallError {
+        CallError::BadReply { label: 0, length }
+    }
+
+    /// A `Write` succeeds only if MR0 counts every byte the request
+    /// carried: a reply with another count, or none, is `BadReply`.
+    #[test]
+    fn a_write_reply_must_count_every_byte() {
+        let c = Client::new(9, None);
+        assert_eq!(c.written(&reply(1, [24, 0, 0, 0]), 24), Ok(()));
+        assert_eq!(c.written(&reply(1, [23, 0, 0, 0]), 24), Err(bad(1)));
+        assert_eq!(c.written(&reply(1, [25, 0, 0, 0]), 24), Err(bad(1)));
+        // MR0 holds 24, but the reply has no words.
+        assert_eq!(c.written(&reply(0, [24, 0, 0, 0]), 24), Err(bad(0)));
+    }
+
+    /// A `Stats` reply with fewer than seven words is `BadReply`, not
+    /// zeros; with seven and no IPC buffer, MR4 to MR6 read 0.
+    #[test]
+    fn a_stats_reply_needs_its_seven_words() {
+        let c = Client::new(9, None);
+        for length in 0..7 {
+            assert_eq!(c.stats_from(&reply(length, [1, 2, 3, 4])), Err(bad(length)));
+        }
+        assert_eq!(
+            c.stats_from(&reply(7, [1, 2, 3, 4])),
+            Ok(TermStats::from_words([1, 2, 3, 4, 0, 0, 0]))
+        );
     }
 }
