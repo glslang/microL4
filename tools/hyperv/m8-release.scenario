@@ -8,9 +8,10 @@
 # timeout delivers them: the line must still be read whole. uart's burst
 # is 15 with working FIFOs or 1 without (both start "burst 1"), and its
 # THRE bursts must be above 0. Run it again with -ConnectAfterSeconds 20:
-# the script then types the line as soon as the pipe connects and reports
-# whether the lines printed before that arrived (the transmitter waits for
-# a client) or not (it drains); the steps after the send: must pass either
+# the script then types the line when "release: type a line" arrives, or
+# after 10 s with no line, and reports how many of uart's lines above the
+# send:, from "root: cmdline" on, arrived (all: the transmitter waits for
+# a client; none: it drains); the steps after the send: must pass either
 # way.
 cmdline: test=release
 kernel: release

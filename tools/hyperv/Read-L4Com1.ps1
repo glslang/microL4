@@ -11,11 +11,12 @@ containing one of the -StopOn markers: the same markers the QEMU scenarios
 use. It returns an object with the marker found (or $null on a timeout) and
 every line read, and writes the lines to -LogPath if given.
 
--OnConnect and -OnLine let Test-L4Vhdx.ps1 -Scenario type into COM1 and
-take the screen: -OnConnect runs once the pipe is connected, -OnLine after
-each line is read and before the markers are checked. Each gets the pipe,
--OnLine the line first; each returns lines (strings) to log after the line,
-which are not checked for markers.
+-OnConnect, -OnLine and -OnIdle let Test-L4Vhdx.ps1 -Scenario type into
+COM1 and take the screen: -OnConnect runs once the pipe is connected,
+-OnLine after each line is read and before the markers are checked, and
+-OnIdle each second that passes with no line. Each gets the pipe, -OnLine
+the line first; each returns lines (strings) to log, which are not checked
+for markers.
 
 .EXAMPLE
 Start-VM l4; .\Read-L4Com1.ps1 -LogPath com1.log
@@ -29,7 +30,9 @@ param(
     # { param($pipe) ... }, once connected.
     [scriptblock] $OnConnect,
     # { param($line, $pipe) ... }, after each line.
-    [scriptblock] $OnLine
+    [scriptblock] $OnLine,
+    # { param($pipe) ... }, each second with no line.
+    [scriptblock] $OnIdle
 )
 $ErrorActionPreference = 'Stop'
 
@@ -63,13 +66,27 @@ try {
     }
 
     $reader = [System.IO.StreamReader]::new($pipe, [System.Text.Encoding]::ASCII)
+    $second = [TimeSpan]::FromSeconds(1)
+    # The line being read: one read at a time, kept across -OnIdle's waits.
+    $read = $null
     while ($null -eq $marker) {
         $remaining = $deadline - (Get-Date)
         if ($remaining -le [TimeSpan]::Zero) { break }
-        $read = $reader.ReadLineAsync()
-        if (-not $read.Wait($remaining)) { break }
-        if ($null -eq $read.Result) { break } # the VM stopped
-        $line = $control.Replace($escape.Replace($read.Result, ''), '')
+        if ($null -eq $read) { $read = $reader.ReadLineAsync() }
+        $wait = if ($OnIdle -and $remaining -gt $second) { $second } else { $remaining }
+        if (-not $read.Wait($wait)) {
+            if ($OnIdle) {
+                foreach ($note in @(& $OnIdle $pipe)) {
+                    Write-Host $note
+                    $lines.Add($note)
+                }
+            }
+            continue
+        }
+        $text = $read.Result
+        $read = $null
+        if ($null -eq $text) { break } # the VM stopped
+        $line = $control.Replace($escape.Replace($text, ''), '')
         Write-Host $line
         $lines.Add($line)
         if ($OnLine) {

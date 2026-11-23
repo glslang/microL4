@@ -147,7 +147,7 @@ gh run download --repo glslang/microL4 --name microl4-vhdx-m8-check --dir m8-che
 .\Test-L4Vhdx.ps1 -VhdxPath .\m8-check\release\disk.vhdx -Scenario .\m8-check\m8-release.scenario `
     -LogPath m8-release.log
 .\Test-L4Vhdx.ps1 -VhdxPath .\m8-check\release\disk.vhdx -Scenario .\m8-check\m8-release.scenario `
-    -ConnectAfterSeconds 20 -LogPath m8-release-late.log
+    -ConnectAfterSeconds 20 -TimeoutSeconds 30 -LogPath m8-release-late.log
 ```
 
 `-Scenario` follows a scenario file in the QEMU harness's format, as
@@ -166,10 +166,22 @@ guess is wrong: say so in the PR, and keep the `.rgb565` files. A screen
 the script cannot save fails the run, which still goes on to the end so
 the log is whole.
 `-ConnectAfterSeconds 20` starts the VM and opens the pipe only 20 seconds
-later; the script then types the scenario's first `send:` at once, since
-the line that releases it was printed with no client on the pipe, requires
-only the steps after it, and prints how many of the `expect:` lines above
-that `send:` arrived once it connected.
+later. The script then follows the steps from the `expect:` right above
+the first `send:`: it types the `send:` when that line arrives or, if it
+never does, once no line at all has come for 10 seconds, and requires the
+steps after it. A transmitter that drains has dropped that line, and by
+then the boot is over and the root task waits in its `Read`, printing
+nothing more until the line is typed; one that waits held the boot back
+and sends what it held as soon as the pipe connects, and the boot's quiet
+stretches after that, the release kernel's own start the longest, should
+take well under 10 seconds (the whole `release` scenario takes about 2
+seconds on QEMU's TCG). The script then
+prints how many of uart's lines above the `send:`, the `expect:` lines
+from `root: cmdline` on, arrived, each counted wherever it comes, and how
+the line was typed. The loader's lines do not count: its polled writes
+give up after 100,000 polls a byte (`loader/src/serial.rs`), so a
+transmitter that waits loses most of them too. The reader's 30-second
+limit starts once the pipe connects.
 
 Paste the three logs into the PR and attach the three screens. The screens
 must match `m8-check\golden\tui-*.png` by eye: RGB 565 keeps 5 or 6 bits a
@@ -180,7 +192,7 @@ must be the golden's.
 | --- | --- | --- |
 | `m8-tui` | `cpu: hypervisor Hyper-V`; `bootinfo: framebuffer 0xf8000000-...`; `fb: 1024x768 BGR, stride 1024, ...; 128x48 cells`, with the GOP's size and frame counts; `fb: full clear: uncached <n> us, write-combining <m> us`; `tui: 128x48 terminal`; `tui: frame 1 drawn`; `[console] focus 4 (term)` and `tui: frame 4 drawn` after the script's keys; `tui: quit after 4 keys`; `tui: read 8 bytes`; `term: stats:` with 0 ignored and 0 dropped; `TEST PASS`. Record both clear times | the framebuffer found, handed out and mapped write-combining on Hyper-V; whether write-combining wins over the firmware's MTRR type (H10: the WC clear several times faster than the UC one); keys through the named pipe; Hyper-V's video showing the GOP framebuffer after `ExitBootServices` |
 | `m8-release` | uart's line with `burst 15` (working FIFOs) or `burst 1`; `14 bytes received` and the line read whole, though its last 6 bytes stay below the receive trigger of 8, which only the character timeout delivers; THRE bursts above 0 | M7's 16550 questions: FIFOs, the character timeout, THRE interrupts |
-| `m8-release-late` | the script's `Of the N expect: lines above the first send:, K arrived` line: K = N if the lines written before the pipe had a client arrive once it connects (the transmitter waits), 0 if they are gone (it drains; M0 saw Hyper-V drop COM1 output with no client); then the rest of the run, `release: read "release input"` to `TEST PASS` | whether a transmitter with no client on the pipe stalls `uart`'s writes |
+| `m8-release-late` | the script's `Of the 6 uart lines above the first send: (from 'root: cmdline'), K arrived` line: K = 6 if uart's lines written before the pipe had a client arrive once it connects (the transmitter waits; the `send:` is then typed when `release: type a line` arrives), 0 if they are gone (it drains, as M0 saw Hyper-V drop COM1 output with no client; the `send:` is typed after 10 seconds with no line); anything between, say so in the PR; then the rest of the run, `release: read "release input"` to `TEST PASS` | whether a transmitter with no client on the pipe stalls `uart`'s writes |
 
 The `-Scenario` and `-ConnectAfterSeconds` code and the thumbnail were
 written without a Windows host to run them. If the script itself fails,

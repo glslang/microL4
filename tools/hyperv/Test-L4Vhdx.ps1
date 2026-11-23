@@ -26,10 +26,16 @@ kernel:, exit:, timeout: and qemu_args: are QEMU's and are ignored: the
 VHDX carries its own command line.
 
 -ConnectAfterSeconds starts the VM and opens the pipe only after that many
-seconds. With -Scenario, the script then types the scenario's first send:
-at once, since the line that would release it may have been printed with
-no client on the pipe, and requires only the steps after it; it reports
-how many of the expect: lines above that send: arrived after all.
+seconds, to see whether what uart wrote while no client was on the pipe
+arrives once one connects. With -Scenario, the script then follows the
+steps from the expect: right above the first send:, whose line may have
+been printed with no client on the pipe: it types that send: when its own
+expect: line arrives or, if it never does, once no line at all has come
+for 10 seconds, and requires the steps after it. It reports how many of
+the expect: lines above that send:, from the first that starts
+'root: cmdline', arrived, each counted wherever it comes: those are uart's,
+while the loader's polled writes give up on a transmitter that does not
+drain, so its lines say nothing.
 
 Exit status 0 means pass, 1 means fail.
 
@@ -209,6 +215,7 @@ if (-not $logDir) { $logDir = '.' }
 $scn = $null
 $onConnect = $null
 $onLine = $null
+$onIdle = $null
 if ($Scenario) {
     $parsed = Read-L4Scenario $Scenario
     $scn = @{
@@ -217,9 +224,11 @@ if ($Scenario) {
         # The first screendump that could not be saved: the run goes on, so
         # the rest of the log is kept, but it fails.
         Unsaved = $null
-        # With -ConnectAfterSeconds: the expects above the first send, and
-        # how many of them arrived.
-        Early = @(); EarlyNext = 0
+        # With -ConnectAfterSeconds: the texts of uart's expects above the
+        # first send, whether each arrived, the first send's step, when the
+        # last line came (or the pipe connected), the seconds with no line
+        # after which the first send is typed anyway, and whether it was.
+        Early = @(); Seen = @(); FirstSend = -1; Quiet = $null; LateWait = 10; Late = $false
     }
 
     # Types a send's bytes into COM1.
@@ -243,17 +252,53 @@ if ($Scenario) {
     }
 
     if ($ConnectAfterSeconds -gt 0) {
+        # Only uart's lines can show whether the transmitter waited for a
+        # client: the loader's polled writes give up after 100,000 polls a
+        # byte (loader/src/serial.rs), and the release kernel prints
+        # nothing, while uart, which writes on THRE interrupts, loses
+        # nothing. On the release kernel its first expected line is the
+        # root task's 'root: cmdline'.
+        $steps = $scn.Steps
+        $first = 0
+        while ($first -lt $steps.Count -and $steps[$first].Kind -ne 'send') { $first++ }
+        if ($first -ge $steps.Count) { throw "${Scenario}: -ConnectAfterSeconds needs a send:" }
+        $above = @($steps[0..($first - 1)] | Where-Object Kind -eq 'expect')
+        $from = 0
+        while ($from -lt $above.Count -and -not $above[$from].Text.StartsWith('root: cmdline', [System.StringComparison]::Ordinal)) {
+            $from++
+        }
+        if ($from -ge $above.Count) {
+            throw "${Scenario}: -ConnectAfterSeconds needs an expect: starting 'root: cmdline' above the first send:"
+        }
+        $scn.Early = @($above[$from..($above.Count - 1)] | ForEach-Object Text)
+        $scn.Seen = @($scn.Early | ForEach-Object { $false })
+        # The steps start at the first send's own expect: the lines above
+        # it may be gone.
+        $own = $first - 1
+        while ($steps[$own].Kind -ne 'expect') { $own-- }
+        $scn.Next = $own
+        $scn.FirstSend = $first
+
         $onConnect = {
             param($pipe)
-            $steps = $scn.Steps
-            $first = 0
-            while ($first -lt $steps.Count -and $steps[$first].Kind -ne 'send') { $first++ }
-            if ($first -lt $steps.Count) {
-                $scn.Early = @($steps[0..($first - 1)] | Where-Object Kind -eq 'expect')
-                "l4: connected $ConnectAfterSeconds s after the start; typing the first send: at once"
-                $i = $first
-                while ($i -lt $steps.Count -and $steps[$i].Kind -eq 'send') {
-                    & $send $pipe $steps[$i]
+            $scn.Quiet = Get-Date
+            $own = $scn.Steps[$scn.Next].Text
+            "l4: connected $ConnectAfterSeconds s after the start; the first send: waits for '$own', or $($scn.LateWait) s with no line"
+        }
+        # A transmitter that drained has dropped the line that releases the
+        # first send, and by now the root task waits in its Read with
+        # nothing more to print: type it once the pipe has been quiet for
+        # LateWait seconds. One that waited sends its held lines as soon as
+        # the pipe connects, and the boot's quiet stretches after that,
+        # such as the release kernel's own start, should be far shorter.
+        $onIdle = {
+            param($pipe)
+            if ($scn.Next -le $scn.FirstSend -and ((Get-Date) - $scn.Quiet).TotalSeconds -ge $scn.LateWait) {
+                $scn.Late = $true
+                "l4: no line for $($scn.LateWait) s; typing the first send: now"
+                $i = $scn.FirstSend
+                while ($i -lt $scn.Steps.Count -and $scn.Steps[$i].Kind -eq 'send') {
+                    & $send $pipe $scn.Steps[$i]
                     $i++
                 }
                 $scn.Next = $i
@@ -269,8 +314,9 @@ if ($Scenario) {
                 if ($line.Contains($f)) { $scn.Forbidden = "printed forbidden '$f' in '$line'"; break }
             }
         }
-        if ($scn.EarlyNext -lt $scn.Early.Count -and $line.Contains($scn.Early[$scn.EarlyNext].Text)) {
-            $scn.EarlyNext++
+        $scn.Quiet = Get-Date
+        for ($i = 0; $i -lt $scn.Early.Count; $i++) {
+            if (-not $scn.Seen[$i] -and $line.Contains($scn.Early[$i])) { $scn.Seen[$i] = $true }
         }
         $steps = $scn.Steps
         $rest = $line
@@ -316,7 +362,7 @@ try {
         Start-Sleep -Seconds $ConnectAfterSeconds
     }
     $result = & (Join-Path $PSScriptRoot 'Read-L4Com1.ps1') -PipeName $PipeName -TimeoutSeconds $TimeoutSeconds `
-        -LogPath $LogPath -OnConnect $onConnect -OnLine $onLine
+        -LogPath $LogPath -OnConnect $onConnect -OnLine $onLine -OnIdle $onIdle
 } finally {
     # Surfaces a Start-VM failure, if there was one, then stops the VM.
     Receive-Job -Job $start -Wait -AutoRemoveJob | Out-Null
@@ -328,8 +374,13 @@ $why = $null
 if ($scn) {
     if ($scn.Early.Count -gt 0) {
         Write-Host ''
-        $arrived = 'Of the {0} expect: lines above the first send:, {1} arrived once the pipe connected.'
-        Write-Host ($arrived -f $scn.Early.Count, $scn.EarlyNext)
+        $arrived = "Of the {0} uart lines above the first send: (from 'root: cmdline'), {1} arrived once the pipe connected."
+        Write-Host ($arrived -f $scn.Early.Count, @($scn.Seen | Where-Object { $_ }).Count)
+        if ($scn.Late) {
+            Write-Host "The first send: was typed after $($scn.LateWait) s with no line."
+        } elseif ($scn.Next -gt $scn.FirstSend) {
+            Write-Host 'The first send: was typed when its own expect: line arrived.'
+        }
     }
     if ($scn.Broken) {
         $why = $scn.Broken
