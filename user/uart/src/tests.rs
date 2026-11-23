@@ -103,8 +103,15 @@ fn setup_programs_the_device_in_order() {
         ]
     );
     assert_eq!(s.acks, 1);
-    // Setup's LSR reads count no errors.
-    assert_eq!(uart.stats(), UartStats::default());
+    // Setup's LSR reads count no errors; Stats MR8 is the burst.
+    assert_eq!(
+        uart.stats(),
+        UartStats {
+            burst: 15,
+            ..UartStats::default()
+        }
+    );
+    assert_eq!(uart.stats().to_words()[8], 15);
 }
 
 #[test]
@@ -118,6 +125,14 @@ fn without_working_fifos_the_burst_is_one() {
         assert_eq!(setup(&mut s), 1);
         assert!(s.log.contains(&('w', FCR, 0)), "FIFOs off for IIR {iir:#x}");
     }
+    // Stats MR8 says so.
+    let mut s = Script {
+        log: Vec::new(),
+        reads: [LSR_TEMT, 0x01, 0x60, 0, IIR_NO_INT].into_iter().collect(),
+        acks: 0,
+    };
+    let (uart, _) = Uart::start(&mut s);
+    assert_eq!((uart.burst(), uart.stats().burst), (1, 1));
     // TEMT never comes: 10,000 polls, then on.
     let mut s = Script {
         log: Vec::new(),

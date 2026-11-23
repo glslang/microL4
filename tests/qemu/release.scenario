@@ -10,7 +10,8 @@
 # reserved numbers 19 and 31 each raised UnknownSyscall with the number in
 # MR18 (root answers each with the probe's registers and ip + 2); the line
 # the harness types, which reaches client 1 since focus starts there;
-# uart's Stats; TEST PASS. Then a Sync, and IOPort_Out32(0xF4, 0x10) ends
+# uart's Stats, burst 15 from MR8 (its 16550 has working FIFOs); TEST
+# PASS. Then a Sync, and IOPort_Out32(0xF4, 0x10) ends
 # the run with success. The `next:` below puts root's first line right
 # after the loader's last, so a kernel that printed anything at boot,
 # between those two lines, fails (what reaches COM1 later, mixed with
@@ -33,6 +34,7 @@ expect: release: read "release input"
 expect: release: uart:
 expect: , 14 bytes received,
 expect: , 0 overruns, 0 line errors,
+expect: , burst 15
 expect: TEST PASS
 forbid: microL4 kernel
 forbid: bootinfo:
