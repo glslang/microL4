@@ -10,7 +10,9 @@ type. A VT100 never sends half a reply.
 `docs/design.md`, "Input and the term protocol" ("past that they are
 dropped and counted").
 
-**Status:** open. Found by the M8 red team at `e9b9afb`.
+**Status:** fixed in the M8 fix round, commit `e4fca76` ("term: a reply
+is queued whole or dropped whole, before an unfinished key";
+[The fix](#the-fix)). Found by the M8 red team at `e9b9afb`.
 
 ## What breaks
 
@@ -45,17 +47,19 @@ not help; and the client cannot tell a cut reply from a typed `ESC [`.
 ## The test
 
 `a_reply_cut_short_never_turns_a_typed_byte_into_a_key` in
-`user/term/src/tests/redteam.rs`, `#[ignore]`d. It drives a host
-`term::Server` over a `Session`, as `term::run` does: 510 keys queued, the
-client's `Write` of DSR 6 (then, in a second run, DA), a `Read`, one typed
-byte, a `Read`. It asserts the guarantee, that the client reads the typed
-bytes with the reply whole or not at all between them, and fails:
+`user/term/src/tests/redteam.rs`, `#[ignore]`d until the fix. It drives a
+host `term::Server` over a `Session`, as `term::run` does: 510 keys
+queued, the client's `Write` of DSR 6 (then, in a second run, DA), a
+`Read`, one typed byte, a `Read`. It asserts the guarantee, that the
+client reads the typed bytes with the reply whole or not at all between
+them, and failed before the fix:
 
 ```
 the client reads \e[A after the paste: the Up key, which nobody typed
 ```
 
-Run it with `cargo test -p term --lib redteam -- --ignored`.
+It was run with `cargo test -p term --lib redteam -- --ignored`; it passes
+now in the default run.
 
 How sure: certain for the bytes term queues (the test runs the real
 `Server`, `Session` and parser); that `ESC [ A` decodes as Up is tui's
@@ -72,3 +76,41 @@ the queue's limit ("a reply that does not fit whole is dropped whole"),
 change `bytes_past_the_queues_512_are_dropped_and_counted`'s last case
 (510 queued: the reply is dropped, MR5 + 6, nothing queued), and un-ignore
 the red-team test.
+
+## The fix
+
+M8 fix round, in `user/term/src/server.rs`, as proposed, with a second rule
+for what the M8 fresh review found next to it:
+
+- **Whole or not at all.** `Input::reply` queues a reply only if the queue
+  has room for all of it; otherwise it drops every byte and counts them in
+  `Stats` MR5. MR6 counts only replies queued. Keys keep the per-byte rule.
+  `bytes_past_the_queues_512_are_dropped_and_counted` now ends with 510
+  queued and DSR 6 dropped whole (MR5 + 6, MR6 unchanged, the queue as it
+  was), then with 506 queued and DSR 6 fitting exactly. The red-team test
+  is no longer ignored and passes.
+- **Before an unfinished key.** Reviewer T showed that a reply queued whole
+  can still land inside a key: console hands over what its raw queue holds
+  at each `ReadRaw`, so a key can come in two, and a reply queued between
+  them cut F5 (`ESC [ 1 5 ~`) into an unknown key, `5` and `~`. Now, if
+  the bytes still queued end in an unfinished escape sequence (ESC alone,
+  or ESC `[` or ESC `O` with only parameter and intermediate bytes, the
+  sequences tui's decoder waits on; `term::server::unfinished`), the reply
+  goes before that sequence's ESC, so the key reaches the client whole,
+  after it. Host tests: `an_unfinished_key_is_found_from_its_last_esc`,
+  `a_reply_goes_before_an_unfinished_key_at_every_split` (F5, `ESC O A`
+  and ESC alone split at every point, behind two typed bytes),
+  `replies_before_an_unfinished_key_keep_their_order_and_their_limit`, and
+  reviewer T's `a_reply_never_lands_inside_a_key_that_came_in_two_read_raws`
+  in `user/term/src/tests/review.rs`, no longer ignored.
+- **The limit.** Once the client has read a key's first part, those bytes
+  have left the queue, and term has no timer to hold a reply back until
+  the key ends, so a reply queued before the rest comes still lands inside
+  the key. That is the case whenever the client already waits in `Read` as
+  the key's first part comes, since term releases it at once. tui never
+  asks DSR or DA. `a_reply_lands_inside_a_key_whose_first_part_the_client_has_read`
+  records how it behaves.
+- `docs/design.md` ("Input and the term protocol") states both rules, the
+  limit, MR5 and MR6 as built, that RIS does not clear the input queue (it
+  is the client's, not the screen's), and that keys released to a saved
+  `Read` whose caller root suspended are lost uncounted.

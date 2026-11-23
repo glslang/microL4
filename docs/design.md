@@ -5834,7 +5834,7 @@ start term resets `libsys::output`, fills the screen and draws its first
 frame (`Session::start`, [The renderer](#the-renderer)), then attaches to
 console. A signal with `KEYS` makes it call `ReadRaw` once and
 append the bytes to its input queue (512 bytes; past that they are dropped
-and counted). NT exists from console's spawn, so a signal console sent
+and counted, below). NT exists from console's spawn, so a signal console sent
 before term ran waits there, and term's first receive returns it. A message
 is one request. Whenever the input queue is non-empty
 and its client's `Read` is saved, term answers it with `Send` on slot 5 and
@@ -5846,17 +5846,38 @@ always answers at once; it never waits for its client.
 | `0x140` | `Write` | a byte string of at most 952 bytes | MR0 `n`, once every byte is applied and the frame is drawn | `BadLength` |
 | `0x141` | `Read` | none | a byte string of at most 512 bytes: the input queue, all of it, at once if it holds anything; else the reply is saved in slot 5 (`CNode_SaveCaller`) and sent when bytes arrive | `Busy` |
 | `0x142` | `Size` | none | MR0 columns, MR1 rows, MR2 width and MR3 height in pixels | |
-| `0x143` | `Stats` | none | MR0 bytes written, MR1 frames drawn (the first included), MR2 cells drawn, MR3 sequences ignored, MR4 bytes `ReadRaw` brought from console (dropped ones included), MR5 bytes dropped from the full input queue, keys and replies alike, MR6 reply bytes queued (not those dropped) | |
+| `0x143` | `Stats` | none | MR0 bytes written, MR1 frames drawn (the first included), MR2 cells drawn, MR3 sequences ignored, MR4 bytes `ReadRaw` brought from console (dropped ones included), MR5 bytes dropped: a key's that found the input queue full, and every byte of a reply that did not fit whole, MR6 reply bytes queued (a dropped reply's are not) | |
 
 `Write`, `Read` and `Size` need badge 1, term's one client; `Stats` takes any
 badge, and root's has 2. Labels, the byte-string encoding and the errors are
 M7's ([Protocols](#protocols)), checked in the same order. The input queue
-holds the keys and the replies DSR and DA queue, in the order they came. A
-`Write` that queues a reply while another thread of the client waits in a
-saved `Read` releases it. Like a pseudo-terminal's slave side in raw mode,
-term passes input through as typed, with no line discipline, echo, signals
-or key translation: the host terminal on the other end of COM1 already sends
-VT sequences for its keys.
+holds the keys and the replies DSR and DA queue, in the order they came,
+with one exception below. A `Write` that queues a reply while another
+thread of the client waits in a saved `Read` releases it. Like a
+pseudo-terminal's slave side in raw mode, term passes input through as
+typed, with no line discipline, echo, signals or key translation: the host
+terminal on the other end of COM1 already sends VT sequences for its keys.
+
+**Replies in the input queue.** The rules that keep a reply from changing
+what the client reads as its keys, and where they stop
+(`term::server::Input`, host-tested):
+
+| Rule | Why |
+| --- | --- |
+| A key's bytes are queued as far as they fit, and the rest dropped and counted in MR5 | console splits keys anyway, at whatever its raw queue holds at each `ReadRaw` |
+| A reply is queued whole or dropped whole, counted in MR5, never cut short | the first bytes of a reply and the next key typed can read as a key nobody typed: `ESC [` and a typed `A` is Up (`docs/redteam/m8-reply-cut-short.md`). A reply is at most 9 bytes, so a queue with room for one never loses it |
+| A reply goes at the queue's end, unless the bytes still queued end in an unfinished escape sequence: ESC alone, or ESC `[` or ESC `O` followed only by parameter and intermediate bytes (`0x20` to `0x3F`), with no final byte yet. Then it goes before that sequence's ESC (`term::server::unfinished`; the last ESC decides), and replies queued there keep their order | a key console brought in two `ReadRaw`s then reaches the client whole, after the reply, rather than cut in two by it (F5, `ESC [ 1 5 ~`, would read as an unknown key, `5` and `~`). These are the sequences tui's decoder waits on ([`tui`](#tui)). ESC alone may be the Escape key, which term cannot tell from a sequence's start; the reply goes before it too |
+| Limit: a key whose first part the client has already read is not helped, and a reply queued before the rest comes lands inside the key | those bytes have left the queue, and term has no timer to hold a reply back until the key ends. This is the case whenever the client already waits in `Read` as the key's first part comes, since term releases it at once (host test `a_reply_lands_inside_a_key_whose_first_part_the_client_has_read`). tui never asks DSR or DA |
+
+The input queue belongs to the terminal's one client, not to the screen,
+so RIS does not clear it: a client that begins with RIS still reads the keys
+and replies an earlier one left unread. term answers a saved `Read` by
+`Send` on slot 5 and does not learn whether it reached anyone. If root
+suspends the client while its `Read` is saved, the kernel deletes the
+reply capability in slot 5 ([Suspend, Resume and
+deletion](#suspend-resume-and-deletion)), and the next bytes term
+releases are sent to the empty slot and lost, uncounted; only root can
+cause it.
 
 | Part | What |
 | --- | --- |
