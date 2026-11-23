@@ -111,3 +111,4 @@ key: D = inverse
 key: E = faint
 cursor: 49,3
 buffer: alternate
+region: 41,48

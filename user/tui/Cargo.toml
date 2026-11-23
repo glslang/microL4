@@ -13,3 +13,7 @@ doctest = false
 
 [dependencies]
 libsys = { path = "../libsys" }
+
+[dev-dependencies]
+# The goldens run on term's screen model, the one the guest's term keeps.
+term = { path = "../term" }

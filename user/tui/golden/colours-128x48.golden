@@ -381,3 +381,4 @@ key: Ż = fg 16 bg 229
 key: ż = faint
 cursor: 47,3
 buffer: alternate
+region: 39,46

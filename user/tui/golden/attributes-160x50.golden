@@ -122,3 +122,4 @@ key: O = bold faint italic underline
 key: P = inverse conceal
 cursor: 49,3
 buffer: alternate
+region: 41,48
