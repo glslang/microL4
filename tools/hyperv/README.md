@@ -162,7 +162,9 @@ returned as `l4-<name>.rgb565`. Its documentation says only that they are
 "raw RGB 565"; the script reads them as Windows' 16-bit RGB 565 bitmaps
 are laid out (two bytes a pixel, little-endian, red in the top five bits,
 rows from the top). If a PNG looks scrambled or its colours swapped, that
-guess is wrong: say so in the PR, and keep the `.rgb565` files.
+guess is wrong: say so in the PR, and keep the `.rgb565` files. A screen
+the script cannot save fails the run, which still goes on to the end so
+the log is whole.
 `-ConnectAfterSeconds 20` starts the VM and opens the pipe only 20 seconds
 later; the script then types the scenario's first `send:` at once, since
 the line that releases it was printed with no client on the pipe, requires
