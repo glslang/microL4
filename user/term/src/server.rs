@@ -14,11 +14,13 @@
 //! takes any badge. The checks run in M7's order: the label, the badge,
 //! the length, then whether term can hold the request. The input queue
 //! holds the keys `ReadRaw` brings from console and the replies DSR and DA
-//! queue, in the order they came; a byte that finds it full is dropped and
-//! counted. Whenever it holds anything and the client's `Read` is saved,
-//! term answers that `Read` with everything queued ([`Server::release`]),
-//! so a `Write` that queues a reply releases a `Read` another thread of the
-//! client saved.
+//! queue, in the order they came, except that a reply goes before an
+//! unfinished key at the queue's end ([`Input::reply`]). A key's byte that
+//! finds the queue full is dropped and counted, and so is a reply that
+//! does not fit whole, every byte of it. Whenever the queue holds anything
+//! and the client's `Read` is saved, term answers that `Read` with
+//! everything queued ([`Server::release`]), so a `Write` that queues a
+//! reply releases a `Read` another thread of the client saved.
 
 use libsys::proto::{self, MAX_BYTES, Refusal, TERM_CLIENT, TermSize, TermStats, label};
 
@@ -70,7 +72,8 @@ pub fn decode<'a>(
     })
 }
 
-/// The input queue: the keys and the replies, in the order they came, and
+/// The input queue: the keys and the replies, in the order they came but
+/// for a reply that goes before an unfinished key ([`Input::reply`]), and
 /// the counts `Stats` reports of them.
 #[derive(Clone, Debug)]
 pub struct Input {
@@ -106,19 +109,37 @@ impl Input {
         self.push(bytes);
     }
 
-    /// A reply DSR or DA owes the client: the bytes queued count as reply
-    /// bytes (MR6), those past the queue's room as dropped (MR5).
+    /// A reply DSR or DA owes the client, queued whole or dropped whole: if
+    /// the queue has room for all of it, its bytes count as reply bytes
+    /// (MR6), and if not, every byte of it counts as dropped (MR5). The
+    /// client never reads part of a reply, which with the next key typed
+    /// could read as a key nobody typed
+    /// (`docs/redteam/m8-reply-cut-short.md`).
+    ///
+    /// It goes in at the end, or before the unfinished escape sequence the
+    /// queue ends in ([`unfinished`]), so that a key console brought in
+    /// two `ReadRaw`s reaches the client whole, after the reply. A key
+    /// whose first part the client has already read is past helping: term
+    /// has no timer to hold the reply back with until the key ends.
     pub fn reply(&mut self, bytes: &[u8]) {
-        self.replies += self.push(bytes) as u64;
+        let (n, len) = (bytes.len(), self.len);
+        if n > INPUT - len {
+            self.dropped += n as u64;
+            return;
+        }
+        let at = unfinished(self.queued()).unwrap_or(len);
+        self.bytes.copy_within(at..len, at + n);
+        self.bytes[at..at + n].copy_from_slice(bytes);
+        self.len += n;
+        self.replies += n as u64;
     }
 
-    /// Queues what fits; returns how many bytes.
-    fn push(&mut self, bytes: &[u8]) -> usize {
+    /// Queues the bytes that fit and drops the rest, counting them.
+    fn push(&mut self, bytes: &[u8]) {
         let n = bytes.len().min(INPUT - self.len);
         self.bytes[self.len..self.len + n].copy_from_slice(&bytes[..n]);
         self.len += n;
         self.dropped += (bytes.len() - n) as u64;
-        n
     }
 
     /// Everything queued, into `out`, emptying the queue; returns how many
@@ -149,6 +170,27 @@ impl Input {
 
     pub fn replies(&self) -> u64 {
         self.replies
+    }
+}
+
+/// Where the escape sequence `queued` ends in starts, if it is unfinished:
+/// ESC alone, or ESC `[` or ESC `O` followed only by parameter and
+/// intermediate bytes (`0x20` to `0x3F`), with no final byte yet. That is
+/// a key whose last bytes console has not brought yet, and the sequences
+/// tui's decoder waits on (`docs/design.md`, "`tui`"). Whatever the
+/// client read before, an ESC starts a sequence afresh, so the last ESC in
+/// the queue decides.
+pub fn unfinished(queued: &[u8]) -> Option<usize> {
+    let body = queued
+        .iter()
+        .rev()
+        .take_while(|b| (0x20..=0x3F).contains(*b))
+        .count();
+    let start = queued.len() - body;
+    match queued[..start] {
+        [.., 0x1B] if body == 0 => Some(start - 1),
+        [.., 0x1B, b'[' | b'O'] => Some(start - 2),
+        _ => None,
     }
 }
 

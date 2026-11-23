@@ -1,7 +1,8 @@
 //! The M8 red team's tests (`PLAN.md`'s quick pass after M8; the findings
-//! in `docs/redteam/m8-*.md`). One finding, `#[ignore]`d so the default
-//! run passes: a DSR or DA reply cut short at the input queue's end turns
-//! the next typed byte into a key nobody typed. The rest are the strongest
+//! in `docs/redteam/m8-*.md`). One finding, fixed in the M8 fix round: a
+//! DSR or DA reply cut short at the input queue's end turned the next
+//! typed byte into a key nobody typed; a reply is now queued whole or
+//! dropped whole, and the guarantee's test passes. The rest are the strongest
 //! attacks on term's parser, screen model and renderer that held, kept as
 //! ordinary tests: a later client that starts with CAN and RIS sees a
 //! fresh terminal whatever an earlier one left; hostile streams on the
@@ -45,15 +46,14 @@ fn read_all(s: &mut Server<'_>) -> Vec<u8> {
     }
 }
 
-/// A DSR 6 or DA asked while the input queue has room for only two bytes
-/// keeps `ESC [` of its reply and drops the rest; the next byte typed then
-/// completes `ESC [ A` or `ESC [ B`, what a VT100's Up and Down keys send
+/// A DSR 6 or DA asked while the input queue had room for only two bytes
+/// kept `ESC [` of its reply and dropped the rest; the next byte typed then
+/// completed `ESC [ A` or `ESC [ B`, what a VT100's Up and Down keys send
 /// and what tui (`docs/design.md`, "`tui`") and most apps decode as Up and
 /// Down, though the user typed `A` or `B`, an unknown key to tui. The
 /// guarantee: the client reads the typed bytes with each reply whole or
-/// not at all between them.
+/// not at all between them. It failed before the fix round, `#[ignore]`d.
 #[test]
-#[ignore = "red team: a DSR or DA reply cut short at the input queue's end turns the next typed byte into a key (docs/redteam/m8-reply-cut-short.md)"]
 fn a_reply_cut_short_never_turns_a_typed_byte_into_a_key() {
     let g = Geometry::new(84, 50, 90, Format::Bgr).unwrap();
     for (ask, reply, typed, key) in [

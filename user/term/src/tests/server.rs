@@ -13,7 +13,7 @@ use libsys::proto::{self, MAX_BYTES, MAX_WORDS, Refusal, TermSize, TermStats, la
 
 use crate::palette::{DEFAULT_BG, DEFAULT_FG};
 use crate::render;
-use crate::server::{Answer, INPUT, Input, Request, Server, decode};
+use crate::server::{Answer, INPUT, Input, Request, Server, decode, unfinished};
 use crate::session::{Pixels, Session, cells};
 use crate::{STATE_WORDS, Terminal, split_state};
 
@@ -332,7 +332,8 @@ fn a_write_that_queues_a_reply_releases_a_saved_read() {
     assert_eq!((st.from_console, st.dropped), (0, 0));
 }
 
-/// Keys and replies share the queue, in the order they came.
+/// Keys and replies share the queue, in the order they came while no key
+/// is unfinished.
 #[test]
 fn keys_and_replies_queue_in_order() {
     let (mut px, mut st) = (buffer(small()), state());
@@ -368,12 +369,118 @@ fn bytes_past_the_queues_512_are_dropped_and_counted() {
         Answer::Read(INPUT)
     );
     assert_eq!(&out[..], &keys[..INPUT]);
-    // Room again; a reply partly fits.
+    // Room again, but not for all of the reply: it is dropped whole, never
+    // cut to `ESC [`, which the next key typed would make a key of its own
+    // (docs/redteam/m8-reply-cut-short.md).
     s.keys(&keys[..510]);
     s.request(Request::Write(b"\x1b[6n"), || unreachable!(), &mut out);
     let st = s.stats();
-    assert_eq!((st.replies, st.dropped), (2, 88 + 6 + 4));
-    assert_eq!(&s.input().queued()[510..], b"\x1b[");
+    assert_eq!((st.replies, st.dropped), (0, 88 + 6 + 6));
+    assert_eq!(s.input().queued(), &keys[..510]);
+    // A reply that fits exactly is queued.
+    s.request(Request::Read, || unreachable!(), &mut out);
+    s.keys(&keys[..506]);
+    s.request(Request::Write(b"\x1b[6n"), || unreachable!(), &mut out);
+    let st = s.stats();
+    assert_eq!((st.replies, st.dropped), (6, 88 + 6 + 6));
+    assert_eq!(&s.input().queued()[506..], b"\x1b[1;1R");
+}
+
+/// The escape sequences the queue can end in unfinished: ESC alone, and
+/// ESC `[` or ESC `O` with parameter and intermediate bytes but no final
+/// byte; the last ESC decides.
+#[test]
+fn an_unfinished_key_is_found_from_its_last_esc() {
+    for (queued, at) in [
+        (&b""[..], None),
+        (b"a", None),
+        (b"\x1b", Some(0)),
+        (b"ab\x1b", Some(2)),
+        (b"\x1b[", Some(0)),
+        (b"\x1bO", Some(0)),
+        (b"a\x1b[1;5", Some(1)),
+        (b"\x1b[? $", Some(0)),
+        (b"\x1bO5", Some(0)),
+        (b"\x1b[\x1b[1", Some(2)),
+        (b"\x1b\x1b", Some(1)),
+        // Finished: a final byte, Alt and a key, a control that cuts the
+        // sequence short.
+        (b"\x1b[A", None),
+        (b"\x1bOA", None),
+        (b"\x1b[15~", None),
+        (b"\x1bx", None),
+        (b"\x1b1", None),
+        (b"\x1b[1\r", None),
+        (b"\x1b[1\x7f", None),
+        // No ESC: the client may have read it, which term cannot help.
+        (b"[1", None),
+        (b"O", None),
+        (b"15", None),
+    ] {
+        assert_eq!(unfinished(queued), at, "\"{}\"", queued.escape_ascii());
+    }
+}
+
+/// A reply goes before the unfinished key the queue ends in, so a key
+/// console brings in two `ReadRaw`s reaches the client whole, wherever
+/// it is split; with the key complete in the queue, or none begun, it goes
+/// at the end. ESC alone is a key term cannot tell from a sequence's
+/// start, so the reply goes before it too.
+#[test]
+fn a_reply_goes_before_an_unfinished_key_at_every_split() {
+    let reply = b"\x1b[0n";
+    for key in [&b"\x1b[15~"[..], b"\x1bOA", b"\x1b"] {
+        for k in 0..=key.len() {
+            let (mut px, mut st) = (buffer(small()), state());
+            let mut s = server!(px, st);
+            let mut out = [0u8; INPUT];
+            s.keys(b"ab");
+            s.keys(&key[..k]);
+            s.request(Request::Write(b"\x1b[5n"), || unreachable!(), &mut out);
+            s.keys(&key[k..]);
+            let n = match s.request(Request::Read, || unreachable!(), &mut out) {
+                Answer::Read(n) => n,
+                a => panic!("{a:?}"),
+            };
+            let want = if k == key.len() && key != b"\x1b" {
+                [&b"ab"[..], key, reply].concat()
+            } else {
+                [&b"ab"[..], reply, key].concat()
+            };
+            assert!(
+                out[..n] == want[..],
+                "\"{}\" split after {k}: the client reads \"{}\", not \"{}\"",
+                key.escape_ascii(),
+                out[..n].escape_ascii(),
+                want.escape_ascii()
+            );
+            assert_eq!((s.stats().replies, s.stats().dropped), (4, 0));
+        }
+    }
+}
+
+/// Replies queued before one unfinished key keep their order, and one
+/// that does not fit whole is dropped whole there too.
+#[test]
+fn replies_before_an_unfinished_key_keep_their_order_and_their_limit() {
+    let mut q = Input::new();
+    q.keys(b"\x1b[1");
+    q.reply(b"\x1b[0n");
+    q.reply(b"\x1b[?1;2c");
+    q.keys(b"5~");
+    assert_eq!(q.queued(), b"\x1b[0n\x1b[?1;2c\x1b[15~");
+    let mut out = [0u8; INPUT];
+    q.take(&mut out);
+    // 509 bytes, the last three an unfinished F5: a 4-byte reply does not
+    // fit, and a 3-byte one goes before the key.
+    q.keys(&[b'x'; INPUT - 6]);
+    q.keys(b"\x1b[1");
+    q.reply(b"\x1b[0n");
+    assert_eq!(q.dropped(), 4);
+    assert_eq!(q.queued().len(), INPUT - 3);
+    q.reply(b"abc");
+    assert_eq!(&q.queued()[INPUT - 6..], b"abc\x1b[1");
+    assert_eq!(q.replies(), 4 + 7 + 3);
 }
 
 #[test]
