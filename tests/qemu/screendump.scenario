@@ -1,0 +1,20 @@
+# The harness's `screendump:` end to end until M8's TUI has its own
+# (docs/design.md, "The harness"): QMP's screendump, QEMU's PPM, the PNG
+# and the exact comparison with tests/qemu/golden/ovmf.png. The release
+# kernel boots `test=release`, whose root task waits for a line, so the
+# screen holds still while it is taken: q35's std VGA at the 1280x800 OVMF
+# picks from its EDID, showing what OVMF left there, TianoCore's logo and
+# its two BdsDxe lines, since nothing after the firmware draws yet (the
+# loader writes only COM1). OVMF's text is drawn as its lines reach COM1,
+# so a screendump taken before the loader starts can catch it part drawn;
+# this one comes long after. The rest is release.scenario's run, shortened.
+kernel: release
+cmdline: test=release
+exit: success
+expect: loader: GOP framebuffer 1280x800
+expect: entering kernel
+expect: release: type a line
+screendump: ovmf
+send: release input\r          # the line root checks for
+expect: release: read "release input"
+expect: TEST PASS
