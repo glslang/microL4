@@ -1598,10 +1598,10 @@ expect: TEST PASS
     fn repo_goldens_are_used_and_read() {
         // Each golden is a PNG xtask reads, named by a scenario's
         // screendump: one no scenario takes is stale. The host render's
-        // (`hostrender.rs`) are the `tui` scenario's, which
-        // `the_moments_are_the_scenarios_screendumps` checks once
-        // tests/qemu/tui.scenario is in the tree; a golden with the host
-        // render's Source is one of them, since only that test writes one.
+        // (`hostrender.rs`) are the `tui` scenario's, as
+        // `the_moments_are_the_scenarios_screendumps` checks; a golden with
+        // the host render's Source is one of them, since only that test
+        // writes one.
         let all = load_dir(&crate::root().join("tests/qemu")).unwrap();
         let names: Vec<&str> = all.iter().flat_map(|s| s.screendumps()).collect();
         let moments: Vec<&str> = crate::hostrender::MOMENTS.iter().map(|m| m.0).collect();
@@ -1613,7 +1613,7 @@ expect: TEST PASS
                 panic!("{file}: tests/qemu/golden/ holds only screendump goldens, *.png")
             });
             assert!(
-                names.contains(&name) || moments.contains(&name),
+                names.contains(&name),
                 "no scenario takes screendump {name:?}"
             );
             let png = screen::decode_png(&fs::read(&path).unwrap()).unwrap();

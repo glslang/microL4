@@ -222,19 +222,17 @@ fn the_moments_are_the_scenarios_screendumps() {
         (release.cmdline.as_str(), release.kernel),
         ("test=release", crate::compile::Kernel::Release)
     );
-    // tests/qemu/tui.scenario is builder W's; once it is in the tree its
-    // screendumps must be these.
-    let qemu = crate::root().join("tests/qemu/tui.scenario");
-    if let Ok(text) = fs::read_to_string(&qemu) {
-        let sc = scenario::parse("tui", &text).unwrap();
-        assert_eq!(sc.screendumps().collect::<Vec<_>>(), names, "tui.scenario");
-        assert!(
-            sc.qemu_args
-                .join(" ")
-                .contains("-global VGA.xres=1280 -global VGA.yres=800"),
-            "tui.scenario pins the 1280x800 the goldens are drawn at"
-        );
-    }
+    // The QEMU scenario takes these screendumps, at the 1280x800 the
+    // goldens are drawn at.
+    let text = fs::read_to_string(crate::root().join("tests/qemu/tui.scenario")).unwrap();
+    let sc = scenario::parse("tui", &text).unwrap();
+    assert_eq!(sc.screendumps().collect::<Vec<_>>(), names, "tui.scenario");
+    assert!(
+        sc.qemu_args
+            .join(" ")
+            .contains("-global VGA.xres=1280 -global VGA.yres=800"),
+        "tui.scenario pins the 1280x800 the goldens are drawn at"
+    );
     // Nothing else lives in tools/hyperv/golden/.
     let dir = crate::root().join(SIZES[1].2);
     let mut files: Vec<String> = fs::read_dir(&dir)
