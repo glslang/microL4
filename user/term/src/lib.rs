@@ -3,18 +3,20 @@
 //!
 //! term parses its client's bytes as a VT100-family terminal does
 //! ([`parser`], Paul Williams' DEC state machine adapted for UTF-8), keeps a
-//! screen model of two buffers ([`screen`]) and gives the renderer each
-//! cell's look and the cells whose look changed ([`look`]), whose glyphs
-//! come from an 8×16 bitmap font ([`font`], Spleen's ASCII and generated
-//! box drawing). [`Terminal`] joins the parser and the screen. Everything
+//! screen model of two buffers ([`screen`]), gives each cell's look and the
+//! cells whose look changed ([`look`]) and draws them with an 8×16 bitmap
+//! font ([`font`], Spleen's ASCII and generated box drawing) on a surface
+//! ([`render`]). [`Terminal`] joins the parser and the screen. Everything
 //! here is pure, uses nothing but `core` and is host-tested against golden
-//! screens (`user/term/golden/`).
+//! screens (`user/term/golden/`) and pixels.
 //!
 //! A server splits its state window with [`split_state`], makes a
-//! [`Terminal`] over the first two grids and a [`Drawn`] over the third,
-//! and after each `Write` ([`Terminal::write`]) draws a frame with
-//! [`Drawn::frame`], which hands the renderer each cell whose [`Look`]
-//! changed; [`palette`] gives the colours a look is made of.
+//! [`Terminal`] over the first two grids and a [`Renderer`] over the third
+//! (which fills the surface and records every cell as blank), and after
+//! each `Write` ([`Terminal::write`]) draws a frame with
+//! [`Renderer::frame`], which draws each cell whose [`Look`] changed
+//! ([`Drawn::frame`]) and fences; [`palette`] gives the colours a look is
+//! made of.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -26,12 +28,14 @@ pub mod font;
 pub mod look;
 pub mod palette;
 pub mod parser;
+pub mod render;
 pub mod screen;
 #[cfg(test)]
 mod tests;
 
 pub use look::{Drawn, Look};
 pub use parser::Parser;
+pub use render::{Renderer, Surface};
 pub use screen::{Cell, Screen};
 
 /// The widest screen: 1920 pixels of 8-pixel cells.
