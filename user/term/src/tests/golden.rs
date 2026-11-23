@@ -4,9 +4,9 @@
 //! at points drawn from a generator seeded with the file's name. Each run
 //! must give the expected state, and after each run the looks drawn frame by
 //! frame, one frame after every `Write`, must equal the final state's full
-//! render, and so must the pixels the renderer drew with the font. `MICROL4_BLESS=1` rewrites the expected lines of each failing
-//! case whose four runs agree, keeping its comment, `size:` and `input:`
-//! lines.
+//! render, and so must the pixels the renderer drew with the font.
+//! `MICROL4_BLESS=1` rewrites the expected lines of each failing case whose
+//! four runs agree, keeping its comment, `size:` and `input:` lines.
 //!
 //! The format is the note's, with two lines added for state no other line
 //! shows: `modes:` lists the modes away from their defaults that only the
