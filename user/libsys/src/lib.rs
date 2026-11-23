@@ -21,8 +21,8 @@
 //!   IOPort invocations (M7).
 //! - [`objects`] hands out the root task's free slots and picks the untyped
 //!   its objects are retyped from.
-//! - [`proto`] defines the `uart` and `console` protocols; [`console`] and
-//!   [`uart`] are their clients.
+//! - [`proto`] defines the `uart`, `console` and `term` protocols;
+//!   [`console`], [`uart`] and [`term`] are their clients.
 //! - [`print!`] and [`println!`] write where [`output`] says, through
 //!   `DebugPutChar` until a program names a console client; [`exit`] ends
 //!   the run through an `isa-debug-exit` IOPort if one is set, else with
@@ -62,6 +62,7 @@ pub mod proto;
 #[cfg(target_os = "none")]
 mod start;
 pub mod syscall;
+pub mod term;
 pub mod transfer;
 pub mod uart;
 pub mod vspace;
