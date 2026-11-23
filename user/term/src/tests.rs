@@ -9,6 +9,7 @@
 mod font;
 mod golden;
 mod props;
+mod recheck;
 mod redteam;
 mod render;
 mod review;

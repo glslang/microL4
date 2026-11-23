@@ -151,4 +151,21 @@ mod tests {
             Ok(TermStats::from_words([1, 2, 3, 4, 0, 0, 0]))
         );
     }
+
+    /// M8 re-check: `stats`' doc says the words past MR3 read 0 without an
+    /// IPC buffer, but the kernel delivers at most 4 words to a thread
+    /// without one (`docs/abi.md`, "Either side has no usable IPC buffer":
+    /// "delivered `length` at most 4"), so such a client's reply always
+    /// has length 4 and `stats_from` refuses it: its `Stats` is always
+    /// `BadReply`. The seven-word reply without a buffer that the test
+    /// above accepts never arrives.
+    #[test]
+    #[ignore = "recheck: without an IPC buffer a Stats reply has length 4, which stats_from refuses, though stats' doc says MR4 to MR6 read 0"]
+    fn a_stats_reply_without_an_ipc_buffer_reads_zeros_past_mr3() {
+        let c = Client::new(9, None);
+        assert_eq!(
+            c.stats_from(&reply(4, [1, 2, 3, 4])),
+            Ok(TermStats::from_words([1, 2, 3, 4, 0, 0, 0]))
+        );
+    }
 }
