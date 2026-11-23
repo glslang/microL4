@@ -35,6 +35,12 @@ const MAX_SIDE: usize = 8192;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
+/// The `Source` text of a golden the host drew (`hostrender.rs`, the
+/// `tui` scenario's screendumps) rather than QEMU: `--bless` never
+/// replaces one, so the guest's screen is compared with an image only the
+/// host drew.
+pub const HOST_RENDER: &str = "microL4 host render";
+
 type Result<T> = std::result::Result<T, String>;
 
 impl Image {
