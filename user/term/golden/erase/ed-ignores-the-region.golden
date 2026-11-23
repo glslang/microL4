@@ -1,0 +1,9 @@
+# ED erases to the screen's end, not the region's.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[1;2r\e[1;3H\e[J
+screen:
+|ab   |
+|     |
+|     |
+cursor: 1,3
+region: 1,2

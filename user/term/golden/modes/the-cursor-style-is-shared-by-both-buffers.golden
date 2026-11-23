@@ -1,0 +1,8 @@
+# DECSCUSR's shape holds across buffer switches.
+size: 6x3
+input: \e[6 q\e[?1049h\e[?1049l
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1 bar

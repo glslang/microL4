@@ -1,0 +1,10 @@
+# CUU stops at row 1.
+size: 6x5
+input: \e[3;1H\e[9Ax
+screen:
+|x     |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,2

@@ -1,0 +1,7 @@
+# CAN inside ESC ( drops the designation: 0 and q print as themselves.
+size: 10x2
+input: \e(\x180q
+screen:
+|0q        |
+|          |
+cursor: 1,3

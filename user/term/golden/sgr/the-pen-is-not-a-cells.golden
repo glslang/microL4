@@ -1,0 +1,6 @@
+# Changing the pen changes no cell already printed.
+size: 10x1
+input: ab\e[1;31m\e[D
+screen:
+|ab        |
+cursor: 1,2

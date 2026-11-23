@@ -1,0 +1,8 @@
+# REP with no parameter repeats once.
+size: 5x3
+input: a\e[b
+screen:
+|aa   |
+|     |
+|     |
+cursor: 1,3

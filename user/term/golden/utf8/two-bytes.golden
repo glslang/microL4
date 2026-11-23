@@ -1,0 +1,7 @@
+# A two-byte sequence prints one code point in one cell.
+size: 8x2
+input: \xc3\xa9
+screen:
+|é       |
+|        |
+cursor: 1,2

@@ -1,0 +1,7 @@
+# HTS sets a stop at the cursor's column.
+size: 20x2
+input: \e[5G\eH\r\tx
+screen:
+|    x               |
+|                    |
+cursor: 1,6

@@ -1,0 +1,7 @@
+# CAN ends a sequence: U+FFFD, then CAN does nothing.
+size: 8x2
+input: \xc3\x18x
+screen:
+|�x      |
+|        |
+cursor: 1,3

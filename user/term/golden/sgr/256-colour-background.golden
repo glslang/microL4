@@ -1,0 +1,9 @@
+# 48 ; 5 ; n sets background n.
+size: 10x1
+input: \e[48;5;17ma
+screen:
+|a         |
+attrs:
+|N         |
+key: N = bg 17
+cursor: 1,2

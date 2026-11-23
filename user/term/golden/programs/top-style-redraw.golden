@@ -1,0 +1,10 @@
+# A full redraw from home with EL ending each line, so shorter lines
+# leave nothing of the longer ones behind.
+size: 20x3
+input: \e[Htasks: 12\e[K\r\nload: 0.50\e[K\r\nmem: 40%\e[K
+input: \e[Htasks: 9\e[K\r\nload: 1.25\e[K\r\nmem: 4%\e[K
+screen:
+|tasks: 9            |
+|load: 1.25          |
+|mem: 4%             |
+cursor: 3,8

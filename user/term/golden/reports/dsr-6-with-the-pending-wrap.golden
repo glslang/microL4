@@ -1,0 +1,12 @@
+# With the pending wrap set, the cursor is in the last column, which DSR 6
+# reports.
+size: 10x5
+input: \e[2H0123456789\e[6n
+screen:
+|          |
+|0123456789|
+|          |
+|          |
+|          |
+cursor: 2,10 wrap
+reply: \e[2;10R

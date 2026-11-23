@@ -1,0 +1,9 @@
+# Resetting 1049 with the main buffer active switches nothing; its DECRC
+# still restores the main buffer's saved cursor.
+size: 6x3
+input: \e[2;2H\e7\e[H\e[?1049lx
+screen:
+|      |
+| x    |
+|      |
+cursor: 2,3

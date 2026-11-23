@@ -1,0 +1,11 @@
+# CNL stops as CUD does.
+size: 6x5
+input: \e[1;2r\e[1;4H\e[9Ex
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2
+region: 1,2

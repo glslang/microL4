@@ -1,0 +1,8 @@
+# CAN ends a DCS, which still counts once.
+size: 10x2
+input: \ePqabc\x18x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

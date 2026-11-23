@@ -1,0 +1,9 @@
+# IND moves down one in the same column.
+size: 4x4
+input: a\eDb
+screen:
+|a   |
+| b  |
+|    |
+|    |
+cursor: 2,3

@@ -1,0 +1,12 @@
+# Under DECOM the cursor is in the region, so CUU stops at its top.
+size: 6x5
+input: \e[2;4r\e[?6h\e[3;1H\e[9Ax
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2
+modes: origin
+region: 2,4

@@ -1,0 +1,8 @@
+# Bytes from 0x80 are OSC put as they are: the title holds é's UTF-8.
+size: 10x2
+input: \e]2;caf\xc3\xa9\x07
+screen:
+|          |
+|          |
+cursor: 1,1
+title: caf\xc3\xa9

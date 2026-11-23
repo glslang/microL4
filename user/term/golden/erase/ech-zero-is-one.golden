@@ -1,0 +1,8 @@
+# ECH 0 counts as 1.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;2H\e[0X
+screen:
+|abcde|
+|f hij|
+|klmno|
+cursor: 2,2

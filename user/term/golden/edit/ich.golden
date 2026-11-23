@@ -1,0 +1,10 @@
+# ICH inserts Pn blanks at the cursor; the cells pushed past the last
+# column are lost, and the cursor stays.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;3H\e[2@
+screen:
+|ab  cd|
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,3

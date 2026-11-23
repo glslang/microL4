@@ -1,0 +1,10 @@
+# DECSET 1049 saves the cursor, then switches to the alternate buffer and
+# clears it; the cursor stays where it was.
+size: 6x3
+input: \e[?47hzz\e[?47l\e[Hab\e[?1049hcd
+screen:
+|  cd  |
+|      |
+|      |
+cursor: 1,5
+buffer: alternate

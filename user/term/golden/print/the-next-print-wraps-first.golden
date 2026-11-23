@@ -1,0 +1,8 @@
+# With the pending wrap set, the next print does CR and IND first.
+size: 5x3
+input: abcdef
+screen:
+|abcde|
+|f    |
+|     |
+cursor: 2,2

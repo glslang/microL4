@@ -1,0 +1,7 @@
+# One to four bytes and ASCII mixed: one cell each.
+size: 8x2
+input: a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80b
+screen:
+|aé€😀b   |
+|        |
+cursor: 1,6

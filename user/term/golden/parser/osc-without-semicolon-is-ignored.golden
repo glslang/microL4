@@ -1,0 +1,8 @@
+# An OSC string with no ; after its number is ignored.
+size: 10x2
+input: \e]0\x07x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

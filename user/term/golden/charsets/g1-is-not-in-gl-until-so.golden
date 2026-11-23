@@ -1,0 +1,6 @@
+# ESC ) 0 designates G1, but G0 is in GL until SO.
+size: 8x1
+input: \e)0q\x0eq\x0fq
+screen:
+|q─q     |
+cursor: 1,4

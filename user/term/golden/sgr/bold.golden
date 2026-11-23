@@ -1,0 +1,9 @@
+# SGR 1: bold.
+size: 10x1
+input: \e[1mb
+screen:
+|b         |
+attrs:
+|B         |
+key: B = bold
+cursor: 1,2

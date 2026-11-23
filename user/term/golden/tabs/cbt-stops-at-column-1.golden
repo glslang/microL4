@@ -1,0 +1,7 @@
+# CBT stops at column 1.
+size: 20x2
+input: \e[5G\e[9Zx
+screen:
+|x                   |
+|                    |
+cursor: 1,2

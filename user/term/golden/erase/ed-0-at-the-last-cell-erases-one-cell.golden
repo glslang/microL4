@@ -1,0 +1,8 @@
+# ED 0 in the last cell erases it alone.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[3;5H\e[J
+screen:
+|abcde|
+|fghij|
+|klmn |
+cursor: 3,5

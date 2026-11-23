@@ -1,0 +1,11 @@
+# DSR 6 replies with the cursor's row and column, from 1.
+size: 10x5
+input: \e[3;4H\e[6n
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 3,4
+reply: \e[3;4R

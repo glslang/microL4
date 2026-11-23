@@ -1,0 +1,7 @@
+# LF ends a sequence: U+FFFD at the cursor, then LF moves down.
+size: 8x2
+input: \xf0\x9f\n
+screen:
+|�       |
+|        |
+cursor: 2,2

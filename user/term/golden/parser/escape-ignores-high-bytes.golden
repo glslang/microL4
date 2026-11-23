@@ -1,0 +1,8 @@
+# Bytes from 0x80 are ignored inside an escape sequence, which goes on:
+# ESC 0xFF 0xC3 D is IND.
+size: 4x2
+input: a\e\xff\xc3Db
+screen:
+|a   |
+| b  |
+cursor: 2,3

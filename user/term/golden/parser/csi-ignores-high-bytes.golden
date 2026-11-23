@@ -1,0 +1,8 @@
+# Bytes from 0x80 are ignored inside a control sequence: ESC [ é 2 C is
+# CUF 2.
+size: 10x2
+input: \e[\xc3\xa92Cx
+screen:
+|  x       |
+|          |
+cursor: 1,4

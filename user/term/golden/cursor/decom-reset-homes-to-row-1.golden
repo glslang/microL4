@@ -1,0 +1,11 @@
+# Resetting DECOM homes the cursor to row 1, column 1.
+size: 6x5
+input: \e[2;4r\e[?6h\e[2;2H\e[?6lx
+screen:
+|x     |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,2
+region: 2,4

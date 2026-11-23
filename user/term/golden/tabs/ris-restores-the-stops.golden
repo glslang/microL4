@@ -1,0 +1,7 @@
+# RIS puts back a stop every eight columns.
+size: 20x2
+input: \e[3g\ec\tx
+screen:
+|        x           |
+|                    |
+cursor: 1,10

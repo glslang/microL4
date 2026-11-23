@@ -1,0 +1,9 @@
+# Of several foregrounds, the last applies.
+size: 10x1
+input: \e[31;32;33ma
+screen:
+|a         |
+attrs:
+|Y         |
+key: Y = fg 3
+cursor: 1,2

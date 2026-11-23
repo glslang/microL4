@@ -1,0 +1,7 @@
+# ESC ( 0 puts DEC Special Graphics in G0, which is in GL: l q k draw a
+# box's top.
+size: 8x1
+input: \e(0lqk\e(B
+screen:
+|┌─┐     |
+cursor: 1,4

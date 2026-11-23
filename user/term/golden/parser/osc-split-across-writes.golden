@@ -1,0 +1,9 @@
+# An OSC string split across writes is kept whole.
+size: 10x2
+input: \e]2;ab
+input: cd\x07x
+screen:
+|x         |
+|          |
+cursor: 1,2
+title: abcd

@@ -1,0 +1,7 @@
+# CHT with no parameter goes one stop forward.
+size: 20x2
+input: \e[Ix
+screen:
+|        x           |
+|                    |
+cursor: 1,10

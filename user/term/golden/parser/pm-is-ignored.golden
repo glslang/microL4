@@ -1,0 +1,8 @@
+# A PM string is ignored and counted once.
+size: 10x2
+input: \e^hi\e\\x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

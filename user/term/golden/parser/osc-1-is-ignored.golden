@@ -1,0 +1,8 @@
+# OSC 1, the icon name, is not acted on.
+size: 10x2
+input: \e]1;icon\x07x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

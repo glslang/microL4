@@ -1,0 +1,7 @@
+# F0 takes 90 to BF next: F0 8F BF BF is four U+FFFDs.
+size: 8x2
+input: \xf0\x8f\xbf\xbf
+screen:
+|����    |
+|        |
+cursor: 1,5

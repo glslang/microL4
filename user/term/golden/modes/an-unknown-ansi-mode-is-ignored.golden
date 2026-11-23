@@ -1,0 +1,9 @@
+# ANSI mode 2 (KAM) is not one term knows.
+size: 6x3
+input: \e[2h
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+ignored: 1

@@ -1,0 +1,10 @@
+# DCH deletes Pn cells at the cursor; the rest move left and blanks enter
+# at the right.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;2H\e[2P
+screen:
+|adef  |
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,2

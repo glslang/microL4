@@ -1,0 +1,7 @@
+# A continuation byte with no lead is ill-formed: one U+FFFD.
+size: 8x2
+input: \x80
+screen:
+|�       |
+|        |
+cursor: 1,2

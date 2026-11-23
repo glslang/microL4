@@ -1,0 +1,9 @@
+# A DCS string is ignored whole and counted once; the ST after it does
+# nothing.
+size: 10x2
+input: \eP1$qm\e\\x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

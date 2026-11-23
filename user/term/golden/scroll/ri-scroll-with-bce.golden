@@ -1,0 +1,15 @@
+# So does one scrolled in by RI.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[45m\e[H\eM
+screen:
+|    |
+|1   |
+|2   |
+|3   |
+attrs:
+|MMMM|
+|    |
+|    |
+|    |
+key: M = bg 5
+cursor: 1,1

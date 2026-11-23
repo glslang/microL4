@@ -1,0 +1,9 @@
+# A mean of 13 is halfway between greys 8 and 18: the lower, 232.
+size: 10x1
+input: \e[38;2;13;13;13ma
+screen:
+|a         |
+attrs:
+|G         |
+key: G = fg 232
+cursor: 1,2

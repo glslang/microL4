@@ -1,0 +1,7 @@
+# From a column with a stop, HT goes to the next one.
+size: 20x2
+input: \e[9G\tx
+screen:
+|                x   |
+|                    |
+cursor: 1,18

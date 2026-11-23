@@ -1,0 +1,8 @@
+# DECSC saves the pending wrap: restored, the next print wraps.
+size: 6x3
+input: abcdef\e7\e[H\e8x
+screen:
+|abcdef|
+|x     |
+|      |
+cursor: 2,2

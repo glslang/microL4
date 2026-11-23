@@ -1,0 +1,9 @@
+# A count past the line's end blanks the rest of it.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;3H\e[9P
+screen:
+|ab    |
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,3

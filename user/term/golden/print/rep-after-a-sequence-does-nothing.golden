@@ -1,0 +1,13 @@
+# After an SGR, REP does nothing.
+size: 5x3
+input: a\e[1m\e[2bx
+screen:
+|ax   |
+|     |
+|     |
+attrs:
+| B   |
+|     |
+|     |
+key: B = bold
+cursor: 1,3

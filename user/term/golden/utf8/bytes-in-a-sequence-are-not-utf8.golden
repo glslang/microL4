@@ -1,0 +1,8 @@
+# Inside a control sequence bytes from 0x80 are ignored, not decoded: the
+# é there prints nothing.
+size: 8x2
+input: \e[\xc3\xa9mx
+screen:
+|x       |
+|        |
+cursor: 1,2

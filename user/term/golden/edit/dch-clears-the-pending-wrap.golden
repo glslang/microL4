@@ -1,0 +1,9 @@
+# DCH clears the pending wrap.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[Pz
+screen:
+|abcdef|
+|ghijkl|
+|mnopqr|
+|stuvwz|
+cursor: 4,6 wrap

@@ -1,0 +1,8 @@
+# A dropped code point is no action, so REP still repeats the print before
+# it.
+size: 8x2
+input: a\xc2\x9b\e[2b
+screen:
+|aaa     |
+|        |
+cursor: 1,4

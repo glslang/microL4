@@ -1,0 +1,15 @@
+# Lines moved by DL keep their cells' pens.
+size: 6x4
+input: a\r\n\e[4mb\e[m\e[1H\e[M
+screen:
+|b     |
+|      |
+|      |
+|      |
+attrs:
+|U     |
+|      |
+|      |
+|      |
+key: U = underline
+cursor: 1,1

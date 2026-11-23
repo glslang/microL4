@@ -1,0 +1,7 @@
+# CBT 2 goes back two stops.
+size: 20x2
+input: \e[20G\e[2Zx
+screen:
+|        x           |
+|                    |
+cursor: 1,10

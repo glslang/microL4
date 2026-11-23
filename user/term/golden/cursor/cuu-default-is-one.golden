@@ -1,0 +1,10 @@
+# CUU with no parameter moves up one.
+size: 6x5
+input: \e[4;3H\e[Ax
+screen:
+|      |
+|      |
+|  x   |
+|      |
+|      |
+cursor: 3,4

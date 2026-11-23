@@ -1,0 +1,9 @@
+# DECSET takes each parameter in turn: a known one with unknown ones is
+# acted on, and not counted as ignored.
+size: 6x3
+input: \e[?1000;25;2004l
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1 hidden

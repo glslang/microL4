@@ -1,0 +1,9 @@
+# DECSCUSR 7 is no shape: ignored, and the shape stays.
+size: 6x3
+input: \e[4 q\e[7 q
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1 underline
+ignored: 1

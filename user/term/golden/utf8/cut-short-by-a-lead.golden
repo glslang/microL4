@@ -1,0 +1,8 @@
+# A new lead ends the sequence before it, which is one U+FFFD; the new one
+# decodes.
+size: 8x2
+input: \xe2\xc3\xa9
+screen:
+|�é      |
+|        |
+cursor: 1,3

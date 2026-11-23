@@ -1,0 +1,8 @@
+# ED 0 erases from the cursor, inclusive, to the screen's end.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[0J
+screen:
+|abcde|
+|fg   |
+|     |
+cursor: 2,3

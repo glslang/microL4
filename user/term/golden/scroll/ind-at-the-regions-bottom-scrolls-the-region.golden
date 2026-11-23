@@ -1,0 +1,10 @@
+# IND on the region's bottom row scrolls the region up one.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[2;3r\e[3;1H\eDx
+screen:
+|1   |
+|3   |
+|x   |
+|4   |
+cursor: 3,2
+region: 2,3

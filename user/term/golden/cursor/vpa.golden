@@ -1,0 +1,10 @@
+# VPA moves to row Pn in the same column.
+size: 6x5
+input: \e[1;3H\e[4dx
+screen:
+|      |
+|      |
+|      |
+|  x   |
+|      |
+cursor: 4,4

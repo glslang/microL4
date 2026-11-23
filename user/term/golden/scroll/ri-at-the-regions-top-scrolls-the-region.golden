@@ -1,0 +1,10 @@
+# RI on the region's top row scrolls the region alone.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[2;3r\e[2;1H\eMx
+screen:
+|1   |
+|x   |
+|2   |
+|4   |
+cursor: 2,2
+region: 2,3

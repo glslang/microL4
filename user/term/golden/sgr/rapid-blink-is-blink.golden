@@ -1,0 +1,9 @@
+# SGR 6, rapid blink, is SGR 5.
+size: 10x1
+input: \e[6mk
+screen:
+|k         |
+attrs:
+|K         |
+key: K = blink
+cursor: 1,2

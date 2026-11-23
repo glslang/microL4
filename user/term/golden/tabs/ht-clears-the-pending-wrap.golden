@@ -1,0 +1,8 @@
+# HT in the last column stays there and clears the pending wrap: b then
+# overwrites a.
+size: 20x2
+input: \e[20Ga\tb
+screen:
+|                   b|
+|                    |
+cursor: 1,20 wrap

@@ -1,0 +1,9 @@
+# 38 ; 5 ; 3 is the same index as 33.
+size: 10x1
+input: \e[38;5;3ma\e[33mb
+screen:
+|ab        |
+attrs:
+|33        |
+key: 3 = fg 3
+cursor: 1,3

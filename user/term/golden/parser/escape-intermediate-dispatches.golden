@@ -1,0 +1,7 @@
+# ESC # 8 goes through escape intermediate to its dispatch: DECALN.
+size: 4x2
+input: ab\e#8
+screen:
+|EEEE|
+|EEEE|
+cursor: 1,1

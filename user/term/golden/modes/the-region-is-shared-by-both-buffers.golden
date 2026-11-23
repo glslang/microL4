@@ -1,0 +1,10 @@
+# The region is one for both buffers: set in the alternate, it holds in
+# the main.
+size: 6x3
+input: \e[?47h\e[2;3r\e[?47l
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+region: 2,3

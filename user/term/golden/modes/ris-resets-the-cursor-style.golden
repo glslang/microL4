@@ -1,0 +1,8 @@
+# RIS puts back the block cursor.
+size: 6x3
+input: \e[5 q\ec
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

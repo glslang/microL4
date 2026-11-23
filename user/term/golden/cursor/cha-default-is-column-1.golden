@@ -1,0 +1,10 @@
+# CHA with no parameter goes to column 1.
+size: 6x5
+input: abc\e[Gx
+screen:
+|xbc   |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,2

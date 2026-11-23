@@ -1,0 +1,8 @@
+# LF moves down in the same column and clears the pending wrap.
+size: 5x3
+input: abcde\nx
+screen:
+|abcde|
+|    x|
+|     |
+cursor: 2,5 wrap

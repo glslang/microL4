@@ -1,0 +1,8 @@
+# Bytes from 0x80 are put in DCS passthrough, 0x9C included: it is no ST.
+size: 10x2
+input: \ePq\xc3\xa9\x9cz\e\\x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

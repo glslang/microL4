@@ -1,0 +1,8 @@
+# A four-byte sequence prints one code point, in one cell: there are no
+# wide characters.
+size: 8x2
+input: \xf0\x9f\x98\x80x
+screen:
+|😀x      |
+|        |
+cursor: 1,3

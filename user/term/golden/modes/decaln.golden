@@ -1,0 +1,9 @@
+# DECALN fills the screen with E in the default pen, gives the whole
+# screen back as region and homes the cursor.
+size: 6x3
+input: \e[44m\e[2;3r\e[2;2H\e#8
+screen:
+|EEEEEE|
+|EEEEEE|
+|EEEEEE|
+cursor: 1,1

@@ -1,0 +1,9 @@
+# 48 ; 7 is malformed: the red before it stays, the 44 after it is lost.
+size: 10x1
+input: \e[31;48;7;44ma
+screen:
+|a         |
+attrs:
+|R         |
+key: R = fg 1
+cursor: 1,2

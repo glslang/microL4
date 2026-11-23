@@ -1,0 +1,8 @@
+# ED 2 erases the whole screen; the cursor stays.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[2J
+screen:
+|     |
+|     |
+|     |
+cursor: 2,3

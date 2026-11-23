@@ -1,0 +1,8 @@
+# With LNM reset, LF keeps the column.
+size: 6x3
+input: \e[20h\e[20lab\ncd
+screen:
+|ab    |
+|  cd  |
+|      |
+cursor: 2,5

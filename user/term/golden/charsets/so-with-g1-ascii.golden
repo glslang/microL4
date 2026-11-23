@@ -1,0 +1,6 @@
+# SO invokes G1, which is ASCII until designated.
+size: 8x1
+input: \x0eq\e)0q\e)Bq
+screen:
+|q─q     |
+cursor: 1,4

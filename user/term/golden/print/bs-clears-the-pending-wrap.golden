@@ -1,0 +1,9 @@
+# BS from the last column moves to the one before and clears the pending
+# wrap.
+size: 5x3
+input: abcde\x08x
+screen:
+|abcxe|
+|     |
+|     |
+cursor: 1,5

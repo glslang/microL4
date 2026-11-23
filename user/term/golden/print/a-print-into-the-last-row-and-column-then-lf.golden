@@ -1,0 +1,8 @@
+# LF after the pending wrap in the last cell scrolls, and the column
+# stays.
+size: 3x2
+input: abcdef\ng
+screen:
+|def|
+|  g|
+cursor: 2,3 wrap

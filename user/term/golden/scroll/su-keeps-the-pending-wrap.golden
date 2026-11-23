@@ -1,0 +1,10 @@
+# SU leaves the cursor and its pending wrap as they are, so the next print
+# still wraps, scrolling once more.
+size: 4x4
+input: \e[4Habcd\e[Sx
+screen:
+|    |
+|abcd|
+|    |
+|x   |
+cursor: 4,2

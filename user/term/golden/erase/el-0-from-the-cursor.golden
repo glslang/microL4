@@ -1,0 +1,8 @@
+# EL 0 erases from the cursor, inclusive, to the line's end.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[K
+screen:
+|abcde|
+|fg   |
+|klmno|
+cursor: 2,3

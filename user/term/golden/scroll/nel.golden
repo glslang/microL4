@@ -1,0 +1,9 @@
+# NEL is CR, then IND.
+size: 4x4
+input: ab\eEx
+screen:
+|ab  |
+|x   |
+|    |
+|    |
+cursor: 2,2

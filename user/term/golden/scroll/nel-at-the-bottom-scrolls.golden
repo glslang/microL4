@@ -1,0 +1,9 @@
+# NEL on the last row scrolls up.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\eEx
+screen:
+|2   |
+|3   |
+|4   |
+|x   |
+cursor: 4,2

@@ -1,0 +1,12 @@
+# Sequences follow each other with nothing between: CUP, then SGR, then
+# a print.
+size: 10x2
+input: \e[2;3H\e[4mx\e[24my
+screen:
+|          |
+|  xy      |
+attrs:
+|          |
+|  U       |
+key: U = underline
+cursor: 2,5

@@ -1,0 +1,9 @@
+# Each buffer has its own saved cursor: DECRC in the main buffer restores
+# the main's, not the alternate's.
+size: 6x3
+input: \e[2;2H\e7\e[?47h\e[3;3H\e7\e[?47l\e8x
+screen:
+|      |
+| x    |
+|      |
+cursor: 2,3

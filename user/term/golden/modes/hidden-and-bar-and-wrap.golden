@@ -1,0 +1,8 @@
+# The cursor line shows every flag at once.
+size: 6x3
+input: \e[?25l\e[5 qabcdef
+screen:
+|abcdef|
+|      |
+|      |
+cursor: 1,6 hidden wrap bar

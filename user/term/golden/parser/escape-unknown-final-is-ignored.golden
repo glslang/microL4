@@ -1,0 +1,9 @@
+# An ESC final the table does not list is ignored: ESC Z (DECID) gets no
+# reply.
+size: 10x2
+input: \eZx
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

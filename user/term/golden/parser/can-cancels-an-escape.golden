@@ -1,0 +1,7 @@
+# CAN after ESC goes to ground: the D after it prints.
+size: 10x2
+input: a\e\x18Db
+screen:
+|aDb       |
+|          |
+cursor: 1,4

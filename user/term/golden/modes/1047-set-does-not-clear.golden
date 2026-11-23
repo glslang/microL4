@@ -1,0 +1,9 @@
+# DECSET 1047 switches as 47 does, without clearing.
+size: 6x3
+input: \e[?47hab\e[?47l\e[?1047h
+screen:
+|ab    |
+|      |
+|      |
+cursor: 1,3
+buffer: alternate

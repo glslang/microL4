@@ -1,0 +1,10 @@
+# A row past the screen stops at the last.
+size: 6x5
+input: \e[99dx
+screen:
+|      |
+|      |
+|      |
+|      |
+|x     |
+cursor: 5,2

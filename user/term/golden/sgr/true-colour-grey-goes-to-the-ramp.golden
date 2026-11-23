@@ -1,0 +1,10 @@
+# 128 ; 128 ; 128 is the grey ramp's 244 exactly, nearer than the cube's
+# 87 87 87.
+size: 10x1
+input: \e[38;2;128;128;128ma
+screen:
+|a         |
+attrs:
+|G         |
+key: G = fg 244
+cursor: 1,2

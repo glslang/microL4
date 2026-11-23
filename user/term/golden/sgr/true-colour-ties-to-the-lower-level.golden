@@ -1,0 +1,10 @@
+# 115 is halfway between the cube's 95 and 135: the lower, 95, so 115 ; 0
+# ; 0 is 52.
+size: 10x1
+input: \e[38;2;115;0;0ma
+screen:
+|a         |
+attrs:
+|R         |
+key: R = fg 52
+cursor: 1,2

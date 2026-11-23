@@ -1,0 +1,10 @@
+# CHA moves to column Pn in the same row.
+size: 6x5
+input: abc\e[2Gx
+screen:
+|axc   |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,3

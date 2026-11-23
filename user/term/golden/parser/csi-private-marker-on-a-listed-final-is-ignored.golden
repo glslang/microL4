@@ -1,0 +1,9 @@
+# A listed final with a private marker it does not take is ignored:
+# ESC [ ? 2 J, DECSED, erases nothing.
+size: 10x2
+input: abc\e[?2Jx
+screen:
+|abcx      |
+|          |
+cursor: 1,5
+ignored: 1

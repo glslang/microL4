@@ -1,0 +1,8 @@
+# DECSET 1048 is DECSC and DECRST 1048 DECRC.
+size: 6x3
+input: \e[2;3H\e[?1048h\e[H\e[?1048lx
+screen:
+|      |
+|  x   |
+|      |
+cursor: 2,4

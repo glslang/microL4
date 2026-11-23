@@ -1,0 +1,8 @@
+# C0 controls the screen has no use for execute and print nothing: NUL,
+# SOH, ENQ, BEL, DLE, FS and US.
+size: 10x2
+input: a\x00\x01\x05\x07\x10\x1c\x1fb
+screen:
+|ab        |
+|          |
+cursor: 1,3

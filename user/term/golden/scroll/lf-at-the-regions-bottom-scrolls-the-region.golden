@@ -1,0 +1,10 @@
+# LF on the region's bottom row scrolls the region alone.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[1;2r\e[2;1H\nx
+screen:
+|2   |
+|x   |
+|3   |
+|4   |
+cursor: 2,2
+region: 1,2

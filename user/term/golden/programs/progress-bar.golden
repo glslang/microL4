@@ -1,0 +1,10 @@
+# A progress bar redrawn in place with CR, then a line of its own.
+size: 20x2
+input: [#   ]  25%\r
+input: [##  ]  50%\r
+input: [####] 100%\r\n
+input: done
+screen:
+|[####] 100%         |
+|done                |
+cursor: 2,5

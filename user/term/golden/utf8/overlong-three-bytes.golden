@@ -1,0 +1,8 @@
+# E0 takes A0 to BF next: E0 80 AF (an overlong /) is three U+FFFDs, the
+# lead's subpart and two lone continuations.
+size: 8x2
+input: \xe0\x80\xaf
+screen:
+|���     |
+|        |
+cursor: 1,4

@@ -1,0 +1,9 @@
+# SU 2 scrolls up two.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[2S
+screen:
+|3   |
+|4   |
+|    |
+|    |
+cursor: 4,2

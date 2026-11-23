@@ -1,0 +1,9 @@
+# A parameter byte after an intermediate goes to CSI ignore: ESC [ SP 4 q
+# leaves the cursor a block.
+size: 10x2
+input: \e[ 4qx
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

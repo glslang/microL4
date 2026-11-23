@@ -1,0 +1,9 @@
+# With LNM set, LF also returns to column 1.
+size: 6x3
+input: \e[20hab\ncd
+screen:
+|ab    |
+|cd    |
+|      |
+cursor: 2,3
+modes: newline

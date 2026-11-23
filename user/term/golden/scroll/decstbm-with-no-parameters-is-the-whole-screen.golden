@@ -1,0 +1,9 @@
+# DECSTBM with no parameters gives the whole screen back.
+size: 4x4
+input: \e[2;3r\e[3;3H\e[r
+screen:
+|    |
+|    |
+|    |
+|    |
+cursor: 1,1

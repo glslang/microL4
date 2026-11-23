@@ -1,0 +1,18 @@
+# Rows and columns past 9 are written in full.
+size: 40x12
+input: \e[12;37H\e[6n
+screen:
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+|                                        |
+cursor: 12,37
+reply: \e[12;37R

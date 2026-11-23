@@ -1,0 +1,10 @@
+# With DECAWM reset, prints past the last column overwrite it and never
+# wrap.
+size: 5x3
+input: \e[?7labcdefg
+screen:
+|abcdg|
+|     |
+|     |
+cursor: 1,5
+modes: no-autowrap

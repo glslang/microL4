@@ -1,0 +1,13 @@
+# Erasing writes blanks in the pen's background, as bce does.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[44m\e[2;3H\e[J
+screen:
+|abcde|
+|fg   |
+|     |
+attrs:
+|     |
+|  BBB|
+|BBBBB|
+key: B = bg 4
+cursor: 2,3

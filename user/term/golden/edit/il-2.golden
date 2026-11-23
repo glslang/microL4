@@ -1,0 +1,9 @@
+# IL 2 inserts two lines.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2H\e[2L
+screen:
+|abcdef|
+|      |
+|      |
+|ghijkl|
+cursor: 2,1

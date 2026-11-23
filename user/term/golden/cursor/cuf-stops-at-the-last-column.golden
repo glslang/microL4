@@ -1,0 +1,10 @@
+# CUF stops at the last column.
+size: 6x5
+input: \e[99Cx
+screen:
+|     x|
+|      |
+|      |
+|      |
+|      |
+cursor: 1,6 wrap

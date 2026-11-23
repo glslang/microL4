@@ -1,0 +1,9 @@
+# A count past the region's bottom blanks every line from the cursor's.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2H\e[65535L
+screen:
+|abcdef|
+|      |
+|      |
+|      |
+cursor: 2,1

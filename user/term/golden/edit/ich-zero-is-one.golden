@@ -1,0 +1,9 @@
+# ICH 0 counts as 1.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;3H\e[0@
+screen:
+|ab cde|
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,3

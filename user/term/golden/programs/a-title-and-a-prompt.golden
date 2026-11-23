@@ -1,0 +1,9 @@
+# A shell setting the window title with OSC 0 before each prompt.
+size: 20x3
+input: \e]0;user@host: ~\x07$ echo hi\r\nhi\r\n\e]0;user@host: ~\x07$\x20
+screen:
+|$ echo hi           |
+|hi                  |
+|$                   |
+cursor: 3,3
+title: user@host: ~

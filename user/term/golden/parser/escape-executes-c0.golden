@@ -1,0 +1,8 @@
+# A C0 control inside an escape sequence executes and the sequence goes
+# on: BS moves left, then ESC D is IND.
+size: 10x2
+input: abc\e\x08Dx
+screen:
+|abc       |
+|  x       |
+cursor: 2,4

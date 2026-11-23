@@ -1,0 +1,14 @@
+# 1049's clear writes blanks in the pen's background.
+size: 6x3
+input: \e[44m\e[?1049h
+screen:
+|      |
+|      |
+|      |
+attrs:
+|BBBBBB|
+|BBBBBB|
+|BBBBBB|
+key: B = bg 4
+cursor: 1,1
+buffer: alternate

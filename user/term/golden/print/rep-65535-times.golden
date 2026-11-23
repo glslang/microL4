@@ -1,0 +1,8 @@
+# REP's count saturates at 65,535: 65,536 prints in all on a 5x2 screen,
+# which leaves the last one alone on the bottom row.
+size: 5x2
+input: x\e[99999b
+screen:
+|xxxxx|
+|x    |
+cursor: 2,2

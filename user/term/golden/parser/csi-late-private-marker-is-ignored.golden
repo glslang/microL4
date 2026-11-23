@@ -1,0 +1,9 @@
+# A private marker after a parameter goes to CSI ignore: ESC [ 1 ? K
+# erases nothing.
+size: 10x2
+input: abc\e[D\e[1?Kx
+screen:
+|abx       |
+|          |
+cursor: 1,4
+ignored: 1

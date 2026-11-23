@@ -1,0 +1,9 @@
+# SGR 3: italic, kept in the model though drawn upright.
+size: 10x1
+input: \e[3mi
+screen:
+|i         |
+attrs:
+|I         |
+key: I = italic
+cursor: 1,2

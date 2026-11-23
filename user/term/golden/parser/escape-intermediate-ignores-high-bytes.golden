@@ -1,0 +1,7 @@
+# Bytes from 0x80 are ignored in escape intermediate too.
+size: 10x2
+input: \e(\xc3\xa90q
+screen:
+|─         |
+|          |
+cursor: 1,2

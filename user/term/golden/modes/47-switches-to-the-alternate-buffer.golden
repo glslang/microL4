@@ -1,0 +1,10 @@
+# DECSET 47 makes the alternate buffer active, as it was, and keeps the
+# cursor where it was.
+size: 6x3
+input: ab\e[?47hcd
+screen:
+|  cd  |
+|      |
+|      |
+cursor: 1,5
+buffer: alternate

@@ -1,0 +1,8 @@
+# An index above 255 is ignored with every parameter after it; nothing in
+# this SGR was acted on, so it counts as ignored.
+size: 10x1
+input: \e[38;5;256;1ma
+screen:
+|a         |
+cursor: 1,2
+ignored: 1

@@ -1,0 +1,15 @@
+# An app colours a line with an SGR and EL, the cells after its text
+# included.
+size: 5x3
+input: \e[2H\e[37;44mhi\e[K\e[m
+screen:
+|     |
+|hi   |
+|     |
+attrs:
+|     |
+|TTBBB|
+|     |
+key: T = fg 7 bg 4
+key: B = bg 4
+cursor: 2,3

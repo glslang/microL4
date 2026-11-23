@@ -1,0 +1,12 @@
+# VPA counts rows as CUP does: from the region's top with DECOM.
+size: 6x5
+input: \e[3;5r\e[?6h\e[2dx
+screen:
+|      |
+|      |
+|      |
+|x     |
+|      |
+cursor: 4,2
+modes: origin
+region: 3,5

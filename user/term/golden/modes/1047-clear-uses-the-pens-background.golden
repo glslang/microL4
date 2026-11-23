@@ -1,0 +1,15 @@
+# 1047's clear writes blanks in the pen's background, as every erase does:
+# the alternate buffer comes back coloured.
+size: 6x3
+input: \e[?1047h\e[44m\e[?1047l\e[?1047h
+screen:
+|      |
+|      |
+|      |
+attrs:
+|BBBBBB|
+|BBBBBB|
+|BBBBBB|
+key: B = bg 4
+cursor: 1,1
+buffer: alternate

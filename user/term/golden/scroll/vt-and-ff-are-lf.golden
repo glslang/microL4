@@ -1,0 +1,9 @@
+# VT and FF act as LF.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\x0bx\x0cy
+screen:
+|3   |
+|4   |
+| x  |
+|  y |
+cursor: 4,4

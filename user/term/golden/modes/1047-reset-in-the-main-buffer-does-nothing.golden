@@ -1,0 +1,8 @@
+# Resetting 1047 with the main buffer active clears nothing.
+size: 6x3
+input: ab\e[?1047l
+screen:
+|ab    |
+|      |
+|      |
+cursor: 1,3

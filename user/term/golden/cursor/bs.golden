@@ -1,0 +1,10 @@
+# BS moves left one.
+size: 6x5
+input: ab\x08x
+screen:
+|ax    |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,3

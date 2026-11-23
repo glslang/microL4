@@ -1,0 +1,9 @@
+# EL with an unlisted parameter is ignored.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[3K
+screen:
+|abcde|
+|fghij|
+|klmno|
+cursor: 2,3
+ignored: 1

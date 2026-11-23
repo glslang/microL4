@@ -1,0 +1,11 @@
+# CPL stops as CUU does.
+size: 6x5
+input: \e[3;5r\e[5;3H\e[9Fx
+screen:
+|      |
+|      |
+|x     |
+|      |
+|      |
+cursor: 3,2
+region: 3,5

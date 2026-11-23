@@ -1,0 +1,12 @@
+# With DECOM, CUP's row counts from the region's top.
+size: 6x5
+input: \e[2;4r\e[?6h\e[2;3Hx
+screen:
+|      |
+|      |
+|  x   |
+|      |
+|      |
+cursor: 3,4
+modes: origin
+region: 2,4

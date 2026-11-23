@@ -1,0 +1,7 @@
+# REP repeats a decoded code point.
+size: 8x2
+input: \xe2\x96\x92\e[3b
+screen:
+|▒▒▒▒    |
+|        |
+cursor: 1,5

@@ -1,0 +1,8 @@
+# DECRST 25 hides the cursor.
+size: 6x3
+input: \e[?25l
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1 hidden

@@ -1,0 +1,8 @@
+# So does an escape sequence.
+size: 4x2
+input: a\e
+input: Db
+screen:
+|a   |
+| b  |
+cursor: 2,3

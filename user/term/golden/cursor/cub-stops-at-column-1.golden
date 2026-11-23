@@ -1,0 +1,10 @@
+# CUB stops at column 1.
+size: 6x5
+input: ab\e[9Dx
+screen:
+|xb    |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,2

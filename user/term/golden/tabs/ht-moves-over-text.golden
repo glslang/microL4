@@ -1,0 +1,7 @@
+# HT only moves the cursor: the cells it passes keep their text.
+size: 20x2
+input: abcdefghij\r\tx
+screen:
+|abcdefghxj          |
+|                    |
+cursor: 1,10

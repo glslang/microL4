@@ -1,0 +1,9 @@
+# Readline erasing a typo: BS, EL, and the right letter.
+size: 20x2
+input: $ ls -lx
+input: \x08\e[K
+input: a\r\n
+screen:
+|$ ls -la            |
+|                    |
+cursor: 2,1

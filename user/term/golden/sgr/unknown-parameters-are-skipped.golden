@@ -1,0 +1,9 @@
+# An unknown parameter is ignored and the rest still apply.
+size: 10x1
+input: \e[50;1;66;4ma
+screen:
+|a         |
+attrs:
+|X         |
+key: X = bold underline
+cursor: 1,2

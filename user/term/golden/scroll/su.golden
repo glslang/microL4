@@ -1,0 +1,9 @@
+# SU scrolls the region up one; the cursor stays.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[S
+screen:
+|2   |
+|3   |
+|4   |
+|    |
+cursor: 4,2

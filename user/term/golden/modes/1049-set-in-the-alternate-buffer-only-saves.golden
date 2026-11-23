@@ -1,0 +1,10 @@
+# Setting 1049 with the alternate buffer active switches and clears
+# nothing; its DECSC saves into the alternate buffer's saved cursor.
+size: 6x3
+input: \e[?1049hab\e[?1049h\e[3;1H\e8x
+screen:
+|abx   |
+|      |
+|      |
+cursor: 1,4
+buffer: alternate

@@ -1,0 +1,9 @@
+# Parameters after a true colour still apply.
+size: 10x1
+input: \e[38;2;0;255;0;4ma
+screen:
+|a         |
+attrs:
+|G         |
+key: G = underline fg 46
+cursor: 1,2

@@ -1,0 +1,10 @@
+# LF on the last row, the region's bottom, scrolls the screen up; the top
+# line is gone.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\nx
+screen:
+|2   |
+|3   |
+|4   |
+| x  |
+cursor: 4,3

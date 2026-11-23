@@ -1,0 +1,9 @@
+# C0 controls inside a DCS are ignored: CR in DCS entry and LF in
+# passthrough move nothing.
+size: 10x2
+input: ab\eP\r1q\n\e\\x
+screen:
+|abx       |
+|          |
+cursor: 1,4
+ignored: 1

@@ -1,0 +1,12 @@
+# With DECOM, a row past the region stops at its bottom.
+size: 6x5
+input: \e[2;4r\e[?6h\e[9;1Hx
+screen:
+|      |
+|      |
+|      |
+|x     |
+|      |
+cursor: 4,2
+modes: origin
+region: 2,4

@@ -1,0 +1,10 @@
+# DECSC saves DECOM: restored on, CUP then counts from the region's top.
+size: 6x3
+input: \e[2;3r\e[?6h\e7\e[?6l\e8\e[Hx
+screen:
+|      |
+|x     |
+|      |
+cursor: 2,2
+modes: origin
+region: 2,3

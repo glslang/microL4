@@ -1,0 +1,8 @@
+# An OSC string that does not start with digits and ; is ignored.
+size: 10x2
+input: \e]a;b\x07\e];c\x07x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 2

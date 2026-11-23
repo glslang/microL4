@@ -1,0 +1,8 @@
+# REP's prints wrap as any print does.
+size: 5x3
+input: abc\e[4b
+screen:
+|abccc|
+|cc   |
+|     |
+cursor: 2,3

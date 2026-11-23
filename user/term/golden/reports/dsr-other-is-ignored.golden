@@ -1,0 +1,11 @@
+# DSR with any parameter but 5 and 6 is ignored.
+size: 10x5
+input: \e[7n\e[n
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 1,1
+ignored: 2

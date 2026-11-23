@@ -1,0 +1,9 @@
+# CAN leaves the OSC string, whose exit action ends it: the title is set,
+# as Williams' osc_end runs whatever ends the string.
+size: 10x2
+input: \e]2;abc\x18x
+screen:
+|x         |
+|          |
+cursor: 1,2
+title: abc

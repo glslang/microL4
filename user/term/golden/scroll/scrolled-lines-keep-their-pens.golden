@@ -1,0 +1,15 @@
+# Lines that move keep their cells' pens.
+size: 4x4
+input: 1\r\n\e[1m2\e[m\e[S
+screen:
+|2   |
+|    |
+|    |
+|    |
+attrs:
+|B   |
+|    |
+|    |
+|    |
+key: B = bold
+cursor: 2,2

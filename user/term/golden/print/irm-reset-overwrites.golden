@@ -1,0 +1,8 @@
+# IRM reset again: prints overwrite.
+size: 5x3
+input: abc\e[4h\e[4l\e[1Gx
+screen:
+|xbc  |
+|     |
+|     |
+cursor: 1,2

@@ -1,0 +1,12 @@
+# Under DECOM, CUD stops at the region's bottom.
+size: 6x5
+input: \e[2;4r\e[?6h\e[9Bx
+screen:
+|      |
+|      |
+|      |
+|x     |
+|      |
+cursor: 4,2
+modes: origin
+region: 2,4

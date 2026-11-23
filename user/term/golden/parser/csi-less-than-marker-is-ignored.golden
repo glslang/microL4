@@ -1,0 +1,8 @@
+# ESC [ < 4 h is no mode term knows: IRM stays reset, so x overwrites b.
+size: 10x2
+input: ab\e[D\e[<4hx
+screen:
+|ax        |
+|          |
+cursor: 1,3
+ignored: 1

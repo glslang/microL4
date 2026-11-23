@@ -1,0 +1,9 @@
+# A colon in a DCS's parameters sends it to DCS ignore, which ends at the
+# ST all the same.
+size: 10x2
+input: \eP1:2qab\e\\x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

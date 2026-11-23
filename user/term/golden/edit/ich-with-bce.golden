@@ -1,0 +1,15 @@
+# ICH's blanks take the pen's background.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[44m\e[1;1H\e[2@
+screen:
+|  abcd|
+|ghijkl|
+|mnopqr|
+|stuvwx|
+attrs:
+|BB    |
+|      |
+|      |
+|      |
+key: B = bg 4
+cursor: 1,1

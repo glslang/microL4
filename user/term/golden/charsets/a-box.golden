@@ -1,0 +1,8 @@
+# A box in DEC Special Graphics, as curses draws one.
+size: 5x3
+input: \e(0lqqqk\r\nx   x\r\nmqqqj\e(B
+screen:
+|┌───┐|
+|│   │|
+|└───┘|
+cursor: 3,5 wrap

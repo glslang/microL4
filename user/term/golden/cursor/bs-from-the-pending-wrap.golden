@@ -1,0 +1,10 @@
+# BS from the pending wrap moves to the column before the last.
+size: 6x5
+input: abcdef\x08x
+screen:
+|abcdxf|
+|      |
+|      |
+|      |
+|      |
+cursor: 1,6

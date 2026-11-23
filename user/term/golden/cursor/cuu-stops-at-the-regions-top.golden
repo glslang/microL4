@@ -1,0 +1,11 @@
+# From inside the region, CUU stops at its top.
+size: 6x5
+input: \e[2;4r\e[4;1H\e[9Ax
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2
+region: 2,4

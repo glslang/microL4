@@ -1,0 +1,9 @@
+# A region of one row is refused: nothing changes, the cursor included.
+size: 4x4
+input: \e[2;2H\e[3;3r
+screen:
+|    |
+|    |
+|    |
+|    |
+cursor: 2,2

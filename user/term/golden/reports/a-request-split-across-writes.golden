@@ -1,0 +1,13 @@
+# A request split across writes replies once, whole.
+size: 10x5
+input: \e[
+input: 6
+input: n
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 1,1
+reply: \e[1;1R

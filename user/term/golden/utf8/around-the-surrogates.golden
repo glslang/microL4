@@ -1,0 +1,8 @@
+# U+D7FF and U+E000, either side of the surrogates, print (one unassigned,
+# one private use: both draw as the replacement glyph).
+size: 8x2
+input: \xed\x9f\xbf\xee\x80\x80
+screen:
+|퟿      |
+|        |
+cursor: 1,3

@@ -1,0 +1,9 @@
+# RI moves up one in the same column.
+size: 4x4
+input: \e[3;2H\eMx
+screen:
+|    |
+| x  |
+|    |
+|    |
+cursor: 2,3

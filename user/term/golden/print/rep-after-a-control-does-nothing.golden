@@ -1,0 +1,9 @@
+# REP acts only if the action just before was a print: after CR it does
+# nothing.
+size: 5x3
+input: a\r\e[3bx
+screen:
+|x    |
+|     |
+|     |
+cursor: 1,2

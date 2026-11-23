@@ -1,0 +1,8 @@
+# CR inside CSI intermediate executes; then DECSCUSR 4 sets the underline
+# cursor.
+size: 10x2
+input: ab\e[4 \rqx
+screen:
+|xb        |
+|          |
+cursor: 1,2 underline

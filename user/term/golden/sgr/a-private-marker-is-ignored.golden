@@ -1,0 +1,7 @@
+# CSI ? 1 m is no SGR.
+size: 10x1
+input: \e[?1ma
+screen:
+|a         |
+cursor: 1,2
+ignored: 1

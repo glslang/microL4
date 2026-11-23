@@ -1,0 +1,7 @@
+# A wrap on the last row, the region's bottom, scrolls the screen up.
+size: 5x2
+input: abcdefghijk
+screen:
+|fghij|
+|k    |
+cursor: 2,2

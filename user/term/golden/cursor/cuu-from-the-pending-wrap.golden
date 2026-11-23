@@ -1,0 +1,10 @@
+# CUU from the pending wrap keeps the last column and clears the wrap.
+size: 6x5
+input: \e[2Habcdef\e[Ax
+screen:
+|     x|
+|abcdef|
+|      |
+|      |
+|      |
+cursor: 1,6 wrap

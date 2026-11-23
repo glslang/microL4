@@ -1,0 +1,8 @@
+# Any ESC ends a DCS; what follows is a new escape sequence, here IND.
+size: 10x2
+input: \ePqab\eDx
+screen:
+|          |
+|x         |
+cursor: 2,2
+ignored: 1

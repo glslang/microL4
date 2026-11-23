@@ -1,0 +1,9 @@
+# DECRST 1047 clears the alternate buffer before leaving it.
+size: 6x3
+input: \e[?1047hab\e[?1047l\e[?1047h
+screen:
+|      |
+|      |
+|      |
+cursor: 1,3
+buffer: alternate

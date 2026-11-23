@@ -1,0 +1,8 @@
+# DECSCUSR 0, 1 and 2: a block.
+size: 6x3
+input: \e[5 q\e[1 q\e[5 q\e[2 q
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

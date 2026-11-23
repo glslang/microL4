@@ -1,0 +1,9 @@
+# The cell pushed past the last column is lost.
+size: 5x3
+input: abcde\e[H\e[4hXY
+screen:
+|XYabc|
+|     |
+|     |
+cursor: 1,3
+modes: insert

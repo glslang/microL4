@@ -1,0 +1,9 @@
+# RIS from the alternate buffer: the main buffer is active, both blank.
+size: 6x3
+input: xy\e[?1049hab\ec\e[?47h
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+buffer: alternate

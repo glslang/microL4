@@ -1,0 +1,13 @@
+# DECALN's E's are in the default pen, but the pen itself stays.
+size: 6x3
+input: \e[1m\e#8x
+screen:
+|xEEEEE|
+|EEEEEE|
+|EEEEEE|
+attrs:
+|B     |
+|      |
+|      |
+key: B = bold
+cursor: 1,2

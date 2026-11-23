@@ -1,0 +1,10 @@
+# CUD stops at the last row.
+size: 6x5
+input: \e[9Bx
+screen:
+|      |
+|      |
+|      |
+|      |
+|x     |
+cursor: 5,2

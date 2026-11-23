@@ -1,0 +1,12 @@
+# A cursor below the region did not start above it, so CUU stops at the
+# region's top, as xterm and DEC have it.
+size: 6x5
+input: \e[2;3r\e[5;1H\e[9Ax
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2
+region: 2,3

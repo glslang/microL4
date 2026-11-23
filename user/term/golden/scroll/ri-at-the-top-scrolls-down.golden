@@ -1,0 +1,10 @@
+# RI on row 1, the region's top, scrolls the screen down; the last line is
+# gone.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[H\eMx
+screen:
+|x   |
+|1   |
+|2   |
+|3   |
+cursor: 1,2

@@ -1,0 +1,9 @@
+# ICH with no parameter inserts one blank.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;3H\e[@
+screen:
+|ab cde|
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,3

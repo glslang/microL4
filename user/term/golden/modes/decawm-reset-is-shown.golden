@@ -1,0 +1,9 @@
+# DECRST 7: autowrap off.
+size: 6x3
+input: \e[?7l
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+modes: no-autowrap

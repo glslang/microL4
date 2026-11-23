@@ -1,0 +1,7 @@
+# An input line's own UTF-8 is its bytes.
+size: 8x2
+input: ┌─╥▒£
+screen:
+|┌─╥▒£   |
+|        |
+cursor: 1,6

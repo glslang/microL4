@@ -1,0 +1,11 @@
+# DA 0 is DA.
+size: 10x5
+input: \e[0c
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 1,1
+reply: \e[?1;2c

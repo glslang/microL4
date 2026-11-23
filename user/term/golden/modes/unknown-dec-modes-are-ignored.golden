@@ -1,0 +1,10 @@
+# DEC modes term does not know, mouse and bracketed paste among them, are
+# ignored.
+size: 6x3
+input: \e[?1000h\e[?2004h\e[?12l
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+ignored: 3

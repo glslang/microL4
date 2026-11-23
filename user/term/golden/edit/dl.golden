@@ -1,0 +1,10 @@
+# DL deletes Pn lines at the cursor's row; the lines below move up and
+# blanks enter at the region's bottom; the cursor goes to column 1.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2;3H\e[M
+screen:
+|abcdef|
+|mnopqr|
+|stuvwx|
+|      |
+cursor: 2,1

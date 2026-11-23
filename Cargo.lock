@@ -195,6 +195,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "term"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "uart"
 version = "0.1.0"
 dependencies = [

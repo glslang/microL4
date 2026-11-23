@@ -1,0 +1,8 @@
+# A C0 control inside ESC ( 0 executes: BS moves left before the
+# designation, which then applies to the q.
+size: 10x2
+input: ab\e(\x080q
+screen:
+|a─        |
+|          |
+cursor: 1,3

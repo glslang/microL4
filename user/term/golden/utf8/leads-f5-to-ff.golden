@@ -1,0 +1,7 @@
+# F5 to FF start nothing: one U+FFFD each.
+size: 8x2
+input: \xf5\xf8\xfc\xfe\xff
+screen:
+|�����   |
+|        |
+cursor: 1,6

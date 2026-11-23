@@ -1,0 +1,8 @@
+# Tab stops start every eight columns, at 1, 9, 17: HT from column 1 goes
+# to 9.
+size: 20x2
+input: \tx
+screen:
+|        x           |
+|                    |
+cursor: 1,10

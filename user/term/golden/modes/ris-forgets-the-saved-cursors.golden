@@ -1,0 +1,8 @@
+# RIS forgets the saved cursor: DECRC then homes.
+size: 6x3
+input: \e[2;2H\e7\ec\e[3;3H\e8x
+screen:
+|x     |
+|      |
+|      |
+cursor: 1,2

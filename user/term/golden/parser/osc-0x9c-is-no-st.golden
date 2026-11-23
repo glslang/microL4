@@ -1,0 +1,8 @@
+# 0x9C is no ST: inside an OSC string it is put like any other byte.
+size: 10x2
+input: \e]2;ab\x9cc\x07
+screen:
+|          |
+|          |
+cursor: 1,1
+title: ab\x9cc

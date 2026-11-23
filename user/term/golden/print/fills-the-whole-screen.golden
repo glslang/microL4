@@ -1,0 +1,8 @@
+# Filling every cell leaves the cursor in the last cell with the pending
+# wrap set and nothing scrolled.
+size: 3x2
+input: abcdef
+screen:
+|abc|
+|def|
+cursor: 2,3 wrap

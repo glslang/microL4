@@ -1,0 +1,9 @@
+# DECAWM reset, then set again: the print into the last column sets the
+# pending wrap and the next wraps.
+size: 5x3
+input: \e[?7labcdef\e[?7hgh
+screen:
+|abcdg|
+|h    |
+|     |
+cursor: 2,2

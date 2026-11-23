@@ -1,0 +1,13 @@
+# Overwriting a cell replaces its pen with the current one.
+size: 5x3
+input: \e[7mab\e[m\e[1Gx
+screen:
+|xb   |
+|     |
+|     |
+attrs:
+| I   |
+|     |
+|     |
+key: I = inverse
+cursor: 1,2

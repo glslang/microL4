@@ -1,0 +1,13 @@
+# A printed space takes the pen like any character: here a background.
+size: 5x3
+input: \e[44m a\e[m
+screen:
+| a   |
+|     |
+|     |
+attrs:
+|BB   |
+|     |
+|     |
+key: B = bg 4
+cursor: 1,3

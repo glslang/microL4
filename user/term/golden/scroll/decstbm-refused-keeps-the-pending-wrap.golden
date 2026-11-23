@@ -1,0 +1,9 @@
+# A refused DECSTBM moves nothing, so the pending wrap stays.
+size: 4x4
+input: abcd\e[4;4rx
+screen:
+|abcd|
+|x   |
+|    |
+|    |
+cursor: 2,2

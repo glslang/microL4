@@ -1,0 +1,7 @@
+# Only 0x5F to 0x7E change: letters, digits and the rest print as
+# themselves.
+size: 8x1
+input: \e(0A^0Z~\e(B
+screen:
+|A^0Z·   |
+cursor: 1,6

@@ -1,0 +1,16 @@
+# 90 to 97 set foregrounds 8 to 15.
+size: 10x1
+input: \e[90ma\e[91mb\e[92mc\e[93md\e[94me\e[95mf\e[96mg\e[97mh
+screen:
+|abcdefgh  |
+attrs:
+|89ABCDEF  |
+key: 8 = fg 8
+key: 9 = fg 9
+key: A = fg 10
+key: B = fg 11
+key: C = fg 12
+key: D = fg 13
+key: E = fg 14
+key: F = fg 15
+cursor: 1,9

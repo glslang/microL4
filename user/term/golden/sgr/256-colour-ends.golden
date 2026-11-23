@@ -1,0 +1,9 @@
+# Indices 0 and 255 both work.
+size: 10x1
+input: \e[38;5;255;48;5;0ma
+screen:
+|a         |
+attrs:
+|W         |
+key: W = fg 255 bg 0
+cursor: 1,2

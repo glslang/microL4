@@ -1,0 +1,8 @@
+# ED 1 at home erases the first cell alone.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[H\e[1J
+screen:
+| bcde|
+|fghij|
+|klmno|
+cursor: 1,1

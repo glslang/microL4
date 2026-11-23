@@ -1,0 +1,7 @@
+# Each lone continuation byte is its own maximal subpart: one U+FFFD each.
+size: 8x2
+input: \x80\xbf\x9f
+screen:
+|���     |
+|        |
+cursor: 1,4

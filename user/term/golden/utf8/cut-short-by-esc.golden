@@ -1,0 +1,7 @@
+# ESC ends a sequence: U+FFFD prints first, then ESC [ C moves on.
+size: 8x2
+input: \xe2\e[Cx
+screen:
+|� x     |
+|        |
+cursor: 1,4

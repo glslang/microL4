@@ -1,0 +1,10 @@
+# With IRM set, a print shifts the cells from the cursor right one; the
+# last is lost.
+size: 5x3
+input: abcd\e[1;2H\e[4hX
+screen:
+|aXbcd|
+|     |
+|     |
+cursor: 1,3
+modes: insert

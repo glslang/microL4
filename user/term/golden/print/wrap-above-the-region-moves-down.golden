@@ -1,0 +1,10 @@
+# A wrap above the region moves down one like any IND.
+size: 5x4
+input: \e[2;3rabcdefg
+screen:
+|abcde|
+|fg   |
+|     |
+|     |
+cursor: 2,3
+region: 2,3

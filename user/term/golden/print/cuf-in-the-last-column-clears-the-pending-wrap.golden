@@ -1,0 +1,9 @@
+# CUF cannot move past the last column, but clears the pending wrap all
+# the same: x overwrites e and sets it again.
+size: 5x3
+input: abcde\e[Cx
+screen:
+|abcdx|
+|     |
+|     |
+cursor: 1,5 wrap

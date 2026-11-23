@@ -1,0 +1,8 @@
+# DEL is ignored, no action: REP still repeats the print before it.
+size: 5x3
+input: a\x7f\e[2b
+screen:
+|aaa  |
+|     |
+|     |
+cursor: 1,4

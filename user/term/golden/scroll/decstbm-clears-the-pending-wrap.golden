@@ -1,0 +1,10 @@
+# A DECSTBM that sets a region homes the cursor, clearing the pending
+# wrap.
+size: 4x4
+input: abcd\e[1;4rx
+screen:
+|xbcd|
+|    |
+|    |
+|    |
+cursor: 1,2

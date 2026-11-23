@@ -1,0 +1,12 @@
+# IL outside the region does nothing at all: the pending wrap stays, so
+# the next print wraps; CR, and IND on the last row below the region does
+# nothing, so z lands on the s.
+size: 6x4
+input: \e[1;2r\e[4Hstuvwx\e[Lz
+screen:
+|      |
+|      |
+|      |
+|ztuvwx|
+cursor: 4,2
+region: 1,2

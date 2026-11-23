@@ -1,0 +1,9 @@
+# SGR 7: inverse.
+size: 10x1
+input: \e[7mv
+screen:
+|v         |
+attrs:
+|V         |
+key: V = inverse
+cursor: 1,2

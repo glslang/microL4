@@ -1,0 +1,8 @@
+# DECSCUSR 4: an underline cursor; it never blinks anyway.
+size: 6x3
+input: \e[4 q
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1 underline

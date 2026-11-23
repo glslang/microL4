@@ -1,0 +1,10 @@
+# A missing or 0 bottom is the last row.
+size: 4x4
+input: \e[2r\e[3;0r
+screen:
+|    |
+|    |
+|    |
+|    |
+cursor: 1,1
+region: 3,4

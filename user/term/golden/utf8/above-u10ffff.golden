@@ -1,0 +1,7 @@
+# F4 takes 80 to 8F next: F4 90 80 80, past U+10FFFF, is four U+FFFDs.
+size: 8x2
+input: \xf4\x90\x80\x80
+screen:
+|����    |
+|        |
+cursor: 1,5

@@ -1,0 +1,10 @@
+# With the cursor below the region, DL does nothing.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;2r\e[3;2H\e[M
+screen:
+|abcdef|
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 3,2
+region: 1,2

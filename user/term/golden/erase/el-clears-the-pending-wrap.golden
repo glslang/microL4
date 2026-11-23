@@ -1,0 +1,8 @@
+# EL clears the pending wrap too.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[Kz
+screen:
+|abcde|
+|fghij|
+|klmnz|
+cursor: 3,5 wrap

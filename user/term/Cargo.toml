@@ -1,0 +1,17 @@
+[package]
+name = "term"
+description = "microL4's terminal emulator: the DEC parser, the screen model and the looks its renderer draws, host-tested against golden screens"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dev-dependencies]
+# The proptest of random byte streams. `std` alone: no forking, timeouts or
+# failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

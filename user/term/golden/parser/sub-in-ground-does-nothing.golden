@@ -1,0 +1,7 @@
+# SUB in ground executes, doing nothing.
+size: 10x2
+input: a\x1ab
+screen:
+|ab        |
+|          |
+cursor: 1,3

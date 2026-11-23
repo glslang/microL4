@@ -1,0 +1,8 @@
+# An empty parameter reads as 0, the default: CUP ; 3 is row 1,
+# column 3.
+size: 10x2
+input: \e[2;5H\e[;3Hx
+screen:
+|  x       |
+|          |
+cursor: 1,4
