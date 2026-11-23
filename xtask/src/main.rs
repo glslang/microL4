@@ -195,6 +195,8 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "--package",
             "console",
             "--package",
+            "term",
+            "--package",
             "root",
             "--lib",
         ])
