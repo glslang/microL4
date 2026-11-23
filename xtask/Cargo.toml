@@ -10,3 +10,4 @@ publish.workspace = true
 # The ACPI dump format and parser, for `cargo xtask acpidump`; `testing`
 # provides the memory a dump describes.
 l4core = { path = "../core", features = ["testing"] }
+miniz_oxide = "0.9"

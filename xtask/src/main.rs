@@ -9,6 +9,7 @@ mod image;
 mod qemu;
 mod rootimage;
 mod scenario;
+mod screen;
 mod source;
 
 use std::error::Error;
@@ -27,9 +28,13 @@ commands:
                     embedded, and the loader
   image             build target/xtask/image/disk.img and disk.vhdx
   run               boot the image under OVMF, COM1 on stdio (Ctrl-A X quits)
-  test [names...]   host tests, kernel source checks, the release kernel's
+  test [names...] [--bless]
+                    host tests, kernel source checks, the release kernel's
                     disassembly check, then every QEMU scenario in
-                    tests/qemu/ (or only the named ones)
+                    tests/qemu/ (or only the named ones); with --bless, a
+                    screendump that differs from its golden in
+                    tests/qemu/golden/, or has none, becomes the golden if
+                    its scenario passes otherwise
   clippy            clippy with -D warnings on every crate and target
   gdb               boot under QEMU paused, with GDB attached
   acpidump [-- <qemu args>]
@@ -56,6 +61,7 @@ struct Options {
     kernel: Kernel,
     out: Option<PathBuf>,
     from_log: Option<PathBuf>,
+    bless: bool,
     rest: Vec<String>,
 }
 
@@ -68,6 +74,7 @@ fn parse_args() -> Result<Options> {
         kernel: Kernel::Selftest,
         out: None,
         from_log: None,
+        bless: false,
         rest: Vec::new(),
     };
     while let Some(a) = args.next() {
@@ -83,6 +90,7 @@ fn parse_args() -> Result<Options> {
             "--from-log" => {
                 opts.from_log = Some(args.next().ok_or("--from-log needs a file")?.into())
             }
+            "--bless" => opts.bless = true,
             "--" => opts.rest.extend(args.by_ref()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}").into()),
             _ => opts.rest.push(a),
@@ -108,6 +116,9 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
         compile::Profile::Dev
     };
     let kernel = opts.kernel;
+    if opts.bless && opts.command != "test" {
+        return Err("--bless is only for `test`".into());
+    }
     match opts.command.as_str() {
         "build" => {
             let art = compile::build(profile, &[Kernel::Selftest, Kernel::Release])?;
@@ -154,7 +165,7 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
             let disk = image::build_disk(&dir, &art, kernel, opts.cmdline.as_deref())?;
             return qemu::run_gdb(&disk, art.kernel(kernel)?, &dir);
         }
-        "test" => return test(profile, &opts.rest),
+        "test" => return test(profile, &opts.rest, opts.bless),
         "acpidump" => {
             return acpidump::run(
                 profile,
@@ -170,7 +181,7 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn test(profile: compile::Profile, only: &[String]) -> Result<ExitCode> {
+fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitCode> {
     // Host tests first: they are fast and catch most mistakes. The user
     // crates' libraries have host tests too, which need no kernel.
     run(Command::new(cargo()).arg("test").current_dir(root()))?;
@@ -201,8 +212,14 @@ fn test(profile: compile::Profile, only: &[String]) -> Result<ExitCode> {
     }
     let art = compile::build(profile, &[Kernel::Selftest, Kernel::Release])?;
     println!("{}", disasm::check(art.kernel(Kernel::Release)?)?);
-    println!("{}", qemu::version()?);
-    let results = scenario::run_all(&scenarios, &art, &xtask_dir().join("scenarios"));
+    let qemu = qemu::version()?;
+    println!("{qemu}");
+    let goldens = scenario::Goldens {
+        dir: root().join("tests/qemu/golden"),
+        bless,
+        qemu,
+    };
+    let results = scenario::run_all(&scenarios, &art, &xtask_dir().join("scenarios"), &goldens);
     let failed: Vec<&str> = results
         .iter()
         .filter(|r| !r.passed)

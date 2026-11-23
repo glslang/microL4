@@ -16,6 +16,9 @@
 //! qemu_args: -cpu qemu64   # optional; appended to the QEMU command line
 //! expect: microL4 kernel   # a substring of one serial line
 //! next: root: microL4      # the very next line must start with this
+//! expect: tui: drawn
+//! screendump: tui          # the screen, once the line above has matched,
+//!                          # must equal tests/qemu/golden/tui.png
 //! send: hello\r            # written to COM1's input once the expects above
 //!                          # it have matched
 //! expect: TEST PASS
@@ -34,6 +37,17 @@
 //! escapes `\r`, `\n`, `\t`, `\e` (ESC), `\\` and `\xHH`; as for every
 //! value, its ends are trimmed and ` #` starts a comment, so a space or `#`
 //! there is `\x20` or `\x23` (`docs/design.md`, "The harness").
+//!
+//! A `screendump:` follows an `expect:` or a `next:`. Once that step has
+//! matched, xtask takes the screen through QEMU's QMP monitor
+//! ([`qemu::Qmp`]) before any later step, and when the boot has ended
+//! compares it, pixel for pixel, with `tests/qemu/golden/<name>.png`
+//! ([`screen`]). The screen stays beside the log as `<name>.png`, and a
+//! mismatch leaves `<name>.diff.png` there too. `cargo xtask test --bless`
+//! writes each screen that differs from its golden, or has none, as the
+//! golden, if its scenario passed everything else. The guest must keep the
+//! screen still from the line the screendump follows until it is taken:
+//! say, by waiting for a `send:` after it.
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -46,7 +60,7 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use crate::compile::{Artifacts, Kernel};
-use crate::{Result, image, qemu, rel};
+use crate::{Result, image, qemu, rel, screen};
 
 /// Every boot gets at most this long.
 const MAX_TIMEOUT: Duration = Duration::from_secs(60);
@@ -80,7 +94,7 @@ impl Exit {
 /// The most input one scenario may send, in bytes after unescaping.
 const MAX_SEND_BYTES: usize = 4096;
 
-/// One `expect:` or `send:`, in file order.
+/// One `expect:`, `next:`, `send:` or `screendump:`, in file order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     /// Text a serial line must contain, after the previous step's.
@@ -90,6 +104,17 @@ pub enum Step {
     /// Text the serial line right after the previous step's must start
     /// with: no line may fall between them.
     Next(String),
+    /// The screen, captured once the step right above it matched and
+    /// compared with `tests/qemu/golden/<name>.png`.
+    Screendump(String),
+}
+
+/// What the runner does when the matcher reaches a `send:` or a
+/// `screendump:`, in step order.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Action<'a> {
+    Send(&'a [u8]),
+    Screendump(&'a str),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -183,6 +208,34 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
             }
             "forbid" if value.is_empty() => return Err(err("empty forbid line").into()),
             "forbid" => forbid.push(value.to_string()),
+            "screendump" if value.is_empty() => return Err(err("empty screendump line").into()),
+            "screendump" => {
+                // The screen is the one the line above announced. Right
+                // after a `send:` it would race the guest's answer to it.
+                if !matches!(steps.last(), Some(Step::Expect(_) | Step::Next(_))) {
+                    return Err(err(
+                        "a `screendump:` needs an `expect:` or `next:` right above it",
+                    )
+                    .into());
+                }
+                // It names a file in tests/qemu/golden/.
+                if !value
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b))
+                {
+                    return Err(err(
+                        "a screendump's name is lowercase letters, digits, `-` and `_`",
+                    )
+                    .into());
+                }
+                if steps
+                    .iter()
+                    .any(|s| matches!(s, Step::Screendump(n) if n == value))
+                {
+                    return Err(err(&format!("a second screendump named {value:?}")).into());
+                }
+                steps.push(Step::Screendump(value.to_string()));
+            }
             other => return Err(err(&format!("unknown key {other:?}")).into()),
         }
     }
@@ -201,7 +254,7 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
         .iter()
         .map(|s| match s {
             Step::Send(bytes) => bytes.len(),
-            Step::Expect(_) | Step::Next(_) => 0,
+            Step::Expect(_) | Step::Next(_) | Step::Screendump(_) => 0,
         })
         .sum();
     if sent > MAX_SEND_BYTES {
@@ -262,13 +315,45 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Scenario>> {
         .filter(|p| p.extension().is_some_and(|x| x == "scenario"))
         .collect();
     paths.sort();
-    paths
+    let scenarios = paths
         .iter()
         .map(|p| {
             let name = p.file_stem().unwrap().to_string_lossy();
             parse(&name, &fs::read_to_string(p)?)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    check_screendump_names(&scenarios)?;
+    Ok(scenarios)
+}
+
+/// Every scenario's screendumps share `tests/qemu/golden/`, so no two may
+/// have one name: scenarios run two at a time, and `--bless` would have
+/// both write one file.
+fn check_screendump_names(scenarios: &[Scenario]) -> Result<()> {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for sc in scenarios {
+        for name in sc.screendumps() {
+            if let Some((_, other)) = seen.iter().find(|(n, _)| *n == name) {
+                return Err(format!(
+                    "{}.scenario and {other}.scenario both have a screendump named {name:?}",
+                    sc.name
+                )
+                .into());
+            }
+            seen.push((name, &sc.name));
+        }
+    }
+    Ok(())
+}
+
+impl Scenario {
+    /// The names of its `screendump:` steps, in order.
+    pub fn screendumps(&self) -> impl Iterator<Item = &str> {
+        self.steps.iter().filter_map(|s| match s {
+            Step::Screendump(name) => Some(name.as_str()),
+            _ => None,
+        })
+    }
 }
 
 /// Strips terminal escape sequences, carriage returns and other control
@@ -308,9 +393,10 @@ pub fn clean(raw: &[u8]) -> String {
 /// the same line. A send is released as soon as every expectation before
 /// it has matched, and the expectations after it match only from the next
 /// line on: the rest of the line that released it was printed before the
-/// guest could have read the text. A `next:` must match at the start of the
-/// line after its step's; when it does not, the matcher is broken and
-/// matches nothing more.
+/// guest could have read the text. A screendump is released like a send,
+/// but changes nothing in the guest, so matching goes on along its line. A
+/// `next:` must match at the start of the line after its step's; when it
+/// does not, the matcher is broken and matches nothing more.
 pub struct Matcher<'a> {
     steps: &'a [Step],
     next: usize,
@@ -326,18 +412,19 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// Feeds one serial line. Returns the text of each send it released,
+    /// Feeds one serial line. Returns each send and screendump it released,
     /// in order.
-    pub fn feed(&mut self, line: &str) -> Vec<&'a [u8]> {
+    pub fn feed(&mut self, line: &str) -> Vec<Action<'a>> {
         let mut rest = line;
-        let mut sends = Vec::new();
-        // Whether a step matched on this line.
+        let mut actions = Vec::new();
+        // Whether a send was released, or a step matched, on this line.
+        let mut sent = false;
         let mut matched = false;
         while self.broken.is_none()
             && let Some(step) = self.steps.get(self.next)
         {
             match step {
-                Step::Expect(_) if !sends.is_empty() => break,
+                Step::Expect(_) if sent => break,
                 Step::Expect(e) => {
                     let Some(at) = rest.find(e.as_str()) else {
                         break;
@@ -352,7 +439,7 @@ impl<'a> Matcher<'a> {
                     let Some(r) = line.strip_prefix(t.as_str()) else {
                         let above = match &self.steps[self.next - 1] {
                             Step::Expect(a) | Step::Next(a) => a.as_str(),
-                            Step::Send(_) => "",
+                            Step::Send(_) | Step::Screendump(_) => "",
                         };
                         self.broken = Some(format!(
                             "printed {line:?} right after the line with {above:?}, \
@@ -363,11 +450,15 @@ impl<'a> Matcher<'a> {
                     rest = r;
                     matched = true;
                 }
-                Step::Send(text) => sends.push(text.as_slice()),
+                Step::Send(text) => {
+                    sent = true;
+                    actions.push(Action::Send(text));
+                }
+                Step::Screendump(name) => actions.push(Action::Screendump(name)),
             }
             self.next += 1;
         }
-        sends
+        actions
     }
 
     /// Why a `next:` failed, if one did.
@@ -382,7 +473,7 @@ impl<'a> Matcher<'a> {
     pub fn waiting_for(&self) -> Option<&'a str> {
         self.steps[self.next..].iter().find_map(|s| match s {
             Step::Expect(e) | Step::Next(e) => Some(e.as_str()),
-            Step::Send(_) => None,
+            Step::Send(_) | Step::Screendump(_) => None,
         })
     }
 }
@@ -392,9 +483,26 @@ pub struct Outcome {
     pub passed: bool,
 }
 
+/// Where `screendump:` goldens live, and what a run does with them.
+pub struct Goldens {
+    /// `tests/qemu/golden/`.
+    pub dir: PathBuf,
+    /// `--bless`: a screen that differs from its golden, or has none,
+    /// becomes the golden, if its scenario passes otherwise.
+    pub bless: bool,
+    /// QEMU's version line, kept in each image's `Source` text, so a
+    /// mismatch can say when the golden came from another QEMU.
+    pub qemu: String,
+}
+
 /// Runs `scenarios`, at most [`MAX_PARALLEL`] at a time, printing a report
 /// for each as it finishes.
-pub fn run_all(scenarios: &[Scenario], art: &Artifacts, dir: &Path) -> Vec<Outcome> {
+pub fn run_all(
+    scenarios: &[Scenario],
+    art: &Artifacts,
+    dir: &Path,
+    goldens: &Goldens,
+) -> Vec<Outcome> {
     let next = AtomicUsize::new(0);
     let results = Mutex::new(Vec::new());
     thread::scope(|s| {
@@ -403,7 +511,7 @@ pub fn run_all(scenarios: &[Scenario], art: &Artifacts, dir: &Path) -> Vec<Outco
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(sc) = scenarios.get(i) else { break };
-                    let (passed, report) = match run_one(sc, art, &dir.join(&sc.name)) {
+                    let (passed, report) = match run_one(sc, art, &dir.join(&sc.name), goldens) {
                         Ok(r) => r,
                         Err(e) => (false, format!("FAIL {}: {e}\n", sc.name)),
                     };
@@ -425,15 +533,39 @@ pub fn run_all(scenarios: &[Scenario], art: &Artifacts, dir: &Path) -> Vec<Outco
 }
 
 /// Boots one scenario. Returns whether it passed and a printable report.
-fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)> {
+fn run_one(
+    sc: &Scenario,
+    art: &Artifacts,
+    dir: &Path,
+    goldens: &Goldens,
+) -> Result<(bool, String)> {
     let cmdline = (!sc.cmdline.is_empty()).then_some(sc.cmdline.as_str());
     let disk = image::build_disk(dir, art, sc.kernel, cmdline)?;
+    // An earlier run's screens must not pass for this one's.
+    for name in sc.screendumps() {
+        for file in screen_files(dir, name) {
+            let _ = fs::remove_file(file);
+        }
+    }
     // COM1's input is QEMU's stdin: a pipe for a scenario that sends, and
-    // otherwise nothing.
+    // otherwise nothing. A scenario with a screendump gets a QMP monitor,
+    // and no parallel port: QEMU dumps its first console, which is the
+    // display's, but the parallel port's text console if the machine has no
+    // display device, and this way it fails instead.
     let sends = sc.steps.iter().any(|s| matches!(s, Step::Send(_)));
+    let (mut qmp, qmp_args) = match sc.screendumps().next() {
+        Some(_) => {
+            let (qmp, args) = qemu::Qmp::listen()?;
+            let mut args = args.to_vec();
+            args.extend(["-parallel".into(), "none".into()]);
+            (Some(qmp), args)
+        }
+        None => (None, Vec::new()),
+    };
     let start = Instant::now();
     let mut child = qemu::base_command(&disk)?
         .args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
+        .args(&qmp_args)
         .args(&sc.qemu_args)
         .stdin(if sends { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -469,6 +601,9 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
     // The first serial line with forbidden text, and the text.
     let mut forbidden: Option<(&str, String)> = None;
     let mut send_error = None;
+    // The screendumps taken, each with QEMU's PPM, and any that failed.
+    let mut screens: Vec<(&str, PathBuf)> = Vec::new();
+    let mut screendump_errors = Vec::new();
     let deadline = start + sc.timeout;
     let mut timed_out = false;
     loop {
@@ -489,16 +624,37 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
                 }
                 let released = matcher.feed(&line);
                 record(line);
-                for text in released {
-                    // `sends` made the pipe for every scenario with a send.
-                    let pipe = stdin.as_mut().unwrap();
-                    if let Err(e) = pipe.write_all(text).and_then(|()| pipe.flush()) {
-                        send_error.get_or_insert(format!(
-                            "could not send \"{}\": {e}",
-                            text.escape_ascii()
-                        ));
+                for action in released {
+                    match action {
+                        Action::Send(text) => {
+                            // `sends` made the pipe for every scenario with
+                            // a send.
+                            let pipe = stdin.as_mut().unwrap();
+                            if let Err(e) = pipe.write_all(text).and_then(|()| pipe.flush()) {
+                                send_error.get_or_insert(format!(
+                                    "could not send \"{}\": {e}",
+                                    text.escape_ascii()
+                                ));
+                            }
+                            record(format!("xtask: sent \"{}\"", text.escape_ascii()));
+                        }
+                        Action::Screendump(name) => {
+                            // Every scenario with a screendump has a monitor.
+                            // QEMU answers once the file is written, before
+                            // any later step's text reaches the guest.
+                            let ppm = screen_files(dir, name)[0].clone();
+                            match qmp.as_mut().unwrap().screendump(&ppm, deadline) {
+                                Ok(()) => {
+                                    record(format!("xtask: screendump \"{name}\""));
+                                    screens.push((name, ppm));
+                                }
+                                Err(e) => {
+                                    record(format!("xtask: screendump \"{name}\" failed"));
+                                    screendump_errors.push(format!("screendump {name:?}: {e}"));
+                                }
+                            }
+                        }
                     }
-                    record(format!("xtask: sent \"{}\"", text.escape_ascii()));
                 }
                 // A failed `next:` is the scenario's failure, and no later
                 // line can mend it: end the boot now.
@@ -556,13 +712,31 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
         )),
         (Some(_), false) => {}
     }
+    why.extend(screendump_errors);
+
+    // Only a run that passed everything else may bless its screens: a
+    // failed one may show a panic, or the wrong moment.
+    let bless = goldens.bless && why.is_empty();
+    if goldens.bless && !bless && !screens.is_empty() {
+        why.push("--bless wrote no golden, since the scenario failed".into());
+    }
+    let mut notes = Vec::new();
+    for (name, ppm) in &screens {
+        match check_screen(sc, name, ppm, goldens, bless) {
+            Ok(note) => notes.extend(note),
+            Err(e) => why.push(e),
+        }
+    }
 
     let mut report = String::new();
     if why.is_empty() {
         // 64 MiB per scenario adds up to gigabytes per run; a failure
         // keeps its image beside the log, to boot again by hand.
         fs::remove_file(&disk)?;
-        writeln!(report, "PASS {} ({elapsed:.1} s)", sc.name)?
+        writeln!(report, "PASS {} ({elapsed:.1} s)", sc.name)?;
+        for note in notes {
+            writeln!(report, "  {note}")?;
+        }
     } else {
         writeln!(
             report,
@@ -579,6 +753,102 @@ fn run_one(sc: &Scenario, art: &Artifacts, dir: &Path) -> Result<(bool, String)>
         }
     }
     Ok((why.is_empty(), report))
+}
+
+/// A screendump's files beside its scenario's log: QEMU's PPM, deleted once
+/// read; the screen as PNG, kept; and the difference from the golden, made
+/// only when they differ.
+fn screen_files(dir: &Path, name: &str) -> [PathBuf; 3] {
+    ["ppm", "png", "diff.png"].map(|ext| dir.join(format!("{name}.{ext}")))
+}
+
+/// Turns the screendump `name`'s PPM into a PNG beside it and compares it
+/// with its golden, pixel for pixel. A missing or different golden fails
+/// the check, unless `bless`, which writes the screen as the golden and
+/// returns a note saying so.
+fn check_screen(
+    sc: &Scenario,
+    name: &str,
+    ppm: &Path,
+    goldens: &Goldens,
+    bless: bool,
+) -> std::result::Result<Option<String>, String> {
+    let fail = |e: String| format!("screendump {name:?}: {e}");
+    let [_, png, diff] = screen_files(ppm.parent().unwrap(), name);
+    let bytes = fs::read(ppm).map_err(|e| fail(format!("{}: {e}", rel(ppm))))?;
+    let screen = screen::read_ppm(&bytes).map_err(|e| fail(format!("{}: {e}", rel(ppm))))?;
+    let _ = fs::remove_file(ppm);
+    let encoded = screen::encode_png(&screen, &[("Source", &goldens.qemu)]);
+    fs::write(&png, &encoded).map_err(|e| fail(format!("{}: {e}", rel(&png))))?;
+
+    let path = goldens.dir.join(format!("{name}.png"));
+    let golden = match fs::read(&path) {
+        Ok(bytes) => screen::decode_png(&bytes).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    };
+    let difference = match &golden {
+        Ok(Some(g)) => screen::compare(&screen, &g.image),
+        _ => None,
+    };
+    if matches!(golden, Ok(Some(_))) && difference.is_none() {
+        return Ok(None);
+    }
+    let bless_hint = format!("`cargo xtask test {} --bless` makes it the golden", sc.name);
+    if bless {
+        fs::create_dir_all(&goldens.dir).map_err(|e| fail(e.to_string()))?;
+        fs::write(&path, &encoded).map_err(|e| fail(format!("{}: {e}", rel(&path))))?;
+        let was = match (&golden, &difference) {
+            (Ok(None), _) => "new".to_string(),
+            (Err(e), _) => format!("the old one was unreadable: {e}"),
+            (_, Some(d)) => format!("{d}"),
+            (Ok(Some(_)), None) => unreachable!("returned above"),
+        };
+        return Ok(Some(format!(
+            "blessed {} ({was}), {} bytes",
+            rel(&path),
+            encoded.len()
+        )));
+    }
+    let golden = match golden {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            return Err(fail(format!(
+                "no golden {}; the screen is in {}, and {bless_hint}",
+                rel(&path),
+                rel(&png)
+            )));
+        }
+        Err(e) => {
+            return Err(fail(format!(
+                "golden {}: {e}; the screen is in {}, and {bless_hint}",
+                rel(&path),
+                rel(&png)
+            )));
+        }
+    };
+    let difference = difference.unwrap();
+    let shown = match difference {
+        screen::Difference::Pixels { .. } => {
+            let image = screen::difference_image(&screen, &golden.image);
+            let encoded = screen::encode_png(&image, &[]);
+            fs::write(&diff, encoded).map_err(|e| fail(format!("{}: {e}", rel(&diff))))?;
+            format!(", where they differ in magenta in {}", rel(&diff))
+        }
+        screen::Difference::Size(..) => String::new(),
+    };
+    let qemu = golden
+        .text
+        .iter()
+        .find(|(k, _)| k == "Source")
+        .filter(|(_, v)| *v != goldens.qemu)
+        .map(|(_, v)| format!("; the golden came from {v:?}, this is {:?}", goldens.qemu))
+        .unwrap_or_default();
+    Err(fail(format!(
+        "differs from {}: {difference}{qemu}; the screen is in {}{shown}; if it is right, {bless_hint}",
+        rel(&path),
+        rel(&png)
+    )))
 }
 
 #[cfg(test)]
@@ -603,6 +873,10 @@ expect: TEST PASS   # the kernel's success marker
 
     fn next(n: &str) -> Step {
         Step::Next(n.into())
+    }
+
+    fn screendump(n: &str) -> Step {
+        Step::Screendump(n.into())
     }
 
     #[test]
@@ -859,11 +1133,17 @@ expect: TEST PASS
         assert!(m.feed("root: starting").is_empty());
         assert!(m.feed("focus 3 (b)").is_empty(), "too early");
         assert_eq!(m.waiting_for(), Some("console: input next"));
-        assert_eq!(m.feed("console: input next"), [b"\x143to b\r"]);
+        assert_eq!(
+            m.feed("console: input next"),
+            [Action::Send(b"\x143to b\r")]
+        );
         assert_eq!(m.waiting_for(), Some("focus 3 (b)"));
         assert!(m.feed("[console] focus 3 (b)").is_empty());
         // Consecutive sends go together, in order.
-        assert_eq!(m.feed("b: read \"to b\""), [&b"\x142"[..], b"hi a\r"]);
+        assert_eq!(
+            m.feed("b: read \"to b\""),
+            [Action::Send(b"\x142"), Action::Send(b"hi a\r")]
+        );
         assert!(!m.done());
         assert!(m.feed("a: read \"hi a\"").is_empty());
         assert!(m.done());
@@ -875,7 +1155,7 @@ expect: TEST PASS
         let steps = vec![expect("prompt"), send(b"x\r"), expect("got")];
         let mut m = Matcher::new(&steps);
         // "got" was printed before the text was written.
-        assert_eq!(m.feed("prompt; got nothing yet"), [b"x\r"]);
+        assert_eq!(m.feed("prompt; got nothing yet"), [Action::Send(b"x\r")]);
         assert_eq!(m.waiting_for(), Some("got"));
         m.feed("got x");
         assert!(m.done());
@@ -885,7 +1165,7 @@ expect: TEST PASS
     fn matcher_releases_trailing_sends_with_the_last_expect() {
         let steps = vec![expect("ready"), send(b"bye\r")];
         let mut m = Matcher::new(&steps);
-        assert_eq!(m.feed("ready"), [b"bye\r"]);
+        assert_eq!(m.feed("ready"), [Action::Send(b"bye\r")]);
         assert!(m.done());
         assert_eq!(m.waiting_for(), None);
     }
@@ -969,5 +1249,274 @@ expect: TEST PASS
         let all = load_dir(&crate::root().join("tests/qemu")).unwrap();
         assert!(all.iter().any(|s| s.name == "hello"));
         assert!(all.iter().any(|s| s.name == "panic"));
+    }
+
+    #[test]
+    fn parses_screendumps() {
+        let s = parse(
+            "tui",
+            "\
+exit: success
+expect: tui: drawn
+screendump: tui-main   # tests/qemu/golden/tui-main.png
+send: q
+expect: entering kernel
+next: root: microL4
+screendump: tui_2
+expect: TEST PASS
+",
+        )
+        .unwrap();
+        assert_eq!(
+            s.steps,
+            vec![
+                expect("tui: drawn"),
+                screendump("tui-main"),
+                send(b"q"),
+                expect("entering kernel"),
+                next("root: microL4"),
+                screendump("tui_2"),
+                expect("TEST PASS"),
+            ]
+        );
+        assert_eq!(s.screendumps().collect::<Vec<_>>(), ["tui-main", "tui_2"]);
+        for (text, why) in [
+            (
+                "exit: success\nscreendump: a\nexpect: x\n",
+                "2: a `screendump:` needs",
+            ),
+            (
+                "exit: success\nexpect: x\nsend: y\nscreendump: a\n",
+                "needs an `expect:` or `next:` right above it",
+            ),
+            (
+                "exit: success\nexpect: x\nscreendump: a\nscreendump: b\n",
+                "needs an `expect:` or `next:` right above it",
+            ),
+            (
+                "exit: success\nexpect: x\nscreendump: a\nnext: y\n",
+                "a `next:` needs an `expect:` or `next:`",
+            ),
+            (
+                "exit: success\nexpect: x\nscreendump:   # none\n",
+                "empty screendump",
+            ),
+            (
+                "exit: success\nexpect: x\nscreendump: a\nexpect: y\nscreendump: a\n",
+                "5: a second screendump named \"a\"",
+            ),
+        ] {
+            let e = parse("t", text).unwrap_err().to_string();
+            assert!(e.contains(why), "{text:?} gave {e:?}, wanted {why:?}");
+        }
+        // The name becomes a file name in tests/qemu/golden/.
+        for name in ["Tui", "../tui", "tui.png", "a b", "tui/x", "é"] {
+            let e = parse(
+                "t",
+                &format!("exit: success\nexpect: x\nscreendump: {name}\n"),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                e.contains("lowercase letters, digits"),
+                "{name:?} gave {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn screendump_names_are_unique_across_scenarios() {
+        let a = parse("a", "exit: success\nexpect: x\nscreendump: one\n").unwrap();
+        let b = parse("b", "exit: success\nexpect: x\nscreendump: two\n").unwrap();
+        let c = parse("c", "exit: success\nexpect: x\nscreendump: one\n").unwrap();
+        let mut all = vec![a, b];
+        check_screendump_names(&all).unwrap();
+        all.push(c);
+        let e = check_screendump_names(&all).unwrap_err().to_string();
+        assert_eq!(
+            e,
+            "c.scenario and a.scenario both have a screendump named \"one\""
+        );
+    }
+
+    #[test]
+    fn matcher_releases_screendumps_in_step_order() {
+        let steps = vec![
+            expect("drawn"),
+            screendump("a"),
+            send(b"q"),
+            expect("redrawn"),
+            screendump("b"),
+            expect("more"),
+            expect("end"),
+        ];
+        let mut m = Matcher::new(&steps);
+        assert!(m.feed("not yet").is_empty());
+        // The screendump comes before the send it precedes.
+        assert_eq!(
+            m.feed("drawn; redrawn"),
+            [Action::Screendump("a"), Action::Send(b"q")]
+        );
+        assert_eq!(m.waiting_for(), Some("redrawn"));
+        // Matching goes on along the line after a screendump, unlike after
+        // a send.
+        assert_eq!(m.feed("redrawn more"), [Action::Screendump("b")]);
+        assert_eq!(m.waiting_for(), Some("end"));
+        assert!(m.feed("end").is_empty());
+        assert!(m.done());
+    }
+
+    /// A directory of its own under target/xtask/unit/ for a test's files.
+    fn unit_dir(name: &str) -> PathBuf {
+        let dir = crate::xtask_dir().join("unit").join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// QEMU's PPM of `img`, written where its screendump would be.
+    fn write_ppm(dir: &Path, name: &str, img: &screen::Image) -> PathBuf {
+        let ppm = screen_files(dir, name)[0].clone();
+        let mut bytes = format!("P6\n{} {}\n255\n", img.width, img.height).into_bytes();
+        bytes.extend_from_slice(&img.rgb);
+        fs::write(&ppm, bytes).unwrap();
+        ppm
+    }
+
+    #[test]
+    fn checks_screens_against_goldens() {
+        let dir = unit_dir("checks_screens_against_goldens");
+        let sc = parse("tui", "exit: success\nexpect: x\nscreendump: s\n").unwrap();
+        let mut goldens = Goldens {
+            dir: dir.join("golden"),
+            bless: false,
+            qemu: "QEMU emulator version 8.2.2".into(),
+        };
+        let golden = goldens.dir.join("s.png");
+        let [_, png, diff] = screen_files(&dir, "s");
+        let img = screen::Image::new(4, 3, (0..36).map(|i| i * 7).collect()).unwrap();
+        let check = |goldens: &Goldens, img: &screen::Image| {
+            let ppm = write_ppm(&dir, "s", img);
+            let result = check_screen(&sc, "s", &ppm, goldens, goldens.bless);
+            assert!(!ppm.exists(), "the PPM is deleted");
+            assert_eq!(
+                screen::decode_png(&fs::read(&png).unwrap()).unwrap().image,
+                *img
+            );
+            result
+        };
+
+        // No golden: the screen is kept, and the message says how to bless it.
+        let e = check(&goldens, &img).unwrap_err();
+        assert!(e.starts_with("screendump \"s\": no golden "), "{e}");
+        assert!(
+            e.contains("unit/checks_screens_against_goldens/s.png, and `cargo xtask test tui --bless` makes it the golden"),
+            "{e}"
+        );
+        assert!(!golden.exists());
+
+        goldens.bless = true;
+        let note = check(&goldens, &img).unwrap().unwrap();
+        assert!(
+            note.starts_with("blessed ") && note.contains("golden/s.png (new), "),
+            "{note}"
+        );
+        let blessed = screen::decode_png(&fs::read(&golden).unwrap()).unwrap();
+        assert_eq!(blessed.image, img);
+        assert_eq!(blessed.text, [("Source".into(), goldens.qemu.clone())]);
+
+        // The same screen matches, with or without --bless, and leaves the
+        // golden alone.
+        let before = fs::metadata(&golden).unwrap().modified().unwrap();
+        assert_eq!(check(&goldens, &img), Ok(None));
+        goldens.bless = false;
+        assert_eq!(check(&goldens, &img), Ok(None));
+        assert_eq!(fs::metadata(&golden).unwrap().modified().unwrap(), before);
+        assert!(!diff.exists());
+
+        // One pixel off, from another QEMU: a difference image beside it.
+        let mut off = img.clone();
+        off.rgb[3 * 5] ^= 1;
+        goldens.qemu = "QEMU emulator version 9.0.0".into();
+        let e = check(&goldens, &off).unwrap_err();
+        assert!(
+            e.contains("golden/s.png: 1 pixel differs, in x 1-1, y 1-1"),
+            "{e}"
+        );
+        assert!(
+            e.contains("the golden came from \"QEMU emulator version 8.2.2\", this is \"QEMU emulator version 9.0.0\""),
+            "{e}"
+        );
+        assert!(e.contains("where they differ in magenta in "), "{e}");
+        let d = screen::decode_png(&fs::read(&diff).unwrap()).unwrap().image;
+        assert_eq!(d, screen::difference_image(&off, &img));
+
+        // Another size: no difference image.
+        fs::remove_file(&diff).unwrap();
+        let small = screen::Image::new(4, 2, img.rgb[..24].to_vec()).unwrap();
+        let e = check(&goldens, &small).unwrap_err();
+        assert!(e.contains("the screen is 4x2, the golden 4x3"), "{e}");
+        assert!(!e.contains("magenta"), "{e}");
+        assert!(!diff.exists());
+
+        // --bless takes the new screen, and replaces a golden it cannot read.
+        goldens.bless = true;
+        let note = check(&goldens, &off).unwrap().unwrap();
+        assert!(
+            note.contains("(1 pixel differs, in x 1-1, y 1-1)"),
+            "{note}"
+        );
+        assert_eq!(
+            screen::decode_png(&fs::read(&golden).unwrap())
+                .unwrap()
+                .image,
+            off
+        );
+        fs::write(&golden, b"not a PNG").unwrap();
+        let note = check(&goldens, &img).unwrap().unwrap();
+        assert!(
+            note.contains("(the old one was unreadable: PNG: no PNG signature)"),
+            "{note}"
+        );
+        goldens.bless = false;
+        fs::write(&golden, b"not a PNG").unwrap();
+        let e = check(&goldens, &img).unwrap_err();
+        assert!(
+            e.contains("golden/s.png: PNG: no PNG signature; the screen is in"),
+            "{e}"
+        );
+
+        // A PPM QEMU never wrote, or a bad one.
+        let ppm = screen_files(&dir, "s")[0].clone();
+        let e = check_screen(&sc, "s", &ppm, &goldens, false).unwrap_err();
+        assert!(
+            e.starts_with("screendump \"s\": ") && e.contains("s.ppm: "),
+            "{e}"
+        );
+        fs::write(&ppm, b"P5\n1 1\n255\n\0").unwrap();
+        let e = check_screen(&sc, "s", &ppm, &goldens, false).unwrap_err();
+        assert!(e.contains("not a binary PPM"), "{e}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn repo_goldens_are_used_and_read() {
+        // Each golden is a PNG xtask reads, named by a scenario's
+        // screendump: one no scenario takes is stale.
+        let all = load_dir(&crate::root().join("tests/qemu")).unwrap();
+        let names: Vec<&str> = all.iter().flat_map(|s| s.screendumps()).collect();
+        let dir = crate::root().join("tests/qemu/golden");
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let file = path.file_name().unwrap().to_string_lossy();
+            let name = file.strip_suffix(".png").unwrap_or_else(|| {
+                panic!("{file}: tests/qemu/golden/ holds only screendump goldens, *.png")
+            });
+            assert!(
+                names.contains(&name),
+                "no scenario takes screendump {name:?}"
+            );
+            screen::decode_png(&fs::read(&path).unwrap()).unwrap();
+        }
     }
 }
