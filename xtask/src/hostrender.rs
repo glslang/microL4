@@ -202,11 +202,26 @@ fn tui_screendumps_are_the_host_render() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The moments are the `tui` scenario's screendumps: each golden here
-/// belongs to a step that takes the screen.
+/// The moments are the `tui` scenario's screendumps, and the Hyper-V
+/// check's: each golden here belongs to a step that takes the screen. The
+/// Hyper-V check's scenarios are in the harness's format, which
+/// `Test-L4Vhdx.ps1 -Scenario` follows.
 #[test]
 fn the_moments_are_the_scenarios_screendumps() {
     let names: Vec<&str> = MOMENTS.iter().map(|(n, _)| *n).collect();
+    let hyperv = |name: &str| {
+        let path = crate::root().join(format!("tools/hyperv/{name}.scenario"));
+        scenario::parse(name, &fs::read_to_string(&path).unwrap()).unwrap()
+    };
+    let tui = hyperv("m8-tui");
+    assert_eq!(tui.screendumps().collect::<Vec<_>>(), names, "m8-tui");
+    assert_eq!(tui.cmdline, "test=tui");
+    let release = hyperv("m8-release");
+    assert_eq!(release.screendumps().count(), 0);
+    assert_eq!(
+        (release.cmdline.as_str(), release.kernel),
+        ("test=release", crate::compile::Kernel::Release)
+    );
     // tests/qemu/tui.scenario is builder W's; once it is in the tree its
     // screendumps must be these.
     let qemu = crate::root().join("tests/qemu/tui.scenario");
