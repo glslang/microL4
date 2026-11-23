@@ -242,7 +242,11 @@ impl Uart {
             rx: Ring::new(),
             held: None,
             held_bytes: [0; MAX_BYTES],
-            stats: UartStats::default(),
+            // Stats MR8 reports the burst setup chose.
+            stats: UartStats {
+                burst: burst as u64,
+                ..UartStats::default()
+            },
         };
         dev.ack();
         let out = uart.service(dev);
