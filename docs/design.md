@@ -5318,13 +5318,17 @@ statics are a copy of root's), checks the words again
 (`fb::Geometry::from_words`, which returns `None` for words it refuses, and
 term panics) and makes a `&'static mut [u32]` of `stride × height` pixels at
 the first pixel and a `&'static mut [u64]` of the state's words. With the
-pixel slice of root's write-combining check (`clear` in
-`user/root/src/tui.rs`, [`fb`](#fb)), these are the only `unsafe` blocks M8
-adds outside libsys, whose one more is `libsys::cpu::store_fence`'s
-`sfence`. Their `SAFETY:` comments rest on root having mapped exactly those
-pages there, read-write, in this VSpace and no other, and on every bit
-pattern being a valid `u32` and `u64`. Then it calls `term::run`, which,
-like `uart` and `console`, is `#![forbid(unsafe_code)]`.
+pixel slice and the TSC read of root's write-combining check (`clear` and
+`tsc` in `user/root/src/tui.rs`, [`fb`](#fb)), these are the only `unsafe`
+blocks M8 adds outside libsys, whose one more is
+`libsys::cpu::store_fence`'s `sfence`. The slices' `SAFETY:` comments rest
+on root having mapped exactly those pages there, read-write, in this VSpace
+and no other, and on every bit pattern being a valid `u32` and `u64`;
+`tsc` is an `rdtsc` without `nomem`, so that, as with `store_fence`, no
+store of the timed clear moves across it (`libsys::rdtsc` is `nomem`,
+which lets the compiler move stores across it). Then `term_main` calls
+`term::run`, which, like `uart` and `console`, is
+`#![forbid(unsafe_code)]`.
 
 #### Capabilities
 
@@ -5382,10 +5386,20 @@ questions](#open-questions)).
 `watch`, whatever root is waiting on, as a uart or console fault does
 ([Failures](#failures)); tui, blocked in a call to the dead term, stays
 blocked, which no longer matters. A tui fault reaches root on D, where root
-waits once both threads run; root reports it through console and fails the
-test. A term panic prints through `DebugPutChar` and ends with
-`libsys::exit(1)` on a debug kernel, and faults to `watch` on a release
-kernel, as M7's servers do.
+waits once both threads run; root reports it through console as `TEST
+FAIL: tui fault <label> (<kind>), MR0 to MR3 <words>`, the words of
+`watch`'s line (`root::check::tui::OnD`), and fails the test. A term panic
+prints through `DebugPutChar` and ends with `libsys::exit(1)` on a debug
+kernel, and faults to `watch` on a release kernel, as M7's servers do.
+
+Two review scenarios, `term_fault` and `tui_fault`
+([Scenarios](#scenarios-1)), make each fault once tui has drawn its first
+frame, with root waiting in a call to term, or on D: root suspends the
+thread, writes its `rip` 0 with `TCB_WriteRegisters` and resumes it, and
+its fetch from page 0, which nothing maps, is a `VMFault` with MR0 to MR3
+`0x0 0x0 0x1 0x14`. Both expect the failure line exactly, with `next:`
+lines that put the halt's two lines right after it. A term panic is not
+tested: a fault is what reaches `watch` either way.
 
 ### `fb`
 
@@ -5461,12 +5475,14 @@ fails with the reason; `test=nofb` passes.
 tables and every framebuffer frame into root's own VSpace at `WINDOW`,
 first `Uncached`, fills the visible area once with 0 and times it with the
 TSC, unmaps the frames, then does the same `WriteCombining`; each fill ends
-with `sfence` before its second TSC read. Root prints `fb: full clear:
-uncached <n> us, write-combining <m> us`. `PageTable_Unmap`
-(`libsys::vspace::unmap_table`) then leaves the page tables unmapped and
-empty, so they move to term's VSpace (Map takes an unmapped, empty
-structure). QEMU's TCG has no cache model, so the two times, about a
-millisecond each, mean nothing there; on Hyper-V a write-combining clear
+with `sfence` before its second TSC read, and both reads (`tsc`) are
+compiler barriers, so the fill's stores stay between them. Root prints
+`fb: full clear: uncached <n> us, write-combining <m> us`.
+`PageTable_Unmap` (`libsys::vspace::unmap_table`) then leaves the page
+tables unmapped and empty, so they move to term's VSpace (Map takes an
+unmapped, empty structure). QEMU's TCG has no cache model, so the two
+times, about a millisecond each, mean nothing there; on Hyper-V a
+write-combining clear
 several times faster than the uncached one confirms that a PAT type of WC
 wins over the firmware's MTRR type for the framebuffer [H10]. Only a single
 mapping of each frame exists at any time, apart from the direct map's UC
@@ -6128,14 +6144,18 @@ goldens' size does not rest on QEMU's default). Root prints its
 summary, starts `watch`, uart and console, attaches as client 1, points its
 output at console, checks the framebuffer and prints its `fb:` line, runs
 the write-combining check, starts term and tui and prints `servers: term
-and tui started; root CNode <k> of 4096 slots used`, then waits on D. The
-scenario (`tests/qemu/tui.scenario`) expects:
+and tui started; root CNode <k> of 4096 slots used`. It then shows every
+framebuffer frame it holds mapped, and prints the priorities it set with
+the MCPs it reads back, below; then it waits on D. The scenario
+(`tests/qemu/tui.scenario`) expects:
 
 ```text
 expect: root: cmdline "test=tui"
 expect: fb: 1280x800 BGR, stride 1280, 4000 KiB at 0x80000000: 6 untyped, 1 2 MiB and 488 4 KiB frames; 160x50 cells
 expect: fb: full clear: uncached
 expect: servers: term and tui started; root CNode
+expect: fb: all 489 frames are mapped: a second Frame_Map of each is refused as mapped, and a Frame_Remap without read for its rights
+expect: servers: priority as set, MCP as read back: console 150, 150; term 125, 125; tui 100, 100
 expect: tui: 160x50 terminal
 expect: tui: frame 1 drawn: Overview, item 1
 screendump: tui-main
@@ -6192,6 +6212,50 @@ its receive, root on D or in console's `Read`; keys, the only thing that
 moves them, come from the `send:` the harness writes after the image is
 taken.
 
+**The frames' mappings and the priorities.** Once term runs, root probes
+each framebuffer frame it holds twice, in `docs/abi.md`'s order of checks,
+which change nothing when they refuse: a second `Frame_Map`, into root's
+VSpace at `fb::WINDOW` + 1, which no frame size divides, must be refused
+with `InvalidCapability` 0, which the kernel checks before the alignment
+(an unmapped frame would be an `AlignmentError`); and a `Frame_Remap`
+asking no read right must be refused with `InvalidArgument` 0, which the
+kernel checks only after finding the frame mapped (an unmapped frame is
+`IllegalOperation`, and an empty slot `InvalidCapability` 0 to both, so this
+probe also tells a frame from no capability). `root::check::tui::mapped`
+decides; root prints `fb: all <n> frames are mapped: ...` or fails with
+the frame and both results. The probes show that each frame is mapped
+somewhere, not where: that the one mapping is in term's VSpace rests on
+`start_terminal` and review. No invocation reads a priority back, so root
+prints console's, term's and tui's as it set them, with each MCP read back:
+`TCB_SetPriority` of the thread to 256, with itself as the authority, is
+refused with a `RangeError` from 0 to that MCP and changes nothing.
+`check::tui::priorities` requires each MCP equal to its priority and
+console above term above tui.
+
+**`term_fault` and `tui_fault`** (review; `cmdline: test=term_fault` or
+`test=tui_fault`, the selftest kernel, the `tui` scenario's `qemu_args:`).
+Root starts everything as `test=tui` does, then reads a line as client 1,
+which has focus; the harness sends `\r` once `tui: frame 1 drawn` has
+matched, when tui waits in term's `Read` and term in its receive. Root
+prints `<test>: suspending <thread>, setting its rip to 0 and resuming it`,
+syncs, then suspends the thread, writes its `rip` 0 with
+`TCB_WriteRegisters` and resumes it. Its next fetch, from page 0, which no
+VSpace maps, is a `VMFault`: ip 0, address 0, a fetch, error code `0x14`.
+
+| Scenario | Root then | The fault | The run ends |
+| --- | --- | --- | --- |
+| `term_fault` | calls term's `Stats`, so it waits in a call to the dead term | on F with badge 3 | `watch`'s `TEST FAIL: term fault 5 (VMFault), MR0 to MR3 0x0 0x0 0x1 0x14` through `Polled`, then `DebugHalt(1)` |
+| `tui_fault` | waits on D for tui's report, as `test=tui` does | on D with badge 5 | root's `TEST FAIL: tui fault 5 (VMFault), MR0 to MR3 0x0 0x0 0x1 0x14` through console, then `exit(1)`: a `Sync` and `DebugHalt(1)` |
+
+Each expects root's line, then with `next:` the failure line whole and the
+halt's two lines (`dispatch: invocations preempted and restarted:` and
+`DEBUG HALT 1 from TCB`), so nothing is printed between them, and the
+run's failure status. Each forbids root's lines for the fault that did not
+come (`term answered Stats after its rip was set to 0`, `watch did not end
+the run`, `tui reported after its rip was set to 0`), `tui: frame 2`, which
+tui would print after any further frame, and `TEST PASS`. Neither takes a
+screendump: no golden shows these moments, and the run ends at the halt.
+
 **`nofb`** (`cmdline: test=nofb`, `qemu_args: -vga none`). OVMF finds no
 display, the loader passes no framebuffer, and root prints `fb: none: the
 loader found no GOP framebuffer`, starts no term and no tui, prints `nofb:
@@ -6238,19 +6302,31 @@ and frame counts in the `fb:` line, which the GOP's size decides, and
 as `l4-<name>.rgb565`; a screen it cannot save fails the run, which goes
 on to the end so that the log is whole. `-ConnectAfterSeconds <n>` starts
 the VM and opens the pipe only after `n` seconds; with `-Scenario`, the
-script then types the scenario's first `send:` at once, since the line that
-releases it was printed with no client on the pipe, requires only the steps
-after it, and prints how many of the `expect:` lines above that `send:`
-arrived once it connected. `Read-L4Com1.ps1` takes the script's two
-callbacks, one when the pipe connects and one per line, and writes its log
-even if one fails. `m8-release.scenario` expects `, burst 1`, which both
-`burst 15` and `burst 1` match, and forbids `, 0 THRE bursts`.
+script then follows the steps from the `expect:` right above the first
+`send:`, whose line may have been printed with no client on the pipe: it
+types that `send:` when its own line arrives or, if it never does, once no
+line at all has come for 10 seconds, and requires the steps after it. A
+transmitter that drains has dropped that line, and the root task, waiting
+in its `Read`, prints nothing more; one that waits sends what it held as
+soon as the pipe connects, and the boot's quiet stretches after that, the
+release kernel's own start the longest, should be far shorter (the whole
+`release` scenario takes about 2 seconds on QEMU's TCG). The script then
+prints how many of the `expect:` lines above that `send:`, from the first
+that starts `root: cmdline`, arrived, each counted wherever it comes: those
+are uart's, which waits for THRE interrupts and loses nothing, while the
+loader's polled writes give up after 100,000 polls a byte
+(`loader/src/serial.rs`), so its lines are lost by a transmitter that waits
+as well. `Read-L4Com1.ps1` takes the script's three callbacks, one when
+the pipe connects, one per line and one each second with no line, and
+writes its log even if one fails. `m8-release.scenario` expects `, burst
+1`, which both `burst 15` and `burst 1` match, and forbids `, 0 THRE
+bursts`.
 
 | Image | Run | The log must show | It settles |
 | --- | --- | --- | --- |
 | `tui` | `-Scenario m8-tui.scenario` | `cpu: hypervisor Hyper-V`; `bootinfo: framebuffer 0xf8000000-...`; `fb: 1024x768 BGR, stride 1024, ... ; 128x48 cells` with the GOP's size; `fb: full clear: uncached <n> us, write-combining <m> us`; `tui: 128x48 terminal`; `tui: frame 1 drawn`; `[console] focus 4 (term)` and `tui: frame 4 drawn` after the script's keys; `tui: quit after 4 keys`; `tui: read 8 bytes`; `term: stats:` with 0 ignored and 0 dropped; `TEST PASS`. The owner attaches the three thumbnails, which must match `tools/hyperv/golden/tui-*.png` by eye | the framebuffer found, handed out and mapped write-combining on Hyper-V; WC faster than UC [H10]; keys through the named pipe; Hyper-V's video window showing the GOP framebuffer after `ExitBootServices` |
 | `release` | `-Scenario m8-release.scenario`, the script typing the line | uart's line with `burst 15` (working FIFOs) or `burst 1`; `14 bytes received` and the line read whole, though its last 6 bytes stay below the receive trigger of 8, which only the character timeout delivers; THRE bursts above 0 | M7's 16550 questions: FIFOs, the character timeout, THRE interrupts |
-| `release` | again with `-ConnectAfterSeconds 20` | the script's `Of the N expect: lines above the first send:, K arrived` line: whether the lines written before the pipe had a client arrive once it connects (K = N, the transmitter waits) or are missing (K = 0, it drains), and that the run then goes on when the line is typed | whether a transmitter with no client on the pipe stalls uart's writes |
+| `release` | again with `-ConnectAfterSeconds 20 -TimeoutSeconds 30` (the reader's limit runs from the connect) | the script's `Of the 6 uart lines above the first send: (from 'root: cmdline'), K arrived` line: whether uart's lines written before the pipe had a client arrive once it connects (K = 6, the transmitter waits, and the line is typed when `release: type a line` arrives) or are missing (K = 0, it drains, and the line is typed after 10 seconds with no line), and that the run then goes on to `TEST PASS` | whether a transmitter with no client on the pipe stalls uart's writes |
 
 The API's documentation calls the thumbnail "raw RGB 565", two bytes a
 pixel, but gives no byte or row order: the script reads it as Windows'
@@ -6270,7 +6346,7 @@ host.
 | The raw client | crate `console` | `user/console/src/tests/raw.rs`, goldens for each raw rule: bytes unedited and unechoed, ESC sequences passing whole, the focus keys, Ctrl-T Ctrl-T, Ctrl-T and anything else, the full queue's BEL once per `Read`, `ReadRaw` at once, and the `ReadRaw` and `Read` badges; the proptest `eight_clients_against_a_model_of_their_lines`, whose model gains client 4 and `ReadRaw`, and checks its typed bytes reach the raw queue once, in order, unedited and unechoed |
 | The app | crate `tui` (`user/tui`), `no_std`, `#![forbid(unsafe_code)]`, on `libsys`: `App`, `Panel` and the console lines in `lib.rs`, the decoder in `keys.rs`, the sequences in `draw.rs`, the panels in `panels.rs`; `run` on the target only | `user/tui/src/tests.rs`: every key of the table, sequences with parameters, ESC and anything else, `every_split_of_every_sequence_decodes_the_same`, unknown keys' escapes, the size limits, `the_scenario_s_byte_stream`, the report's 255 bytes, `no_frame_uses_a_sequence_term_ignores`, `every_frame_draws_all_but_the_log`, the log's scrolling and quitting; the goldens (`tests/golden.rs`) on term and on the reference model (`tests/screen.rs`) |
 | The term protocol in libsys; the fence, attributes, `unmap_table` and retyping a named untyped | `libsys::proto`, `libsys::term`, `libsys::console`, `libsys::cpu`, `libsys::vspace`, `libsys::objects` | `TermSize` and `TermStats` round trips and `term_stats_show_what_the_scenario_matches`; `UartStats`'s text with its burst; `the_queues_match`; `the_store_fence_runs`; `attribute_words_are_the_abis`; `a_named_untyped_device_or_ram_places_at_its_watermark` |
-| Starting term and tui; the write-combining check; the verdicts | `user/root/src/servers.rs` (`start`'s NT, `framebuffer_objects`, `FbObjects`, `start_terminal`, `term_main`, `TERM_PRIORITY`, `TUI_PRIORITY`), `user/root/src/tui.rs` (`run`, `write_combining_check`), `user/root/src/nofb.rs`; `root::check::tui` (`user/root/src/check/tui.rs`) and `watch`'s line in `root::process` | `the_fb_line_on_qemu`, `the_fb_line_on_hyper_v`, `no_framebuffer`, `the_clear_and_started_lines`, `tui_must_report_the_typed_bytes`, `terms_counts`, `nofbs_line`; `watchs_line_for_each_fault`, with badge 3 |
+| Starting term and tui; the write-combining check; the mapping probes and the priorities; the fault tests; the verdicts | `user/root/src/servers.rs` (`start`'s NT, `framebuffer_objects`, `FbObjects`, `start_terminal`, whose `Terminal` keeps both TCBs, `term_main`, `TERM_PRIORITY`, `TUI_PRIORITY`), `user/root/src/tui.rs` (`run`, `fault` for `test=term_fault` and `test=tui_fault`, `start`, `mcp`, `write_combining_check`, `tsc`), `user/root/src/nofb.rs`; `root::check::tui` (`user/root/src/check/tui.rs`: `mapped`, `Priorities`, `OnD` among the rest) and `watch`'s line in `root::process` (`Fault`, which root's line for a tui fault shares) | `the_fb_line_on_qemu`, `the_fb_line_on_hyper_v`, `no_framebuffer`, `the_clear_and_started_lines`, `the_probes_show_a_frame_mapped`, `the_priorities_line`, `a_message_on_d_that_is_not_the_report`, `tui_must_report_the_typed_bytes`, `terms_counts`, `nofbs_line`; `watchs_line_for_each_fault`, with badge 3 |
 | `screendump:`, the golden images and the host render; the licence on the ESP | `xtask/src/scenario.rs`, `screen.rs` and `qemu.rs` (in xtask from 4d9d067), with `--bless` leaving a host-render golden; `xtask/src/hostrender.rs`, a test module; `xtask/src/image.rs`'s `LICENCES` | `parses_screendumps`, `screendump_names_are_unique_across_scenarios`, `matcher_releases_screendumps_in_step_order`, `checks_screens_against_goldens`, `bless_leaves_a_host_render_golden_as_it_is`, `repo_goldens_are_used_and_read`; PPM, PNG and comparison tests in `screen.rs`; QMP against a fake QEMU in `qemu.rs`; `tui_screendumps_are_the_host_render`, `the_moments_are_the_scenarios_screendumps` and `the_host_render_fills_the_framebuffer_and_its_margins`; `the_spleen_licence_goes_on_the_esp` |
 
 `cargo xtask test` runs the new crates' host tests beside M7's, and `cargo
@@ -6286,7 +6362,7 @@ tui, and what QEMU's display shows.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Only term's VSpace maps the framebuffer, read-write and write-combining; root maps it in its own VSpace only for the write-combining check, before term exists, and never two mappings of a frame at once; no other thread holds a capability that names a framebuffer frame | `servers::start_terminal` maps `fb::Plan`'s frames, which root keeps (`FbObjects`), into term's VSpace alone (`FbObjects::map_frames` with `WRITE_COMBINING`) and fills term's and tui's CNodes only from the entries it lists against `term::slot` and `tui::slot`, none a frame; `write_combining_check` (`user/root/src/tui.rs`) unmaps every frame after each clear (`FbObjects::unmap_frames`) and the page tables before `start_terminal` maps them again; `Frame_Map` refuses a frame capability already mapped; the `tui` scenario runs it; review. No test checks the mappings themselves | M8 |
+| Only term's VSpace maps the framebuffer, read-write and write-combining; root maps it in its own VSpace only for the write-combining check, before term exists, and never two mappings of a frame at once; no other thread holds a capability that names a framebuffer frame | `servers::start_terminal` maps `fb::Plan`'s frames, which root keeps (`FbObjects`), into term's VSpace alone (`FbObjects::map_frames` with `WRITE_COMBINING`) and fills term's and tui's CNodes only from the entries it lists against `term::slot` and `tui::slot`, none a frame; `write_combining_check` (`user/root/src/tui.rs`) unmaps every frame after each clear (`FbObjects::unmap_frames`) and the page tables before `start_terminal` maps them again; `Frame_Map` refuses a frame capability already mapped; the `tui` scenario runs it, and once term runs shows every frame root holds mapped: a second `Frame_Map` of each refused as mapped and a `Frame_Remap` without read refused for its rights, which the kernel checks only of a mapped frame (`root::check::tui::mapped`, host test `the_probes_show_a_frame_mapped`; the line `fb: all 489 frames are mapped`); review. That the one mapping is in term's VSpace, and no other thread's capabilities, rest on review | M8 |
 | No page is writable in two VSpaces, and no thread M8 adds holds a TCB, VSpace, untyped, paging, frame or Grant capability | as M7's invariant: `root::process::Plan` for the image (host test `m6s_image`) and `fill` against the slot tables, with no Grant in any right `start_terminal` gives; term's state frames retyped fresh and mapped once, in term's VSpace; review | M8 |
 | Every pixel term writes lies in the visible area, inside the framebuffer's frames; term never reads the framebuffer | `fb::Surface::fill` and `cell`, which bounds-check against `width` and `height`, and its lack of a read method; `Surface::new`, which needs `stride` × `height` pixels; `fb::Geometry::check`, which requires 4 × `stride` × `height` within `size` and the untyped tiling it, and `Geometry::from_words` in `term_main`; host tests `fill_writes_every_visible_pixel_and_no_padding`, `cells_are_cut_at_the_right_and_bottom_edges`, `a_surface_needs_its_pixels`, `a_stride_alignment_or_size_that_does_not_hold_the_pixels_is_bad_geometry`, `untyped_must_be_device_memory_tiling_the_framebuffer_in_order`, `the_words_round_trip_and_are_checked_again`, and term's `margins_stay_the_default_background_and_padding_is_never_written` | M8 |
 | When term replies to a `Write`, the framebuffer shows exactly the screen model's active buffer, cursor included, and the frame's writes have left the CPU's write-combining buffers | `term::Session::write`, which draws `Renderer::frame` and ends with `Surface::fence` (`term::Pixels`: `libsys::cpu::store_fence`) before `term::run` replies; the goldens' check of looks and pixels after every `Write` (`tests/golden.rs`); the proptests `random_streams_keep_the_invariants_however_they_are_split` and `frames_after_random_writes_equal_a_full_render`; `frames_after_each_write_leave_what_a_full_render_leaves`; the host render's check that frames drawn by damage equal `render::full`; the `tui` scenario's screendumps against the host render | M8 |
@@ -6294,8 +6370,8 @@ tui, and what QEMU's display shows.
 | term never blocks except in its receive on T and in calls to console, which always reply at once; it answers its client only by `ReplyRecv` or by `Send` on its saved slot | `term::run` (`user/term/src/run.rs`) receives with `recv` and `reply_recv` on slot 2, sends only on slot 5, and calls only console's `Attach` and `ReadRaw`; console answers `ReadRaw` at once and never saves it (`console::run`; host test `read_raw_takes_everything_at_once_possibly_nothing`); review | M8 |
 | Every byte typed while client 4 has focus, but the focus keys, reaches term's client once, in order, unedited and unechoed, unless a queue was full, when it is dropped: with BEL on COM1 in console's queue, counted in term's | console's `Terminal::input` and its raw queue; term's `server::Input`; console's raw goldens (`user/console/src/tests/raw.rs`, `a_full_queue_drops_and_rings_bel_once_per_read` among them) and the proptest `eight_clients_against_a_model_of_their_lines` with client 4; term's `keys_and_replies_queue_in_order` and `bytes_past_the_queues_512_are_dropped_and_counted`; the `tui` scenario, where `root::check::tui::report` requires the 8 bytes tui read and `check::tui::stats` 8 bytes from console and none dropped (host tests `tui_must_report_the_typed_bytes`, `terms_counts`) | M8 |
 | Routing stays a function of the byte stream alone, and no client can put an escape sequence on COM1 | client 4 is raw by its number (`console::RAW`; `console::decode` refuses its `Read` and any other client's `ReadRaw`); raw mode changes input only, and console shows client 4's output as every client's (M7's invariants hold unchanged); goldens `only_client_4_reads_raw_and_it_never_reads_lines` and `client_4_has_no_input_line_and_its_output_is_shown`, and the proptest | M7, M8 |
-| Priorities: console above term above tui | `servers.rs`'s `TERM_PRIORITY` (125) and `TUI_PRIORITY` (100), set by `spawn_server` with `TCB_SetSchedParams` with an equal MCP; review. Unlike M7's, no scenario prints them | M8 |
-| A term fault ends the run with failure, whatever root waits on, and a tui fault reaches root | term's fault endpoint F, badge `fault_badge::TERM` (3), to `watch`; tui's D (`tui::slot::REPORT`), on which root's `tui::run` fails anything but the report's label and badge; host test `watchs_line_for_each_fault`, with term's line; review. No scenario makes term or tui fault | M8 |
+| Priorities: console above term above tui | `servers.rs`'s `TERM_PRIORITY` (125) and `TUI_PRIORITY` (100), set by `spawn_server` with `TCB_SetSchedParams` with an equal MCP; the `tui` scenario's line `servers: priority as set, MCP as read back: console 150, 150; term 125, 125; tui 100, 100`, the priorities as root passed them, since no invocation reads one back, and each MCP read back from the `RangeError` of a refused `TCB_SetPriority`; `root::check::tui::priorities` (host test `the_priorities_line`); review | M8 |
+| A term fault ends the run with failure, whatever root waits on, and a tui fault reaches root | term's fault endpoint F, badge `fault_badge::TERM` (3), to `watch`; tui's D (`tui::slot::REPORT`), on which root's `tui::run` fails anything but the report's label and badge, naming a fault as `watch` does (`check::tui::OnD`); host tests `watchs_line_for_each_fault`, with term's line, and `a_message_on_d_that_is_not_the_report`; the review scenarios `term_fault`, where term faults while root waits in a call to it and `watch` ends the run with `TEST FAIL: term fault 5 (VMFault), ...`, and `tui_fault`, where root reports `TEST FAIL: tui fault 5 (VMFault), ...` from D and fails, each followed by nothing but the halt; review for the other states a fault can come in and for a term panic | M8 |
 | What the screen shows depends only on the framebuffer's size and the bytes typed | `tui::App` is pure; term draws no time, address or count; no cursor blink and no timer redraw; tui's goldens at both sizes (`the_panels_and_the_scenario_s_moments`) and `the_scenario_s_byte_stream`; the screendumps, which equal the host render | M8 |
 | The font's glyphs come from Spleen, whose licence notice travels with the source and the image, or are generated in the repository | `tools/spleen.py`, which takes the pinned tag's BDF and `LICENSE` only if their SHA-256s match; `user/term/src/font/spleen.rs`'s header and `LICENSE-spleen`; `xtask::image::LICENCES`, which puts it on the ESP as `\licenses\spleen.txt`; host tests `the_spleen_table_matches_its_header` and `the_spleen_licence_goes_on_the_esp` | M8 |
 
