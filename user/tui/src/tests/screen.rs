@@ -1,9 +1,10 @@
 //! A reference model of exactly the sequences tui may write, written from
 //! `docs/design.md`'s "The screen model" for the rows tui uses, for its
-//! host tests and goldens until term's own screen model checks them too
-//! (`golden.rs`). It panics on any other byte or sequence, so feeding it
-//! `App`'s output also checks that tui keeps to the sequences term acts
-//! on (`docs/design.md`, "`tui`": "tui uses only sequences term acts on").
+//! host tests, and for its goldens beside term's own screen model, which
+//! checks them too (`golden.rs`). It panics on any other byte or
+//! sequence, so feeding it `App`'s output also checks that tui keeps to
+//! the sequences term acts on (`docs/design.md`, "`tui`": "tui uses only
+//! sequences term acts on").
 //!
 //! Cells, the cursor with its pending wrap, the pen, the scroll region,
 //! both buffers with a saved cursor each, G0 as ASCII or DEC Special
