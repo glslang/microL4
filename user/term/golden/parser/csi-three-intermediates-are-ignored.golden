@@ -1,4 +1,4 @@
-# More than two intermediates: the sequence is dispatched as unknown.
+# More than two intermediates: the sequence is not dispatched but ignored.
 size: 10x2
 input: \e[ !$qx
 screen:
