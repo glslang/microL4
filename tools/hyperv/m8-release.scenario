@@ -1,0 +1,38 @@
+# The M8 Hyper-V check's release run (tools/hyperv/README.md, "At the M8
+# check"; docs/design.md, "The Hyper-V check"): tests/qemu/release.scenario's
+# steps with what differs on Hyper-V, for M7's 16550 questions. The release
+# kernel prints nothing; everything after the loader comes from uart. Root
+# issues no exit port, since this is not QEMU, and halts after TEST PASS;
+# the script turns the VM off. The line typed is 14 bytes, whose last 6
+# stay below the receive FIFO's trigger of 8, so only the character
+# timeout delivers them: the line must still be read whole. uart's burst
+# is 15 with working FIFOs or 1 without (both start "burst 1"), and its
+# THRE bursts must be above 0. Run it again with -ConnectAfterSeconds 20:
+# the script then types the line as soon as the pipe connects and reports
+# whether the lines printed before that arrived (the transmitter waits for
+# a client) or not (it drains); the steps after the send: must pass either
+# way.
+cmdline: test=release
+kernel: release
+exit: success
+expect: loader: microL4 loader
+expect: entering kernel
+next: root: microL4 root task
+expect: root: cmdline "test=release"
+expect: root: image frames: slots
+expect: root: empty: slots
+expect: release: watch (priority 255), uart (priority 200) with the COM1 IOPort and IRQ 4, console (priority 150); exit port none: not QEMU
+expect: release: a probe thread's DebugPutChar, DebugHalt, DebugDumpScheduler and reserved numbers 19 and 31 each raised UnknownSyscall with the number in MR18
+expect: release: type a line
+send: release input\r
+expect: release: read "release input"
+expect: release: uart:
+expect: , 14 bytes received,
+expect: , 0 overruns, 0 line errors,
+expect: , burst 1                  # 15 with working FIFOs, 1 without
+expect: TEST PASS
+forbid: microL4 kernel
+forbid: bootinfo:
+forbid: DEBUG HALT
+forbid: KERNEL PANIC
+forbid: , 0 THRE bursts

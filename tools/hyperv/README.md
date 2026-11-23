@@ -128,6 +128,62 @@ comes after it and is never read. Each log must show:
 The `fpu:` and `entry:` lines show XCR0, the XSAVE size, the system-call MSRs
 and `IA32_TSC_AUX` as Hyper-V gives them to the kernel.
 
+## At the M8 check
+
+CI builds `microl4-vhdx-m8-check`: `tui/disk.vhdx` boots `test=tui` on the
+selftest kernel, `release/disk.vhdx` boots `test=release` on the release
+kernel, and beside them are the two scenarios the script follows,
+`m8-tui.scenario` and `m8-release.scenario` (copies of this folder's), and
+`golden/tui-main.png`, `tui-colours.png` and `tui-quit.png`: the screens
+`term` must show at 1024x768, drawn on the host by xtask's
+`tui_screendumps_are_the_host_render` from the same bytes `tui` sends.
+Download it and run the three checks:
+
+```powershell
+gh run download --repo glslang/microL4 --name microl4-vhdx-m8-check --dir m8-check <run-id>
+
+.\Test-L4Vhdx.ps1 -VhdxPath .\m8-check\tui\disk.vhdx -Scenario .\m8-check\m8-tui.scenario `
+    -TimeoutSeconds 120 -LogPath m8-tui.log
+.\Test-L4Vhdx.ps1 -VhdxPath .\m8-check\release\disk.vhdx -Scenario .\m8-check\m8-release.scenario `
+    -LogPath m8-release.log
+.\Test-L4Vhdx.ps1 -VhdxPath .\m8-check\release\disk.vhdx -Scenario .\m8-check\m8-release.scenario `
+    -ConnectAfterSeconds 20 -LogPath m8-release-late.log
+```
+
+`-Scenario` follows a scenario file in the QEMU harness's format, as
+`cargo xtask test` does, over COM1's pipe: each `expect:` must appear after
+the one before it, a `next:` must start the very next line, a `send:` is
+typed into COM1 once the `expect:` lines above it have matched (`\x14` is
+Ctrl-T, `\e` ESC, `\r` Enter), and no line may contain a `forbid:` text.
+At each `screendump:` the script saves the VM's screen, through Hyper-V's
+`Msvm_VirtualSystemManagementService.GetVirtualSystemThumbnailImage` at
+1024x768, as `l4-<name>.png` beside the log, and the bytes the API
+returned as `l4-<name>.rgb565`. Its documentation says only that they are
+"raw RGB 565"; the script reads them as Windows' 16-bit RGB 565 bitmaps
+are laid out (two bytes a pixel, little-endian, red in the top five bits,
+rows from the top). If a PNG looks scrambled or its colours swapped, that
+guess is wrong: say so in the PR, and keep the `.rgb565` files.
+`-ConnectAfterSeconds 20` starts the VM and opens the pipe only 20 seconds
+later; the script then types the scenario's first `send:` at once, since
+the line that releases it was printed with no client on the pipe, requires
+only the steps after it, and prints how many of the `expect:` lines above
+that `send:` arrived once it connected.
+
+Paste the three logs into the PR and attach the three screens. The screens
+must match `m8-check\golden\tui-*.png` by eye: RGB 565 keeps 5 or 6 bits a
+channel, so the colours differ slightly, but every cell's glyph and colour
+must be the golden's.
+
+| Run | The log must show | It settles |
+| --- | --- | --- |
+| `m8-tui` | `cpu: hypervisor Hyper-V`; `bootinfo: framebuffer 0xf8000000-...`; `fb: 1024x768 BGR, stride 1024, ...; 128x48 cells`, with the GOP's size and frame counts; `fb: full clear: uncached <n> us, write-combining <m> us`; `tui: 128x48 terminal`; `tui: frame 1 drawn`; `[console] focus 4 (term)` and `tui: frame 4 drawn` after the script's keys; `tui: quit after 4 keys`; `tui: read 8 bytes`; `term: stats:` with 0 ignored and 0 dropped; `TEST PASS`. Record both clear times | the framebuffer found, handed out and mapped write-combining on Hyper-V; whether write-combining wins over the firmware's MTRR type (H10: the WC clear several times faster than the UC one); keys through the named pipe; Hyper-V's video showing the GOP framebuffer after `ExitBootServices` |
+| `m8-release` | uart's line with `burst 15` (working FIFOs) or `burst 1`; `14 bytes received` and the line read whole, though its last 6 bytes stay below the receive trigger of 8, which only the character timeout delivers; THRE bursts above 0 | M7's 16550 questions: FIFOs, the character timeout, THRE interrupts |
+| `m8-release-late` | the script's `Of the N expect: lines above the first send:, K arrived` line: K = N if the lines written before the pipe had a client arrive once it connects (the transmitter waits), 0 if they are gone (it drains; M0 saw Hyper-V drop COM1 output with no client); then the rest of the run, `release: read "release input"` to `TEST PASS` | whether a transmitter with no client on the pipe stalls `uart`'s writes |
+
+The `-Scenario` and `-ConnectAfterSeconds` code and the thumbnail were
+written without a Windows host to run them. If the script itself fails,
+paste its error into the PR with the log, which is written all the same.
+
 ## Optional: the M4 check
 
 The M4 self-test still runs on Hyper-V, though CI no longer uploads its
@@ -178,7 +234,8 @@ tables.
 | `New-L4Vm.ps1` | creates the VM, once |
 | `Set-L4Vhdx.ps1` | turns the VM off and swaps in a new VHDX |
 | `Read-L4Com1.ps1` | reads COM1 from the named pipe until a marker line |
-| `Test-L4Vhdx.ps1` | all of the above, plus the pass or fail verdict |
+| `Test-L4Vhdx.ps1` | all of the above, plus the pass or fail verdict; with `-Scenario`, follows a scenario file, typing into COM1 and saving the screen (M8) |
+| `m8-tui.scenario`, `m8-release.scenario` | the M8 check's scenarios; `golden/` holds the screens `m8-tui` must show |
 
 To watch COM1 by hand instead, start the VM and run `.\Read-L4Com1.ps1`, or
 connect PuTTY to the serial line `\\.\pipe\l4-com1`.

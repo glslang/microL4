@@ -1,0 +1,44 @@
+# The M8 Hyper-V check's tui run (tools/hyperv/README.md, "At the M8
+# check"; docs/design.md, "The Hyper-V check"): tests/qemu/tui.scenario's
+# steps with what differs on Hyper-V. Its GOP is 1024x768 BGR at
+# 0xf8000000, so term's grid is 128x48, and the fb: line's size and frame
+# counts are the GOP's own (Hyper-V has shown 3, 4 and 8 MiB), so only its
+# ends are expected. The write-combining clear's two times answer H10:
+# write-combining several times faster than uncached. QEMU's qemu_args:
+# and exit status do not apply; the kernel halts after TEST PASS and the
+# script turns the VM off. Test-L4Vhdx.ps1 -Scenario follows the expect:,
+# next:, send: and forbid: lines over COM1's named pipe and saves each
+# screendump: as l4-<name>.png, Hyper-V's 1024x768 thumbnail of the
+# screen (RGB 565), to compare by eye with tools/hyperv/golden/<name>.png,
+# which xtask's host render drew (tui_screendumps_are_the_host_render).
+cmdline: test=tui
+exit: success
+expect: cpu: hypervisor Hyper-V
+expect: bootinfo: framebuffer 0xf8000000-
+expect: root: cmdline "test=tui"
+expect: fb: 1024x768 BGR, stride 1024,
+expect: KiB at 0xf8000000:
+expect: ; 128x48 cells
+expect: fb: full clear: uncached
+expect: , write-combining
+expect: servers: term and tui started; root CNode
+expect: tui: 128x48 terminal
+expect: tui: frame 1 drawn: Overview, item 1
+screendump: tui-main
+send: \x144                        # Ctrl-T 4: focus term
+expect: [console] focus 4 (term)
+send: \e[B\e[B\r                   # Down, Down, Enter
+expect: tui: frame 4 drawn: Colours, item 3
+screendump: tui-colours
+send: q
+expect: tui: quit after 4 keys
+expect: tui: read 8 bytes: \e[B\e[B\rq
+expect: term: stats:
+expect: , 0 ignored,
+expect: , 0 dropped
+expect: root: the TUI has quit; Ctrl-T 1 and Enter end the test
+screendump: tui-quit
+send: \x141\r                      # Ctrl-T 1, Enter: root's line
+expect: [console] focus 1 (root)
+expect: TEST PASS
+forbid: TEST FAIL
