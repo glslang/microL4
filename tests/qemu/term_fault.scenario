@@ -1,0 +1,32 @@
+# Review test for M8's failure path (user/root/src/tui.rs; docs/design.md,
+# "Failures" under "Framebuffer, terminal and TUI"): a term fault ends
+# the run with failure through watch, whatever root waits on. The root
+# task starts everything as test=tui does, then reads a line as client 1,
+# which has focus; the harness types Enter once tui has drawn its first
+# frame, so tui waits in term's Read and term in its receive. Root prints
+# its line and syncs, suspends term, writes its rip 0 and resumes it, and
+# calls term's Stats. term's next instruction fetch, at address 0, which
+# nothing maps, is a VMFault (ip 0, address 0, a fetch, fsr 0x14: a
+# user-mode fetch of a page not present); the kernel sends it on F with
+# badge 3, and watch writes TEST FAIL naming term through Polled, and
+# ends the run with DebugHalt(1). The next: lines show that nothing comes
+# between root's line, watch's and the halt's two lines: root, still in
+# its call to the dead term, prints nothing more, and tui, blocked in its
+# Read, prints and draws nothing more.
+cmdline: test=term_fault
+exit: failure
+qemu_args: -vga std -global VGA.xres=1280 -global VGA.yres=800
+expect: root: cmdline "test=term_fault"
+expect: fb: 1280x800 BGR, stride 1280, 4000 KiB at 0x80000000: 6 untyped, 1 2 MiB and 488 4 KiB frames; 160x50 cells
+expect: servers: term and tui started; root CNode
+expect: tui: frame 1 drawn: Overview, item 1
+send: \r                           # Enter: root's line
+expect: term_fault: suspending term, setting its rip to 0 and resuming it
+next: TEST FAIL: term fault 5 (VMFault), MR0 to MR3 0x0 0x0 0x1 0x14
+next: dispatch: invocations preempted and restarted:   # DebugHalt's first line
+next: DEBUG HALT 1 from TCB
+forbid: term answered Stats after its rip was set to 0
+forbid: watch did not end the run
+forbid: tui: frame 2
+forbid: TEST PASS
+forbid: KERNEL PANIC

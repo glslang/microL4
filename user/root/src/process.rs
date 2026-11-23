@@ -277,22 +277,46 @@ pub struct FaultLine {
     pub mr: [u64; 4],
 }
 
+/// The fault a fault message's label names (`docs/abi.md`, "Fault
+/// messages"), or `None` for any other label.
+pub const fn fault_kind(label: u64) -> Option<&'static str> {
+    match label {
+        fault_label::CAP_FAULT => Some("CapFault"),
+        fault_label::UNKNOWN_SYSCALL => Some("UnknownSyscall"),
+        fault_label::USER_EXCEPTION => Some("UserException"),
+        fault_label::VM_FAULT => Some("VMFault"),
+        _ => None,
+    }
+}
+
+/// `<who> fault <label> (<kind>), MR0 to MR3 <words>`, the kind left out
+/// for a label that names no fault: the words of `watch`'s line, and of
+/// root's for a tui fault.
+pub struct Fault<'a> {
+    pub who: &'a str,
+    pub label: u64,
+    pub mr: [u64; 4],
+}
+
+impl fmt::Display for Fault<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} fault {}", self.who, self.label)?;
+        if let Some(kind) = fault_kind(self.label) {
+            write!(f, " ({kind})")?;
+        }
+        let [a, b, c, d] = self.mr;
+        write!(f, ", MR0 to MR3 {a:#x} {b:#x} {c:#x} {d:#x}")
+    }
+}
+
 impl fmt::Display for FaultLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match self.label {
-            fault_label::CAP_FAULT => " (CapFault)",
-            fault_label::UNKNOWN_SYSCALL => " (UnknownSyscall)",
-            fault_label::USER_EXCEPTION => " (UserException)",
-            fault_label::VM_FAULT => " (VMFault)",
-            _ => "",
+        let fault = Fault {
+            who: fault_badge::name(self.badge),
+            label: self.label,
+            mr: self.mr,
         };
-        let [a, b, c, d] = self.mr;
-        write!(
-            f,
-            "TEST FAIL: {} fault {}{kind}, MR0 to MR3 {a:#x} {b:#x} {c:#x} {d:#x}",
-            fault_badge::name(self.badge),
-            self.label
-        )
+        write!(f, "TEST FAIL: {fault}")
     }
 }
 

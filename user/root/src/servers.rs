@@ -43,7 +43,7 @@ pub const TUI_PRIORITY: u64 = 100;
 /// The badge of root's own capability to term's endpoint T: `Stats` only.
 pub const TERM_STATS_BADGE: u64 = 2;
 /// tui's badge on endpoint C, as console's client 5, and on endpoint D.
-pub const TUI_BADGE: u64 = 5;
+pub use root::check::tui::TUI_BADGE;
 
 // Every server's CNode has the same shape, which `fill` relies on.
 const _: () = assert!(
@@ -481,6 +481,10 @@ impl FbObjects {
 pub struct Terminal {
     /// Endpoint T with badge 2, for term's `Stats`.
     pub stats: CPtr,
+    /// Their TCBs, which `test=term_fault` and `test=tui_fault` make
+    /// fault, and whose MCPs `test=tui` reads back.
+    pub term_tcb: CPtr,
+    pub tui_tcb: CPtr,
 }
 
 /// Starts `term` and `tui` (`docs/design.md`, "Where it runs" and
@@ -639,7 +643,11 @@ pub fn start_terminal(
             args: [0; 3],
         },
     );
-    Terminal { stats }
+    Terminal {
+        stats,
+        term_tcb,
+        tui_tcb,
+    }
 }
 
 type Fill<'a> = (&'a str, Slot, CPtr, Rights, Option<u64>);
@@ -741,9 +749,10 @@ fn fill_page(ipc: Ipc, frame: CPtr, addr: u64, scratch: u64) {
     // mapped readable in this VSpace, and no thread writes it while the
     // servers are built: watch, the one other thread in this VSpace yet,
     // waits in its first Recv on F, which writes nothing but its
-    // registers, and uart and console run in VSpaces of their own.
-    // `scratch` is a page nothing else maps, where the fresh frame was
-    // just mapped read-write. The pages do not overlap.
+    // registers, and the servers, uart, console and from M8 term and tui,
+    // run in VSpaces of their own. `scratch` is a page nothing else maps,
+    // where the fresh frame was just mapped read-write. The pages do not
+    // overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(addr as *const u8, scratch as *mut u8, PAGE as usize);
     }
