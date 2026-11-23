@@ -1,0 +1,10 @@
+# Above the region, IND moves down, into the region.
+size: 4x4
+input: \e[3;4r\e[2;2H\eDx
+screen:
+|    |
+|    |
+| x  |
+|    |
+cursor: 3,3
+region: 3,4

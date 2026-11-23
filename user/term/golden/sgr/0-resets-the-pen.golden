@@ -1,0 +1,9 @@
+# SGR 0 gives the default pen.
+size: 10x1
+input: \e[1;31;44ma\e[0mb
+screen:
+|ab        |
+attrs:
+|X         |
+key: X = bold fg 1 bg 4
+cursor: 1,3

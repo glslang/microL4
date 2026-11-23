@@ -1,0 +1,10 @@
+# CUU moves up Pn rows in the same column.
+size: 6x5
+input: \e[4;3H\e[2Ax
+screen:
+|      |
+|  x   |
+|      |
+|      |
+|      |
+cursor: 2,4

@@ -1,0 +1,9 @@
+# DCH in the last column blanks that cell.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;6H\e[P
+screen:
+|abcde |
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,6

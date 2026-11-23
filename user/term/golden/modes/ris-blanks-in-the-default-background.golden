@@ -1,0 +1,8 @@
+# RIS resets the pen before blanking, so the blanks are plain.
+size: 6x3
+input: \e[44mab\ec
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

@@ -1,0 +1,13 @@
+# REP's prints take the pen, which nothing could change since the print.
+size: 5x3
+input: \e[32mz\e[2b
+screen:
+|zzz  |
+|     |
+|     |
+attrs:
+|GGG  |
+|     |
+|     |
+key: G = fg 2
+cursor: 1,4

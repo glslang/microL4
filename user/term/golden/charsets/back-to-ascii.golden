@@ -1,0 +1,6 @@
+# ESC ( B puts ASCII back in G0.
+size: 8x1
+input: \e(0q\e(Bq
+screen:
+|─q      |
+cursor: 1,3

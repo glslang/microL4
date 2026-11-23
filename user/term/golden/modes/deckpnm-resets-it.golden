@@ -1,0 +1,8 @@
+# ESC > resets it.
+size: 6x3
+input: \e=\e>
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

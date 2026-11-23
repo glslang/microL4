@@ -1,0 +1,7 @@
+# 38 ; 2 with two of its three values is malformed.
+size: 10x1
+input: \e[38;2;1;2ma
+screen:
+|a         |
+cursor: 1,2
+ignored: 1

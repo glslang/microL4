@@ -1,0 +1,8 @@
+# ED takes 80 to 9F next, so a surrogate's bytes (ED A0 80, U+D800) are
+# three U+FFFDs.
+size: 8x2
+input: \xed\xa0\x80
+screen:
+|���     |
+|        |
+cursor: 1,4

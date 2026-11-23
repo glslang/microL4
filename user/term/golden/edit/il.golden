@@ -1,0 +1,10 @@
+# IL inserts Pn blank lines at the cursor's row; the lines below move down
+# within the region and the last is lost; the cursor goes to column 1.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2;3H\e[L
+screen:
+|abcdef|
+|      |
+|ghijkl|
+|mnopqr|
+cursor: 2,1

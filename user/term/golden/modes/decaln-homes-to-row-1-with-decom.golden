@@ -1,0 +1,9 @@
+# Under DECOM, DECALN's home is row 1, the whole screen's region's top.
+size: 6x3
+input: \e[2;3r\e[?6h\e#8
+screen:
+|EEEEEE|
+|EEEEEE|
+|EEEEEE|
+cursor: 1,1
+modes: origin

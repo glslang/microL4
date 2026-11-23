@@ -1,0 +1,7 @@
+# 38 with nothing after it is malformed.
+size: 10x1
+input: \e[38ma
+screen:
+|a         |
+cursor: 1,2
+ignored: 1

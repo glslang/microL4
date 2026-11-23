@@ -1,0 +1,7 @@
+# ST outside a string does nothing, and is not counted.
+size: 10x2
+input: a\e\\b
+screen:
+|ab        |
+|          |
+cursor: 1,3

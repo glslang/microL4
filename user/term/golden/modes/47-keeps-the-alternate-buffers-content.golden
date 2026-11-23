@@ -1,0 +1,9 @@
+# The alternate buffer keeps its content across DECRST and DECSET 47.
+size: 6x3
+input: \e[?47hab\e[?47l\e[?47h
+screen:
+|ab    |
+|      |
+|      |
+cursor: 1,3
+buffer: alternate

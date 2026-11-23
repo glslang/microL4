@@ -1,0 +1,8 @@
+# Past sixteen, parameters are dropped: the seventeenth, 1, does nothing,
+# and the SGR still applies its first sixteen, which reset bold.
+size: 10x2
+input: \e[1m\e[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;1mx
+screen:
+|x         |
+|          |
+cursor: 1,2

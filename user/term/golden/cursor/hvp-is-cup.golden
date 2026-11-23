@@ -1,0 +1,10 @@
+# HVP (CSI f) is CUP.
+size: 6x5
+input: \e[2;3fx
+screen:
+|      |
+|  x   |
+|      |
+|      |
+|      |
+cursor: 2,4

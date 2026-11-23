@@ -1,0 +1,8 @@
+# ESC ( A (UK) and ESC ( < are not sets term has: ignored, and G0 keeps
+# DEC Special Graphics.
+size: 8x1
+input: \e(0\e(A\e(<q
+screen:
+|─       |
+cursor: 1,2
+ignored: 2

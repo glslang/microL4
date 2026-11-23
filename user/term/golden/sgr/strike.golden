@@ -1,0 +1,9 @@
+# SGR 9: strike.
+size: 10x1
+input: \e[9ms
+screen:
+|s         |
+attrs:
+|S         |
+key: S = strike
+cursor: 1,2

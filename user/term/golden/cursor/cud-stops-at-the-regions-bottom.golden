@@ -1,0 +1,11 @@
+# From inside the region, CUD stops at its bottom.
+size: 6x5
+input: \e[2;3r\e[2;1H\e[9Bx
+screen:
+|      |
+|      |
+|x     |
+|      |
+|      |
+cursor: 3,2
+region: 2,3

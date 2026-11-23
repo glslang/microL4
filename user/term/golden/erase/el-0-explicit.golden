@@ -1,0 +1,8 @@
+# EL 0 written out.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[0K
+screen:
+|abcde|
+|fg   |
+|klmno|
+cursor: 2,3

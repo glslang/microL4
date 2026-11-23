@@ -1,0 +1,10 @@
+# CUD moves down Pn rows.
+size: 6x5
+input: \e[2;2H\e[2Bx
+screen:
+|      |
+|      |
+|      |
+| x    |
+|      |
+cursor: 4,3

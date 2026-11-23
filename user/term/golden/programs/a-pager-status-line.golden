@@ -1,0 +1,17 @@
+# less's prompt in reverse video on the last line, then EL: an inverse
+# pen erases in the default background, so only the text is reversed.
+size: 20x4
+input: line one\r\nline two\r\nline three
+input: \e[4;1H\e[7m--More--(50%)\e[K\e[m
+screen:
+|line one            |
+|line two            |
+|line three          |
+|--More--(50%)       |
+attrs:
+|                    |
+|                    |
+|                    |
+|VVVVVVVVVVVVV       |
+key: V = inverse
+cursor: 4,14

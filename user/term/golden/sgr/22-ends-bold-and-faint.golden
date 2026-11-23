@@ -1,0 +1,10 @@
+# SGR 22 turns both bold and faint off.
+size: 10x1
+input: \e[1;2ma\e[22mb\e[1mc\e[22md
+screen:
+|abcd      |
+attrs:
+|X B       |
+key: X = bold faint
+key: B = bold
+cursor: 1,5

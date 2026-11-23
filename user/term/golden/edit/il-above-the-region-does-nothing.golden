@@ -1,0 +1,10 @@
+# With the cursor above the region, IL does nothing.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2;3r\e[1;4H\e[L
+screen:
+|abcdef|
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,4
+region: 2,3

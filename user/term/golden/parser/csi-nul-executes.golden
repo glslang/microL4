@@ -1,0 +1,8 @@
+# NUL inside a control sequence executes (doing nothing) and the sequence
+# goes on.
+size: 10x2
+input: ab\e[\x002Dx
+screen:
+|xb        |
+|          |
+cursor: 1,2

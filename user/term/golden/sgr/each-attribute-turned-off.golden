@@ -1,0 +1,15 @@
+# 23, 24, 25, 27, 28 and 29 turn italic, underline, blink, inverse,
+# conceal and strike off, one by one.
+size: 10x1
+input: \e[3;4;5;7;8;9ma\e[23mb\e[24mc\e[25md\e[27me\e[28mf\e[29mg
+screen:
+|abcdefg   |
+attrs:
+|ABCDEF    |
+key: A = italic underline blink inverse conceal strike
+key: B = underline blink inverse conceal strike
+key: C = blink inverse conceal strike
+key: D = inverse conceal strike
+key: E = conceal strike
+key: F = strike
+cursor: 1,8

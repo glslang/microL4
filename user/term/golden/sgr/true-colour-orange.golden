@@ -1,0 +1,9 @@
+# 255 ; 128 ; 0: per channel 255, 135 and 0, the cube's 208.
+size: 10x1
+input: \e[38;2;255;128;0ma
+screen:
+|a         |
+attrs:
+|O         |
+key: O = fg 208
+cursor: 1,2

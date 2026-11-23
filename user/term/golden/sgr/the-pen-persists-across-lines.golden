@@ -1,0 +1,11 @@
+# The pen holds until changed, across lines.
+size: 10x2
+input: \e[7ma\r\nb
+screen:
+|a         |
+|b         |
+attrs:
+|V         |
+|V         |
+key: V = inverse
+cursor: 2,2

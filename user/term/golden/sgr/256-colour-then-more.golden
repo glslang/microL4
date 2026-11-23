@@ -1,0 +1,9 @@
+# Parameters after a 256-colour form still apply.
+size: 10x1
+input: \e[38;5;9;1;48;5;10ma
+screen:
+|a         |
+attrs:
+|X         |
+key: X = bold fg 9 bg 10
+cursor: 1,2

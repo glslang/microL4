@@ -1,0 +1,9 @@
+# A print into the last column leaves the cursor there with the pending
+# wrap set.
+size: 5x3
+input: abcde
+screen:
+|abcde|
+|     |
+|     |
+cursor: 1,5 wrap

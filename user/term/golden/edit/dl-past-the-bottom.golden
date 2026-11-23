@@ -1,0 +1,9 @@
+# A count past the region's bottom deletes every line from the cursor's.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[3H\e[9M
+screen:
+|abcdef|
+|ghijkl|
+|      |
+|      |
+cursor: 3,1

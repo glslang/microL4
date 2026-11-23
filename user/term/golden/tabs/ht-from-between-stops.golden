@@ -1,0 +1,7 @@
+# From between two stops, HT goes to the next.
+size: 20x2
+input: abc\tx
+screen:
+|abc     x           |
+|                    |
+cursor: 1,10

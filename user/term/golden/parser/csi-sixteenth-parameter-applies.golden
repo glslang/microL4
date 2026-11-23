@@ -1,0 +1,11 @@
+# Sixteen parameters pass: the sixteenth, 1, sets bold.
+size: 10x2
+input: \e[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;1mx
+screen:
+|x         |
+|          |
+attrs:
+|B         |
+|          |
+key: B = bold
+cursor: 1,2

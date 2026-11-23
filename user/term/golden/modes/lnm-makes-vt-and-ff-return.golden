@@ -1,0 +1,9 @@
+# With LNM set, VT and FF return too.
+size: 6x3
+input: \e[20ha\x0bb\x0cc
+screen:
+|a     |
+|b     |
+|c     |
+cursor: 3,2
+modes: newline

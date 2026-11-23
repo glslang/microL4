@@ -1,0 +1,11 @@
+# An editor takes the alternate buffer and gives it back: the shell's
+# screen and cursor return as they were, and the prompt goes on.
+size: 10x3
+input: $ vi f\r\n
+input: \e[?1049h\e[H\e[2J~\r\n~\r\n\e[7m"f" 0L\e[m
+input: \e[?1049l$\x20
+screen:
+|$ vi f    |
+|$         |
+|          |
+cursor: 2,3

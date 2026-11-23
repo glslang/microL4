@@ -1,0 +1,10 @@
+# HPR (CSI a) is CUF.
+size: 6x5
+input: \e[2ax
+screen:
+|  x   |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,4

@@ -1,0 +1,17 @@
+# Moving the cursor leaves the pen as it is.
+size: 6x5
+input: \e[1ma\e[3;3Hb\e[Ac
+screen:
+|a     |
+|   c  |
+|  b   |
+|      |
+|      |
+attrs:
+|B     |
+|   B  |
+|  B   |
+|      |
+|      |
+key: B = bold
+cursor: 2,5

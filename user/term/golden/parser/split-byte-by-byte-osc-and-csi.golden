@@ -1,0 +1,18 @@
+# A title and a move written one byte per line act as they would whole.
+size: 10x2
+input: \e
+input: ]
+input: 2
+input: ;
+input: t
+input: \x07
+input: \e
+input: [
+input: 2
+input: B
+input: x
+screen:
+|          |
+|x         |
+cursor: 2,2
+title: t

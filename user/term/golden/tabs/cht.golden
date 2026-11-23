@@ -1,0 +1,7 @@
+# CHT 2 goes two stops forward.
+size: 20x2
+input: \e[2Ix
+screen:
+|                x   |
+|                    |
+cursor: 1,18

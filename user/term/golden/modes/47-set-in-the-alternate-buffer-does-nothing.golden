@@ -1,0 +1,10 @@
+# Setting 47 with the alternate buffer active switches and clears
+# nothing.
+size: 6x3
+input: \e[?47hab\e[?47h
+screen:
+|ab    |
+|      |
+|      |
+cursor: 1,3
+buffer: alternate

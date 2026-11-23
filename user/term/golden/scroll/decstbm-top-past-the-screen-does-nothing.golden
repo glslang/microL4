@@ -1,0 +1,10 @@
+# A top past the screen is below any bottom, which stops at the last row:
+# refused.
+size: 4x4
+input: \e[2;2H\e[9;99r
+screen:
+|    |
+|    |
+|    |
+|    |
+cursor: 2,2

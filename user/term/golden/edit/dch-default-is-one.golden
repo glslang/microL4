@@ -1,0 +1,9 @@
+# DCH with no parameter deletes one cell.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1;2H\e[P
+screen:
+|acdef |
+|ghijkl|
+|mnopqr|
+|stuvwx|
+cursor: 1,2

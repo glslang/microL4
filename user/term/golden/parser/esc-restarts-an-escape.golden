@@ -1,0 +1,7 @@
+# ESC after ESC starts the escape afresh: ESC ESC D is IND.
+size: 10x2
+input: \e\eDx
+screen:
+|          |
+|x         |
+cursor: 2,2

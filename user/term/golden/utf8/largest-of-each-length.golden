@@ -1,0 +1,8 @@
+# U+07FF, U+FFFD and U+10FFFF, the last a private-use code point the font
+# draws as the replacement glyph; the model keeps it.
+size: 8x2
+input: \xdf\xbf\xef\xbf\xbd\xf4\x8f\xbf\xbf
+screen:
+|߿�􏿿     |
+|        |
+cursor: 1,4

@@ -1,0 +1,10 @@
+# CUP with one parameter takes it as the row, column 1.
+size: 6x5
+input: \e[1;4H\e[3Hx
+screen:
+|      |
+|      |
+|x     |
+|      |
+|      |
+cursor: 3,2

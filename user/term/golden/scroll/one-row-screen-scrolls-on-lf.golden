@@ -1,0 +1,7 @@
+# On a one-row screen the only row is the region's top and bottom: LF
+# scrolls it away.
+size: 4x1
+input: ab\ncd
+screen:
+|  cd|
+cursor: 1,4 wrap

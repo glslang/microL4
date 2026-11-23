@@ -1,0 +1,9 @@
+# Inverse is an attribute, which a blank does not take: erasing in an
+# inverse pen leaves default blanks.
+size: 5x3
+input: abcde\e[7m\e[2K
+screen:
+|     |
+|     |
+|     |
+cursor: 1,5

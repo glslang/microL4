@@ -1,0 +1,9 @@
+# An empty index reads as 0.
+size: 10x1
+input: \e[38;5;ma
+screen:
+|a         |
+attrs:
+|K         |
+key: K = fg 0
+cursor: 1,2

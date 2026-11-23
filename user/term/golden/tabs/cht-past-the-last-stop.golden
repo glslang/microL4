@@ -1,0 +1,7 @@
+# CHT stops at the last column.
+size: 20x2
+input: \e[65535Ix
+screen:
+|                   x|
+|                    |
+cursor: 1,20 wrap

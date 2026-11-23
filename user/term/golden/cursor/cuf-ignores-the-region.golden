@@ -1,0 +1,11 @@
+# The region bounds rows only: CUF goes to the last column inside it too.
+size: 6x5
+input: \e[2;3r\e[2;1H\e[9Cx
+screen:
+|      |
+|     x|
+|      |
+|      |
+|      |
+cursor: 2,6 wrap
+region: 2,3

@@ -1,0 +1,9 @@
+# ED 3 would clear scrollback, which term does not keep: nothing changes,
+# and it is not counted as ignored.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[3J
+screen:
+|abcde|
+|fghij|
+|klmno|
+cursor: 2,3

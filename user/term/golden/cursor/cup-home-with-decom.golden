@@ -1,0 +1,12 @@
+# Home with DECOM is the region's top row, column 1.
+size: 6x5
+input: \e[2;4r\e[?6h\e[3;3H\e[Hx
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2
+modes: origin
+region: 2,4

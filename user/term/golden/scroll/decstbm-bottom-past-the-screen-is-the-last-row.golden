@@ -1,0 +1,10 @@
+# A bottom past the screen counts as the last row, as in xterm.
+size: 4x4
+input: \e[2;99r
+screen:
+|    |
+|    |
+|    |
+|    |
+cursor: 1,1
+region: 2,4

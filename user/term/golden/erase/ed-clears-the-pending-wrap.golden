@@ -1,0 +1,8 @@
+# So does ED.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[Jz
+screen:
+|abcde|
+|fghij|
+|klmnz|
+cursor: 3,5 wrap

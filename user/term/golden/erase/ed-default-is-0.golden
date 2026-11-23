@@ -1,0 +1,8 @@
+# ED with no parameter is ED 0.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[J
+screen:
+|abcde|
+|fg   |
+|     |
+cursor: 2,3

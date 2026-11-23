@@ -1,0 +1,13 @@
+# EL 1 in a red background.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[41m\e[2;3H\e[1K
+screen:
+|abcde|
+|   ij|
+|klmno|
+attrs:
+|     |
+|RRR  |
+|     |
+key: R = bg 1
+cursor: 2,3

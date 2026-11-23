@@ -1,0 +1,9 @@
+# REP's prints insert like any print with IRM set.
+size: 5x3
+input: abc\e[1G\e[4hx\e[1b
+screen:
+|xxabc|
+|     |
+|     |
+cursor: 1,3
+modes: insert

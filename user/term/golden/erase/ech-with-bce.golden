@@ -1,0 +1,13 @@
+# ECH in a magenta background.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[45m\e[H\e[3X
+screen:
+|   de|
+|fghij|
+|klmno|
+attrs:
+|MMM  |
+|     |
+|     |
+key: M = bg 5
+cursor: 1,1

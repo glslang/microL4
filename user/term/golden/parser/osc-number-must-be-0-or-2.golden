@@ -1,0 +1,9 @@
+# The title is what follows 0; or 2;, as written: 00;, 02; and 20; are
+# other numbers, which term ignores.
+size: 10x2
+input: \e]00;a\x07\e]02;b\x07\e]20;c\x07
+screen:
+|          |
+|          |
+cursor: 1,1
+ignored: 3

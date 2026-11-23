@@ -1,0 +1,9 @@
+# SGR 5: blink, kept in the model though drawn steady.
+size: 10x1
+input: \e[5mk
+screen:
+|k         |
+attrs:
+|K         |
+key: K = blink
+cursor: 1,2

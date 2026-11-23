@@ -1,0 +1,13 @@
+# 1049's DECRC brings back the pen saved by its DECSC.
+size: 6x3
+input: \e[1mab\e[?1049h\e[0m\e[?1049lx
+screen:
+|abx   |
+|      |
+|      |
+attrs:
+|BBB   |
+|      |
+|      |
+key: B = bold
+cursor: 1,4

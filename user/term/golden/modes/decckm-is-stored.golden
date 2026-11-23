@@ -1,0 +1,9 @@
+# DECSET 1 is stored only: input passes through as typed.
+size: 6x3
+input: \e[?1h
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+modes: cursor-keys

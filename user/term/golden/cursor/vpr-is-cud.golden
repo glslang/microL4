@@ -1,0 +1,10 @@
+# VPR (CSI e) is CUD.
+size: 6x5
+input: \e[2;2H\e[2ex
+screen:
+|      |
+|      |
+|      |
+| x    |
+|      |
+cursor: 4,3

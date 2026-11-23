@@ -1,0 +1,9 @@
+# ECH clears the pending wrap: z then prints in the last column without
+# wrapping.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[Xz
+screen:
+|abcde|
+|fghij|
+|klmnz|
+cursor: 3,5 wrap

@@ -1,0 +1,11 @@
+# Several replies queue in the order their sequences came.
+size: 10x5
+input: \e[5n\e[c\e[2;2H\e[6n
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 2,2
+reply: \e[0n\e[?1;2c\e[2;2R

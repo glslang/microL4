@@ -1,0 +1,10 @@
+# RI on row 1 above the region stops there.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[2;3r\eMx
+screen:
+|x   |
+|2   |
+|3   |
+|4   |
+cursor: 1,2
+region: 2,3

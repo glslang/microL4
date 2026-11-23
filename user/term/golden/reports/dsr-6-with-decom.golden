@@ -1,0 +1,13 @@
+# With DECOM, DSR 6 counts the row from the region's top.
+size: 10x5
+input: \e[2;4r\e[?6h\e[2;3H\e[6n
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 3,3
+reply: \e[2;3R
+modes: origin
+region: 2,4

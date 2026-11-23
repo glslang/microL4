@@ -1,0 +1,10 @@
+# SM takes each parameter in turn: IRM and LNM together, the unknown 2
+# between them skipped.
+size: 6x3
+input: \e[4;2;20h
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+modes: insert newline

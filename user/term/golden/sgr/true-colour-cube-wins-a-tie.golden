@@ -1,0 +1,9 @@
+# 4 ; 4 ; 4 is as near the cube's black as the ramp's 8: the cube, 16.
+size: 10x1
+input: \e[38;2;4;4;4ma
+screen:
+|a         |
+attrs:
+|K         |
+key: K = fg 16
+cursor: 1,2

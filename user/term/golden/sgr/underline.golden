@@ -1,0 +1,9 @@
+# SGR 4: underline.
+size: 10x1
+input: \e[4mu
+screen:
+|u         |
+attrs:
+|U         |
+key: U = underline
+cursor: 1,2

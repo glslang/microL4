@@ -1,0 +1,16 @@
+# 40 to 47 set backgrounds 0 to 7.
+size: 10x1
+input: \e[40ma\e[41mb\e[42mc\e[43md\e[44me\e[45mf\e[46mg\e[47mh
+screen:
+|abcdefgh  |
+attrs:
+|01234567  |
+key: 0 = bg 0
+key: 1 = bg 1
+key: 2 = bg 2
+key: 3 = bg 3
+key: 4 = bg 4
+key: 5 = bg 5
+key: 6 = bg 6
+key: 7 = bg 7
+cursor: 1,9

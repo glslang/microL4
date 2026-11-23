@@ -1,0 +1,15 @@
+# The lines SU brings in take the pen's background.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[44m\e[S
+screen:
+|2   |
+|3   |
+|4   |
+|    |
+attrs:
+|    |
+|    |
+|    |
+|BBBB|
+key: B = bg 4
+cursor: 4,2

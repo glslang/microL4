@@ -1,0 +1,10 @@
+# The pending wrap acts only with DECAWM on: reset after it was set, the
+# next print overwrites the last column.
+size: 5x3
+input: abcde\e[?7lx
+screen:
+|abcdx|
+|     |
+|     |
+cursor: 1,5
+modes: no-autowrap

@@ -1,0 +1,7 @@
+# A code point printed into the last column sets the pending wrap.
+size: 4x2
+input: abc\xf0\x9f\x98\x80
+screen:
+|abc😀|
+|    |
+cursor: 1,4 wrap

@@ -1,0 +1,19 @@
+# A coloured bash prompt, ls's coloured output and the next prompt, as
+# GNU ls and a Debian PS1 write them (01 and 00 are 1 and 0).
+size: 30x4
+input: \e[01;32muser@host\e[00m:\e[01;34m~/src\e[00m$ ls\r\n
+input: \e[0m\e[01;34mdir\e[0m  \e[01;32mrun.sh\e[0m  notes.txt\r\n
+input: \e[01;32muser@host\e[00m:\e[01;34m~/src\e[00m$\x20
+screen:
+|user@host:~/src$ ls           |
+|dir  run.sh  notes.txt        |
+|user@host:~/src$              |
+|                              |
+attrs:
+|GGGGGGGGG BBBBB               |
+|BBB  GGGGGG                   |
+|GGGGGGGGG BBBBB               |
+|                              |
+key: G = bold fg 2
+key: B = bold fg 4
+cursor: 3,18

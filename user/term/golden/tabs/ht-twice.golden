@@ -1,0 +1,7 @@
+# A second HT goes on to 17.
+size: 20x2
+input: \t\tx
+screen:
+|                x   |
+|                    |
+cursor: 1,18

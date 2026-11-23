@@ -1,0 +1,9 @@
+# REP repeats the character the print produced: ─ from DEC Special
+# Graphics.
+size: 5x3
+input: \e(0q\e[2b
+screen:
+|───  |
+|     |
+|     |
+cursor: 1,4

@@ -1,0 +1,8 @@
+# More than two intermediates: the sequence is dispatched as unknown.
+size: 10x2
+input: \e[ !$qx
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

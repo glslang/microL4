@@ -1,0 +1,7 @@
+# Stops belong to columns: one set on row 1 applies on row 2.
+size: 20x2
+input: \e[4G\eH\r\n\tx
+screen:
+|                    |
+|   x                |
+cursor: 2,5

@@ -1,0 +1,8 @@
+# What a DCS passes through is not printed.
+size: 10x2
+input: \ePqabc\e\\x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

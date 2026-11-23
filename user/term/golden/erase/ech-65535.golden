@@ -1,0 +1,8 @@
+# A huge count acts as the cells left in the line.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;1H\e[65535X
+screen:
+|abcde|
+|     |
+|klmno|
+cursor: 2,1

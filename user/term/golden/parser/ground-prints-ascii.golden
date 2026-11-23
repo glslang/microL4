@@ -1,0 +1,7 @@
+# Printable ASCII prints in ground, one cell each.
+size: 10x2
+input: abc XYZ~
+screen:
+|abc XYZ~  |
+|          |
+cursor: 1,9

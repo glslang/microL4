@@ -1,0 +1,8 @@
+# 0x9B is no CSI: a lone continuation byte, it prints U+FFFD, and the
+# bytes after it print.
+size: 10x2
+input: \x9b2Cx
+screen:
+|�2Cx      |
+|          |
+cursor: 1,5

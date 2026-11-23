@@ -1,0 +1,8 @@
+# C0 and C1 could only start overlong forms: each is refused, and so is
+# the continuation byte after it.
+size: 8x2
+input: \xc0\xaf\xc1\xbf
+screen:
+|����    |
+|        |
+cursor: 1,5

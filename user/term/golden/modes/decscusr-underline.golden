@@ -1,0 +1,8 @@
+# DECSCUSR 3 and 4: an underline cursor.
+size: 6x3
+input: \e[3 q
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1 underline

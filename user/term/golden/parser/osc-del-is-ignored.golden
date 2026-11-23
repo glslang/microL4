@@ -1,0 +1,8 @@
+# DEL is ignored inside an OSC string.
+size: 10x2
+input: \e]2;a\x7fb\x07
+screen:
+|          |
+|          |
+cursor: 1,1
+title: ab

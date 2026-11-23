@@ -1,0 +1,11 @@
+# 39 gives the default foreground, which is not colour 7.
+size: 10x1
+input: \e[31;44ma\e[39mb\e[37mc
+screen:
+|abc       |
+attrs:
+|XBW       |
+key: X = fg 1 bg 4
+key: B = bg 4
+key: W = fg 7 bg 4
+cursor: 1,4

@@ -1,0 +1,10 @@
+# IND on the screen's last row below the region does nothing.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[1;2r\e[4;1H\eDx
+screen:
+|1   |
+|2   |
+|3   |
+|x   |
+cursor: 4,2
+region: 1,2

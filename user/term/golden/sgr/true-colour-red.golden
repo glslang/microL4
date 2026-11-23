@@ -1,0 +1,10 @@
+# 38 ; 2 ; r ; g ; b maps to the nearest entry from 16: pure red is the
+# cube's 196.
+size: 10x1
+input: \e[38;2;255;0;0ma
+screen:
+|a         |
+attrs:
+|R         |
+key: R = fg 196
+cursor: 1,2

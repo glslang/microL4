@@ -1,0 +1,7 @@
+# A final straight after ESC [ dispatches with no parameter: CUF 1.
+size: 10x2
+input: \e[Cx
+screen:
+| x        |
+|          |
+cursor: 1,3

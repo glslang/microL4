@@ -1,0 +1,7 @@
+# TBC 0 in a column with no stop changes nothing.
+size: 20x2
+input: \e[5G\e[0g\r\tx
+screen:
+|        x           |
+|                    |
+cursor: 1,10

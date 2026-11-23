@@ -1,0 +1,9 @@
+# DL 2 deletes two lines.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[1H\e[2M
+screen:
+|mnopqr|
+|stuvwx|
+|      |
+|      |
+cursor: 1,1

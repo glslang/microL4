@@ -1,0 +1,8 @@
+# DECRST 1049 switches back to the main buffer, then restores the cursor.
+size: 6x3
+input: ab\e[?1049h\e[3;3Hcd\e[?1049lx
+screen:
+|abx   |
+|      |
+|      |
+cursor: 1,4

@@ -1,0 +1,16 @@
+# 30 to 37 set foregrounds 0 to 7.
+size: 10x1
+input: \e[30ma\e[31mb\e[32mc\e[33md\e[34me\e[35mf\e[36mg\e[37mh
+screen:
+|abcdefgh  |
+attrs:
+|01234567  |
+key: 0 = fg 0
+key: 1 = fg 1
+key: 2 = fg 2
+key: 3 = fg 3
+key: 4 = fg 4
+key: 5 = fg 5
+key: 6 = fg 6
+key: 7 = fg 7
+cursor: 1,9

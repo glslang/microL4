@@ -1,0 +1,9 @@
+# SGR 8: conceal. The model keeps the character; the renderer hides it.
+size: 10x1
+input: \e[8mc
+screen:
+|c         |
+attrs:
+|C         |
+key: C = conceal
+cursor: 1,2

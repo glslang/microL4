@@ -1,0 +1,11 @@
+# CSI ? 6 n (DECXCPR) is not DSR: ignored.
+size: 10x5
+input: \e[?6n
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 1,1
+ignored: 1

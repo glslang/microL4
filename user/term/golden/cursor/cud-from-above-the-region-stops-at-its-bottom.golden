@@ -1,0 +1,12 @@
+# A cursor above the region did not start below it, so CUD stops at the
+# region's bottom.
+size: 6x5
+input: \e[3;4r\e[1;1H\e[9Bx
+screen:
+|      |
+|      |
+|      |
+|x     |
+|      |
+cursor: 4,2
+region: 3,4

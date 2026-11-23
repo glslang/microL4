@@ -1,0 +1,10 @@
+# Below the region, RI moves up, into the region.
+size: 4x4
+input: \e[1;2r\e[3;1H\eMx
+screen:
+|    |
+|x   |
+|    |
+|    |
+cursor: 2,2
+region: 1,2

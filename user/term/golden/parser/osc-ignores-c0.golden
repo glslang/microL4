@@ -1,0 +1,9 @@
+# C0 controls other than BEL are ignored inside an OSC string: they move
+# nothing and are not kept.
+size: 10x2
+input: ab\e]0;a\rb\nc\x07x
+screen:
+|abx       |
+|          |
+cursor: 1,4
+title: abc

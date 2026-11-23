@@ -1,0 +1,11 @@
+# DECSTBM moves the cursor home.
+size: 6x5
+input: \e[3;3H\e[2;4rx
+screen:
+|x     |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,2
+region: 2,4

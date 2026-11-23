@@ -1,0 +1,15 @@
+# The lines SD brings in take the pen's background.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[42m\e[2T
+screen:
+|    |
+|    |
+|1   |
+|2   |
+attrs:
+|GGGG|
+|GGGG|
+|    |
+|    |
+key: G = bg 2
+cursor: 4,2

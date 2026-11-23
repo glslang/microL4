@@ -1,0 +1,10 @@
+# DL on the region's bottom row blanks just that row.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2;3r\e[3H\e[M
+screen:
+|abcdef|
+|ghijkl|
+|      |
+|stuvwx|
+cursor: 3,1
+region: 2,3

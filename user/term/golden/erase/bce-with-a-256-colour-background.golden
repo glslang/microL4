@@ -1,0 +1,13 @@
+# bce keeps any of the 256 colours.
+size: 5x3
+input: abcde\e[48;5;200m\e[2K
+screen:
+|     |
+|     |
+|     |
+attrs:
+|PPPPP|
+|     |
+|     |
+key: P = bg 200
+cursor: 1,5

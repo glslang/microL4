@@ -1,0 +1,9 @@
+# IL clears the pending wrap and goes to column 1.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[Lz
+screen:
+|abcdef|
+|ghijkl|
+|mnopqr|
+|z     |
+cursor: 4,2

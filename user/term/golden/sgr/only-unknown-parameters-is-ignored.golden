@@ -1,0 +1,7 @@
+# An SGR none of whose parameters is acted on counts as ignored.
+size: 10x1
+input: \e[50;66ma
+screen:
+|a         |
+cursor: 1,2
+ignored: 1

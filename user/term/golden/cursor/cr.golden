@@ -1,0 +1,10 @@
+# CR moves to column 1 of the same row.
+size: 6x5
+input: \e[3;4Habc\rx
+screen:
+|      |
+|      |
+|x  abc|
+|      |
+|      |
+cursor: 3,2

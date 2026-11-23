@@ -1,0 +1,8 @@
+# CAN ends a control sequence unacted and goes to ground: the final after
+# it prints.
+size: 10x2
+input: ab\e[2\x18Dx
+screen:
+|abDx      |
+|          |
+cursor: 1,5

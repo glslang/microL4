@@ -1,0 +1,8 @@
+# So does a four-byte sequence split two and two.
+size: 8x2
+input: a\xf0\x9f
+input: \x98\x80b
+screen:
+|a😀b     |
+|        |
+cursor: 1,4

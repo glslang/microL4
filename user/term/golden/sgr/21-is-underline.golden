@@ -1,0 +1,9 @@
+# SGR 21 (double underline) is SGR 4.
+size: 10x1
+input: \e[21mu
+screen:
+|u         |
+attrs:
+|U         |
+key: U = underline
+cursor: 1,2

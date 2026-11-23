@@ -1,0 +1,14 @@
+# DECSC saves the position, the pen and the character sets; DECRC puts
+# them back.
+size: 6x3
+input: \e[2;3H\e[4m\e(0\e7\e[m\e(B\e[H\e8q
+screen:
+|      |
+|  ─   |
+|      |
+attrs:
+|      |
+|  U   |
+|      |
+key: U = underline
+cursor: 2,4

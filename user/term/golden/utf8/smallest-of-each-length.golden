@@ -1,0 +1,8 @@
+# U+0080 is dropped (C1), U+00A1, U+0800 and U+10000 print: the smallest
+# of each length that is not overlong.
+size: 8x2
+input: \xc2\x80\xc2\xa1\xe0\xa0\x80\xf0\x90\x80\x80
+screen:
+|¡ࠀ𐀀     |
+|        |
+cursor: 1,4

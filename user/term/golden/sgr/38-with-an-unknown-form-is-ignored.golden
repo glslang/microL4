@@ -1,0 +1,7 @@
+# 38 ; 3 is no form term knows: it and the rest are ignored.
+size: 10x1
+input: \e[38;3;1;4ma
+screen:
+|a         |
+cursor: 1,2
+ignored: 1

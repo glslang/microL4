@@ -1,0 +1,10 @@
+# An empty parameter reads as 0, which resets.
+size: 10x1
+input: \e[4ma\e[;1mb
+screen:
+|ab        |
+attrs:
+|UB        |
+key: U = underline
+key: B = bold
+cursor: 1,3

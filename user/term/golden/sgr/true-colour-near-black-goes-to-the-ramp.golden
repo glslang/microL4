@@ -1,0 +1,9 @@
+# 5 ; 5 ; 5 is nearer the ramp's 8: 232.
+size: 10x1
+input: \e[38;2;5;5;5ma
+screen:
+|a         |
+attrs:
+|G         |
+key: G = fg 232
+cursor: 1,2

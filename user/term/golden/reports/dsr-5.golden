@@ -1,0 +1,11 @@
+# DSR 5 replies CSI 0 n: the terminal is fine.
+size: 10x5
+input: \e[5n
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 1,1
+reply: \e[0n

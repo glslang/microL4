@@ -1,0 +1,9 @@
+# A colon sends the sequence to CSI ignore, where CR still executes; the
+# final ends it, unacted.
+size: 10x2
+input: ab\e[1:2\rmx
+screen:
+|xb        |
+|          |
+cursor: 1,2
+ignored: 1

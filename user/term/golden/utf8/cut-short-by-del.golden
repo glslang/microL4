@@ -1,0 +1,7 @@
+# DEL ends a sequence too: U+FFFD, and DEL itself is ignored.
+size: 8x2
+input: \xc3\x7fx
+screen:
+|�x      |
+|        |
+cursor: 1,3

@@ -1,0 +1,9 @@
+# ESC ( A designates the UK set, which term does not have: ignored, and
+# # stays #.
+size: 10x2
+input: \e(Ax#
+screen:
+|x#        |
+|          |
+cursor: 1,3
+ignored: 1

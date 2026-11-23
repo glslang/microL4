@@ -1,0 +1,9 @@
+# With no parameter there is mode 0, which neither knows.
+size: 6x3
+input: \e[h\e[?h
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+ignored: 2

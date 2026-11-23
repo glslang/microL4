@@ -1,0 +1,8 @@
+# DECRST 47 makes the main buffer active again; the cursor stays.
+size: 6x3
+input: ab\e[?47hcd\e[?47l
+screen:
+|ab    |
+|      |
+|      |
+cursor: 1,5

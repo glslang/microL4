@@ -1,0 +1,10 @@
+# CPL moves up Pn rows to column 1.
+size: 6x5
+input: \e[4;4H\e[2Fx
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2

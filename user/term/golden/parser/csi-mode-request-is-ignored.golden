@@ -1,0 +1,9 @@
+# ESC [ ? 1 $ p, a mode request (a marker and an intermediate), is not
+# acted on: no reply.
+size: 10x2
+input: \e[?1$px
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

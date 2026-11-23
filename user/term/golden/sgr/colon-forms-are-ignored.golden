@@ -1,0 +1,8 @@
+# xterm's colon form of a true colour is ignored whole, since a colon
+# sends the sequence to CSI ignore.
+size: 10x1
+input: \e[38:2::255:0:0ma
+screen:
+|a         |
+cursor: 1,2
+ignored: 1

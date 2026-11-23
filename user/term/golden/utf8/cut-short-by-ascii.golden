@@ -1,0 +1,8 @@
+# A sequence cut short is one U+FFFD, however much of it came; the byte
+# that ended it then prints.
+size: 8x2
+input: \xe2\x82a\xf0\x9f\x98b\xc3c
+screen:
+|�a�b�c  |
+|        |
+cursor: 1,7

@@ -1,0 +1,9 @@
+# On a one-column screen every print sets the pending wrap and the next
+# wraps.
+size: 1x3
+input: abc
+screen:
+|a|
+|b|
+|c|
+cursor: 3,1 wrap

@@ -1,0 +1,15 @@
+# Cells moved by ICH keep their own pens.
+size: 6x4
+input: \e[1mab\e[mcd\e[1G\e[2@
+screen:
+|  abcd|
+|      |
+|      |
+|      |
+attrs:
+|  BB  |
+|      |
+|      |
+|      |
+key: B = bold
+cursor: 1,1

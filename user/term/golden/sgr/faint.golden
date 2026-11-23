@@ -1,0 +1,9 @@
+# SGR 2: faint.
+size: 10x1
+input: \e[2mf
+screen:
+|f         |
+attrs:
+|F         |
+key: F = faint
+cursor: 1,2

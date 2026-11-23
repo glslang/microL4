@@ -1,0 +1,7 @@
+# Pn 0 counts as 1: CUB 0 moves one left.
+size: 10x2
+input: ab\e[0Dx
+screen:
+|ax        |
+|          |
+cursor: 1,3

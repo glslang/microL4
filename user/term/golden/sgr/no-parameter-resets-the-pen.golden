@@ -1,0 +1,9 @@
+# SGR with no parameter is SGR 0.
+size: 10x1
+input: \e[1ma\e[mb
+screen:
+|ab        |
+attrs:
+|B         |
+key: B = bold
+cursor: 1,3

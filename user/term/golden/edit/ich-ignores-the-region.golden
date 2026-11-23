@@ -1,0 +1,11 @@
+# ICH acts on the cursor's line wherever it is: the region bounds lines,
+# not cells.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2;3r\e[4;1H\e[@
+screen:
+|abcdef|
+|ghijkl|
+|mnopqr|
+| stuvw|
+cursor: 4,1
+region: 2,3

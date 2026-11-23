@@ -1,0 +1,7 @@
+# On a ten-column screen the stops are 1 and 9; past 9, HT goes to 10.
+size: 10x2
+input: \t\tx
+screen:
+|         x|
+|          |
+cursor: 1,10 wrap

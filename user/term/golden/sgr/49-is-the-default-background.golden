@@ -1,0 +1,11 @@
+# 49 gives the default background, which is not colour 0.
+size: 10x1
+input: \e[31;44ma\e[49mb\e[40mc
+screen:
+|abc       |
+attrs:
+|XRK       |
+key: X = fg 1 bg 4
+key: R = fg 1
+key: K = fg 1 bg 0
+cursor: 1,4

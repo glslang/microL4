@@ -1,0 +1,10 @@
+# CNL moves down Pn rows to column 1.
+size: 6x5
+input: ab\e[2Ex
+screen:
+|ab    |
+|      |
+|x     |
+|      |
+|      |
+cursor: 3,2

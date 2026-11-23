@@ -1,0 +1,33 @@
+# A curses-style menu in the alternate buffer: the set-up an ncurses app
+# writes (a window operation term ignores, the region, keypad and cursor
+# key modes, the cursor hidden), a box in DEC Special Graphics, a
+# highlighted item and a reverse-video status line; then a Down key moves
+# the highlight.
+size: 20x6
+input: \e[?1049h\e[22;0;0t\e[1;6r\e(B\e[m\e[4l\e[?7h\e[?1h\e=\e[H\e[2J\e[?25l
+input: \e[1;1H\e(0lqqqqqqqqqqqqqqqqqqk\e(B
+input: \e[2;1H\e(0x\e(B \e[7m> Open\e[m\e[2;20H\e(0x\e(B
+input: \e[3;1H\e(0x\e(B   Save\e[3;20H\e(0x\e(B
+input: \e[4;1H\e(0x\e(B   Quit\e[4;20H\e(0x\e(B
+input: \e[5;1H\e(0mqqqqqqqqqqqqqqqqqqj\e(B
+input: \e[6;1H\e[7m Enter:pick q:quit  \e[m
+input: \e[2;3H  Open\e[3;3H\e[7m> Save\e[m
+screen:
+|┌──────────────────┐|
+|│   Open           │|
+|│ > Save           │|
+|│   Quit           │|
+|└──────────────────┘|
+| Enter:pick q:quit  |
+attrs:
+|                    |
+|                    |
+|  VVVVVV            |
+|                    |
+|                    |
+|VVVVVVVVVVVVVVVVVVVV|
+key: V = inverse
+cursor: 3,9 hidden
+buffer: alternate
+ignored: 1
+modes: cursor-keys keypad

@@ -1,0 +1,9 @@
+# The decoder's state survives the end of a Write: € in three writes.
+size: 8x2
+input: \xe2
+input: \x82
+input: \xac
+screen:
+|€       |
+|        |
+cursor: 1,2

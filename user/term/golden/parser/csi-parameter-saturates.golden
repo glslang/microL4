@@ -1,0 +1,8 @@
+# A parameter saturates at 65,535: CUF 99999 stops at the last column,
+# and the print there sets the pending wrap.
+size: 10x2
+input: \e[99999Cx
+screen:
+|         x|
+|          |
+cursor: 1,10 wrap

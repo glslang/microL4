@@ -1,0 +1,8 @@
+# After SGR 49 the background is the default again, and blanks are plain.
+size: 5x3
+input: abcde\e[44m\e[49m\e[2J
+screen:
+|     |
+|     |
+|     |
+cursor: 1,5

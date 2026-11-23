@@ -1,0 +1,9 @@
+# ICH in the last column replaces that cell with a blank.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2;6H\e[@
+screen:
+|abcdef|
+|ghijk |
+|mnopqr|
+|stuvwx|
+cursor: 2,6

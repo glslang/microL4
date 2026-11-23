@@ -1,0 +1,8 @@
+# Decoded code points U+0080 to U+009F are dropped: C2 85 (NEL) neither
+# prints nor moves.
+size: 8x2
+input: a\xc2\x85b\xc2\x80\xc2\x9fc
+screen:
+|abc     |
+|        |
+cursor: 1,4

@@ -1,0 +1,13 @@
+# ED 2 in a coloured pen colours every cell.
+size: 5x3
+input: abcde\e[46m\e[2J
+screen:
+|     |
+|     |
+|     |
+attrs:
+|CCCCC|
+|CCCCC|
+|CCCCC|
+key: C = bg 6
+cursor: 1,5

@@ -1,0 +1,8 @@
+# An SOS string is ignored and counted once.
+size: 10x2
+input: \eXhello\e\\x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

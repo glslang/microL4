@@ -1,0 +1,11 @@
+# DA replies as a VT100 with advanced video.
+size: 10x5
+input: \e[c
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 1,1
+reply: \e[?1;2c

@@ -1,0 +1,10 @@
+# DECSET 5 draws every cell with its colours swapped; the cells
+# themselves do not change.
+size: 6x3
+input: \e[?5hab
+screen:
+|ab    |
+|      |
+|      |
+cursor: 1,3
+modes: reverse

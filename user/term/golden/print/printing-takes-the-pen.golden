@@ -1,0 +1,13 @@
+# Each cell takes the pen in effect when it was printed.
+size: 5x3
+input: \e[1;31mab\e[0mc
+screen:
+|abc  |
+|     |
+|     |
+attrs:
+|RR   |
+|     |
+|     |
+key: R = bold fg 1
+cursor: 1,4

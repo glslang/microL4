@@ -1,0 +1,8 @@
+# REP prints the last printed code point Pn more times.
+size: 5x3
+input: a\e[3b
+screen:
+|aaaa |
+|     |
+|     |
+cursor: 1,5

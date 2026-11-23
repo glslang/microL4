@@ -1,0 +1,11 @@
+# DA with any parameter but 0 is ignored, with no reply.
+size: 10x5
+input: \e[1c
+screen:
+|          |
+|          |
+|          |
+|          |
+|          |
+cursor: 1,1
+ignored: 1

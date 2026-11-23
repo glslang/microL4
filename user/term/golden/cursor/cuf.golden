@@ -1,0 +1,10 @@
+# CUF moves right Pn columns.
+size: 6x5
+input: \e[3Cx
+screen:
+|   x  |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,5

@@ -1,0 +1,8 @@
+# Erasing in the alternate buffer leaves the main one as it was.
+size: 5x3
+input: abc\e[?47hxy\e[2J\e[?47l
+screen:
+|abc  |
+|     |
+|     |
+cursor: 1,5

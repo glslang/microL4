@@ -1,0 +1,8 @@
+# ESC [ = 4 h likewise.
+size: 10x2
+input: ab\e[D\e[=4hx
+screen:
+|ax        |
+|          |
+cursor: 1,3
+ignored: 1

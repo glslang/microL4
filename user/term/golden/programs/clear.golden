@@ -1,0 +1,10 @@
+# clear, as ncurses writes it for xterm: home, ED 2, and ED 3 for the
+# scrollback term does not have.
+size: 10x3
+input: abc\r\ndef
+input: \e[H\e[2J\e[3J
+screen:
+|          |
+|          |
+|          |
+cursor: 1,1

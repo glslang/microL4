@@ -1,0 +1,7 @@
+# SUB does the same.
+size: 10x2
+input: ab\e[2\x1aDx
+screen:
+|abDx      |
+|          |
+cursor: 1,5

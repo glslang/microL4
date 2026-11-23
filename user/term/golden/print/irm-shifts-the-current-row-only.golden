@@ -1,0 +1,9 @@
+# Insertion moves only the cursor's row.
+size: 5x3
+input: abcde\r\nfghij\e[1;1H\e[4hX
+screen:
+|Xabcd|
+|fghij|
+|     |
+cursor: 1,2
+modes: insert

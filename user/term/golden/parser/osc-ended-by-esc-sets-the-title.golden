@@ -1,0 +1,9 @@
+# ESC ends the string too; what follows is a new escape sequence, here
+# IND.
+size: 10x2
+input: \e]2;abc\eDx
+screen:
+|          |
+|x         |
+cursor: 2,2
+title: abc

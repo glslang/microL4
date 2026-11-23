@@ -1,0 +1,11 @@
+# U+FFFD prints in the pen, like any code point.
+size: 8x2
+input: \e[31m\x80
+screen:
+|�       |
+|        |
+attrs:
+|R       |
+|        |
+key: R = fg 1
+cursor: 1,2

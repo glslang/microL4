@@ -1,0 +1,10 @@
+# Setting DECOM homes the cursor, to the region's top.
+size: 6x3
+input: \e[2;3r\e[3;3H\e[?6hx
+screen:
+|      |
+|x     |
+|      |
+cursor: 2,2
+modes: origin
+region: 2,3

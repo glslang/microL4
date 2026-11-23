@@ -1,0 +1,8 @@
+# A move to the cell the cursor is in clears the pending wrap.
+size: 5x3
+input: abcde\e[1;5Hx
+screen:
+|abcdx|
+|     |
+|     |
+cursor: 1,5 wrap

@@ -1,0 +1,10 @@
+# BS stops at column 1; it does not go to the row above.
+size: 6x5
+input: \e[2;1H\x08\x08x
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2

@@ -1,0 +1,8 @@
+# CUP 65536 ; 99999999 saturates both parameters and stops at the last row
+# and column.
+size: 10x2
+input: \e[65536;99999999Hx
+screen:
+|          |
+|         x|
+cursor: 2,10 wrap

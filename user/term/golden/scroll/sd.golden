@@ -1,0 +1,9 @@
+# SD scrolls the region down one; the cursor stays.
+size: 4x4
+input: 1\r\n2\r\n3\r\n4\e[T
+screen:
+|    |
+|1   |
+|2   |
+|3   |
+cursor: 4,2

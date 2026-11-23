@@ -1,0 +1,7 @@
+# Code points wrap at the right margin as ASCII does.
+size: 4x2
+input: abc\xe2\x82\xac\xc3\xa9
+screen:
+|abc€|
+|é   |
+cursor: 2,2

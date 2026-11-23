@@ -1,0 +1,11 @@
+# A cursor that started below the region stops at the last row.
+size: 6x5
+input: \e[1;3r\e[4;1H\e[9Bx
+screen:
+|      |
+|      |
+|      |
+|      |
+|x     |
+cursor: 5,2
+region: 1,3

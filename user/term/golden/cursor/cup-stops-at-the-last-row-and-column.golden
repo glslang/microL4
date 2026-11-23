@@ -1,0 +1,10 @@
+# A position past the screen stops at its last row and column.
+size: 6x5
+input: \e[9;9Hx
+screen:
+|      |
+|      |
+|      |
+|      |
+|     x|
+cursor: 5,6 wrap

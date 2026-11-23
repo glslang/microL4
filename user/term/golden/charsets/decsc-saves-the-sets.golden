@@ -1,0 +1,7 @@
+# DECSC saves G0, G1 and which is in GL, with the position; DECRC brings
+# them back, so the q after it is DEC's ─ again.
+size: 8x1
+input: \e)0\x0e\e7\x0f\e)B\e[5Gq\e8q
+screen:
+|─   q   |
+cursor: 1,2

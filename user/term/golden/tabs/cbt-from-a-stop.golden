@@ -1,0 +1,7 @@
+# From a stop, CBT goes to the one before it.
+size: 20x2
+input: \e[17G\e[Zx
+screen:
+|        x           |
+|                    |
+cursor: 1,10

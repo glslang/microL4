@@ -1,0 +1,10 @@
+# A top of 0 counts as row 1.
+size: 4x4
+input: \e[0;3r
+screen:
+|    |
+|    |
+|    |
+|    |
+cursor: 1,1
+region: 1,3

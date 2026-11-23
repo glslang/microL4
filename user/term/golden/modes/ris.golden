@@ -1,0 +1,9 @@
+# RIS restores the power-on state: blank buffers, the cursor home in the
+# default pen, every mode at its default, no region, no title.
+size: 6x3
+input: \e[1;31m\e[?5h\e[4h\e[20h\e[?7l\e[2;3r\e[?6h\e[?25l\e]2;t\x07ab\ec
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

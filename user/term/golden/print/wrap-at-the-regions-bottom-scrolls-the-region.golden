@@ -1,0 +1,11 @@
+# A wrap from the region's bottom row scrolls the region alone: rows 1 and
+# 4 stay.
+size: 5x4
+input: 1111\e[4H4444\e[2;3r\e[3Habcdefg
+screen:
+|1111 |
+|abcde|
+|fg   |
+|4444 |
+cursor: 3,3
+region: 2,3

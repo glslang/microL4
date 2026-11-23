@@ -1,0 +1,8 @@
+# DECSET 25 shows it again.
+size: 6x3
+input: \e[?25l\e[?25h
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

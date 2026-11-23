@@ -1,0 +1,9 @@
+# The whole screen set by hand is the default region.
+size: 4x4
+input: \e[1;4r
+screen:
+|    |
+|    |
+|    |
+|    |
+cursor: 1,1

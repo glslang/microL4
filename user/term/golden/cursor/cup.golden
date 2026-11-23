@@ -1,0 +1,10 @@
+# CUP moves to row and column, counted from 1.
+size: 6x5
+input: \e[3;4Hx
+screen:
+|      |
+|      |
+|   x  |
+|      |
+|      |
+cursor: 3,5

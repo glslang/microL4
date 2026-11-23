@@ -1,0 +1,10 @@
+# HPA (CSI `) is CHA.
+size: 6x5
+input: \e[3`x
+screen:
+|  x   |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,4

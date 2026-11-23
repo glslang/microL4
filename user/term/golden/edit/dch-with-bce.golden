@@ -1,0 +1,15 @@
+# DCH's blanks take the pen's background.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[42m\e[1;2H\e[2P
+screen:
+|adef  |
+|ghijkl|
+|mnopqr|
+|stuvwx|
+attrs:
+|    GG|
+|      |
+|      |
+|      |
+key: G = bg 2
+cursor: 1,2

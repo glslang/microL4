@@ -1,0 +1,15 @@
+# IL's blank lines take the pen's background.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[2H\e[41m\e[L
+screen:
+|abcdef|
+|      |
+|ghijkl|
+|mnopqr|
+attrs:
+|      |
+|RRRRRR|
+|      |
+|      |
+key: R = bg 1
+cursor: 2,1

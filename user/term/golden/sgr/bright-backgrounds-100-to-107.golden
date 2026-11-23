@@ -1,0 +1,16 @@
+# 100 to 107 set backgrounds 8 to 15.
+size: 10x1
+input: \e[100ma\e[101mb\e[102mc\e[103md\e[104me\e[105mf\e[106mg\e[107mh
+screen:
+|abcdefgh  |
+attrs:
+|89ABCDEF  |
+key: 8 = bg 8
+key: 9 = bg 9
+key: A = bg 10
+key: B = bg 11
+key: C = bg 12
+key: D = bg 13
+key: E = bg 14
+key: F = bg 15
+cursor: 1,9

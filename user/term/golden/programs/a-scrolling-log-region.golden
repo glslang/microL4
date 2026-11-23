@@ -1,0 +1,30 @@
+# A title bar coloured to the edge by EL, a log in a scroll region that
+# each key appends to, and a status line: the shape of the tui demo.
+size: 20x6
+input: \e[?1049h\e[H\e[2J\e[1;37;44m demo\e[K\e[m
+input: \e[3;5r
+input: \e[5H\r\nkey 1: Down
+input: \e[5H\r\nkey 2: Down
+input: \e[5H\r\nkey 3: Enter
+input: \e[5H\r\nkey 4: q
+input: \e[6H\e[7m status\e[K\e[m
+screen:
+| demo               |
+|                    |
+|key 2: Down         |
+|key 3: Enter        |
+|key 4: q            |
+| status             |
+attrs:
+|TTTTTBBBBBBBBBBBBBBB|
+|                    |
+|                    |
+|                    |
+|                    |
+|VVVVVVV             |
+key: T = bold fg 7 bg 4
+key: B = bg 4
+key: V = inverse
+cursor: 6,8
+buffer: alternate
+region: 3,5

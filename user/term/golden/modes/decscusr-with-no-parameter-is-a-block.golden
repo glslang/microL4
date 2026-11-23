@@ -1,0 +1,8 @@
+# DECSCUSR with no parameter is 0, a block.
+size: 6x3
+input: \e[4 q\e[ q
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

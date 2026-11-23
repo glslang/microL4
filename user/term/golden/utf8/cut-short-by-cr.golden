@@ -1,0 +1,7 @@
+# A C0 control ends a sequence: U+FFFD prints first, then CR acts.
+size: 8x2
+input: ab\xe2\x82\rx
+screen:
+|xb�     |
+|        |
+cursor: 1,2

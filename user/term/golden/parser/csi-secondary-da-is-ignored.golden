@@ -1,0 +1,9 @@
+# ESC [ > c, the secondary DA, has a private marker DA does not take:
+# ignored, with no reply.
+size: 10x2
+input: \e[>cx\e[>0cy
+screen:
+|xy        |
+|          |
+cursor: 1,3
+ignored: 2

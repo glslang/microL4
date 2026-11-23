@@ -1,0 +1,10 @@
+# A control sequence split across writes acts as it would whole.
+size: 10x2
+input: \e
+input: [
+input: 2
+input: Cx
+screen:
+|  x       |
+|          |
+cursor: 1,4

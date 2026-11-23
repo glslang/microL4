@@ -1,0 +1,8 @@
+# A colon straight after ESC [ goes to CSI ignore.
+size: 10x2
+input: \e[:4mx
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

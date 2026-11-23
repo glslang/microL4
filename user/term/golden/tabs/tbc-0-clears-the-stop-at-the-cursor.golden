@@ -1,0 +1,7 @@
+# TBC 0 clears the stop at the cursor's column: HT from 1 then skips 9.
+size: 20x2
+input: \e[9G\e[g\r\tx
+screen:
+|                x   |
+|                    |
+cursor: 1,18

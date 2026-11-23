@@ -1,0 +1,7 @@
+# With no stop after the cursor, HT goes to the last column.
+size: 20x2
+input: \t\t\tx
+screen:
+|                   x|
+|                    |
+cursor: 1,20 wrap

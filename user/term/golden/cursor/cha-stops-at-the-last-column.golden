@@ -1,0 +1,10 @@
+# A column past the screen stops at the last.
+size: 6x5
+input: \e[99Gx
+screen:
+|     x|
+|      |
+|      |
+|      |
+|      |
+cursor: 1,6 wrap

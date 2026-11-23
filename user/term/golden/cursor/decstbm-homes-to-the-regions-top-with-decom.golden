@@ -1,0 +1,12 @@
+# Under DECOM, DECSTBM's home is the new region's top.
+size: 6x5
+input: \e[?6h\e[3;3H\e[2;4rx
+screen:
+|      |
+|x     |
+|      |
+|      |
+|      |
+cursor: 2,2
+modes: origin
+region: 2,4

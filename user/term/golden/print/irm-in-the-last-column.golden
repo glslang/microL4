@@ -1,0 +1,10 @@
+# A print in the last column with IRM set writes there, shifting nothing,
+# and sets the pending wrap.
+size: 5x3
+input: abcd\e[4hX
+screen:
+|abcdX|
+|     |
+|     |
+cursor: 1,5 wrap
+modes: insert

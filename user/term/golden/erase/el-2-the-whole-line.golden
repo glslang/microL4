@@ -1,0 +1,8 @@
+# EL 2 erases the cursor's line; the cursor stays.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;3H\e[2K
+screen:
+|abcde|
+|     |
+|klmno|
+cursor: 2,3

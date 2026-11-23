@@ -1,0 +1,10 @@
+# CUB moves left Pn columns.
+size: 6x5
+input: abcd\e[3Dx
+screen:
+|axcd  |
+|      |
+|      |
+|      |
+|      |
+cursor: 1,3

@@ -1,0 +1,8 @@
+# DEL inside a control sequence is ignored: CUB 2 still reads its
+# parameter.
+size: 10x2
+input: ab\e[\x7f2\x7fDx
+screen:
+|xb        |
+|          |
+cursor: 1,2

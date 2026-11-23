@@ -1,0 +1,10 @@
+# Nothing saved in the alternate buffer: DECRC there homes the cursor
+# with the default pen.
+size: 6x3
+input: \e[2;2H\e7\e[?47h\e[1m\e8x
+screen:
+|x     |
+|      |
+|      |
+cursor: 1,2
+buffer: alternate

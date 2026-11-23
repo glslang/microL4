@@ -1,0 +1,7 @@
+# CAN in ground executes, doing nothing.
+size: 10x2
+input: a\x18b
+screen:
+|ab        |
+|          |
+cursor: 1,3

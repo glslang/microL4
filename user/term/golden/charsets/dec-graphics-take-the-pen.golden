@@ -1,0 +1,9 @@
+# A DEC Special Graphics character takes the pen like any print.
+size: 8x1
+input: \e[1m\e(0x\e(B
+screen:
+|│       |
+attrs:
+|B       |
+key: B = bold
+cursor: 1,2

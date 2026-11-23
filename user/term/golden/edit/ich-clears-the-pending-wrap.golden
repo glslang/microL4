@@ -1,0 +1,10 @@
+# ICH clears the pending wrap: z then prints in the last column without
+# wrapping.
+size: 6x4
+input: abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx\e[@z
+screen:
+|abcdef|
+|ghijkl|
+|mnopqr|
+|stuvwz|
+cursor: 4,6 wrap

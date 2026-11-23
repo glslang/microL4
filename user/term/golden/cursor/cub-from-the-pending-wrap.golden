@@ -1,0 +1,10 @@
+# CUB from the pending wrap counts from the last column.
+size: 6x5
+input: abcdef\e[2Dx
+screen:
+|abcxef|
+|      |
+|      |
+|      |
+|      |
+cursor: 1,5

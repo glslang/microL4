@@ -1,0 +1,9 @@
+# LNM changes LF, VT and FF only: IND still keeps the column.
+size: 6x3
+input: \e[20hab\eDc
+screen:
+|ab    |
+|  c   |
+|      |
+cursor: 2,4
+modes: newline

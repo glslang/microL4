@@ -1,0 +1,8 @@
+# E2 then ( is a sequence cut short, U+FFFD, then ( prints; A1 is then a
+# lone continuation.
+size: 8x2
+input: \xe2(\xa1
+screen:
+|�(�     |
+|        |
+cursor: 1,4

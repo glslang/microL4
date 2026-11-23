@@ -1,0 +1,9 @@
+# 38 ; 5 ; n sets foreground n.
+size: 10x1
+input: \e[38;5;200ma
+screen:
+|a         |
+attrs:
+|P         |
+key: P = fg 200
+cursor: 1,2

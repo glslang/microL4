@@ -1,0 +1,9 @@
+# A 0 among other parameters resets what came before it.
+size: 10x1
+input: \e[1;0;4ma
+screen:
+|a         |
+attrs:
+|U         |
+key: U = underline
+cursor: 1,2

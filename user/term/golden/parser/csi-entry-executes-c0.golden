@@ -1,0 +1,8 @@
+# CR inside CSI entry executes; the sequence then dispatches, CUF 1 from
+# column 1.
+size: 10x2
+input: ab\e[\rCx
+screen:
+|ax        |
+|          |
+cursor: 1,3

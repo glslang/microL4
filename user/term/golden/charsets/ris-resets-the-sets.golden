@@ -1,0 +1,6 @@
+# RIS puts ASCII in G0 and G1 and G0 in GL.
+size: 8x1
+input: \e(0\e)0\x0e\ecq
+screen:
+|q       |
+cursor: 1,2

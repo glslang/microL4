@@ -1,0 +1,8 @@
+# CSI s and CSI u are DECSC and DECRC.
+size: 6x3
+input: \e[2;3H\e[s\e[H\e[ux
+screen:
+|      |
+|  x   |
+|      |
+cursor: 2,4

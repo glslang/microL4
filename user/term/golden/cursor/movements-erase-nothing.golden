@@ -1,0 +1,10 @@
+# Moving over cells changes none of them.
+size: 6x5
+input: abcdef\r\nghijkl\e[H\e[3C\e[B\e[2D\e[A
+screen:
+|abcdef|
+|ghijkl|
+|      |
+|      |
+|      |
+cursor: 1,2

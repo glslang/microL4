@@ -1,0 +1,9 @@
+# ESC = is stored only.
+size: 6x3
+input: \e=
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1
+modes: keypad

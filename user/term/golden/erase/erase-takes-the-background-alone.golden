@@ -1,0 +1,14 @@
+# A blank has the pen's background and nothing else: no foreground, no
+# attribute.
+size: 5x3
+input: abcde\e[1;4;7;31;42m\e[2;1H\e[K
+screen:
+|abcde|
+|     |
+|     |
+attrs:
+|     |
+|GGGGG|
+|     |
+key: G = bg 2
+cursor: 2,1

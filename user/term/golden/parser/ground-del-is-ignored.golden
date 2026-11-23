@@ -1,0 +1,7 @@
+# DEL is ignored in ground: it prints nothing and moves nothing.
+size: 10x2
+input: a\x7fb
+screen:
+|ab        |
+|          |
+cursor: 1,3

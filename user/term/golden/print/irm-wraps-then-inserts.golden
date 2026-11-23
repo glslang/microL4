@@ -1,0 +1,10 @@
+# With IRM set, a pending wrap still wraps first, then the print inserts
+# in the new row.
+size: 5x3
+input: abcde\r\nfghij\e[1;5Hx\e[4hy
+screen:
+|abcdx|
+|yfghi|
+|     |
+cursor: 2,2
+modes: insert

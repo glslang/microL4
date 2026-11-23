@@ -1,0 +1,10 @@
+# DECRC with nothing saved homes the cursor with the default pen, ASCII in
+# G0 and G1 and DECOM off.
+size: 6x3
+input: \e[1;31m\e(0\e)0\x0e\e[2;3r\e[?6h\e[2;3H\e8q\e[3Hx
+screen:
+|q     |
+|      |
+|x     |
+cursor: 3,2
+region: 2,3

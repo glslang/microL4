@@ -1,0 +1,8 @@
+# 0x84 (IND in C1) and 0x8D (RI) are lone continuation bytes, not
+# controls: each prints U+FFFD and the cursor moves on.
+size: 10x2
+input: a\x84\x8db
+screen:
+|a��b      |
+|          |
+cursor: 1,5

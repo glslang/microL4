@@ -1,0 +1,8 @@
+# An APC string is ignored and counted once.
+size: 10x2
+input: \e_hi\e\\x
+screen:
+|x         |
+|          |
+cursor: 1,2
+ignored: 1

@@ -1,0 +1,8 @@
+# ECH blanks Pn cells from the cursor; the cursor stays.
+size: 5x3
+input: abcde\r\nfghij\r\nklmno\e[2;2H\e[2X
+screen:
+|abcde|
+|f  ij|
+|klmno|
+cursor: 2,2

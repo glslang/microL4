@@ -1,0 +1,8 @@
+# REP is a dispatch itself: a second REP straight after it does nothing.
+size: 5x3
+input: a\e[b\e[bx
+screen:
+|aax  |
+|     |
+|     |
+cursor: 1,4

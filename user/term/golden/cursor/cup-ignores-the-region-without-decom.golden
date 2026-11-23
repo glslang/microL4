@@ -1,0 +1,11 @@
+# Without DECOM, CUP is absolute and may leave the region.
+size: 6x5
+input: \e[2;3r\e[5;2Hx
+screen:
+|      |
+|      |
+|      |
+|      |
+| x    |
+cursor: 5,3
+region: 2,3

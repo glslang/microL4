@@ -1,0 +1,8 @@
+# With nothing printed yet, REP does nothing.
+size: 5x3
+input: \e[3bx
+screen:
+|x    |
+|     |
+|     |
+cursor: 1,2

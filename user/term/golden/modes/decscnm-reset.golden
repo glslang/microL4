@@ -1,0 +1,8 @@
+# DECRST 5 puts the colours back.
+size: 6x3
+input: \e[?5h\e[?5l
+screen:
+|      |
+|      |
+|      |
+cursor: 1,1

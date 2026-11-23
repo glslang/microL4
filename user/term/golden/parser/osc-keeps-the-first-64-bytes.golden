@@ -1,0 +1,9 @@
+# The first 64 bytes of an OSC string are kept; the title is what follows
+# its 2; there, so at most 62 bytes.
+size: 10x2
+input: \e]2;0123456789012345678901234567890123456789012345678901234567890123456789\x07
+screen:
+|          |
+|          |
+cursor: 1,1
+title: 01234567890123456789012345678901234567890123456789012345678901
