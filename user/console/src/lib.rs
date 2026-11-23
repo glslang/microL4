@@ -18,6 +18,13 @@
 //! console never waits for a client: a `Read` it cannot answer yet is saved
 //! with `CNode_SaveCaller` into slot 7 + its badge and answered later with
 //! `Send` on that slot. It blocks only in calls to uart, which always reply.
+//!
+//! From M8 client 4 is raw ([`RAW`]): the bytes typed while it has focus,
+//! but the focus keys, go unedited and unechoed to its raw queue; after
+//! each uart `Read` that queued any, console signals term's notification
+//! NT once ([`slot::KEYS`]), and term fetches them with `ReadRaw`, which
+//! answers at once. Client 4 has no lines, so its `Read` is `BadBadge`, as
+//! is any other client's `ReadRaw`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -36,9 +43,12 @@ use libsys::proto::{self, MAX_BYTES, Refusal, label};
 #[cfg(target_os = "none")]
 pub use run::run;
 pub use terminal::{
-    CLIENTS, Chunks, EDIT, LINE, NAME, Out, Owner, ReadAnswer, STATUS_OFF, STATUS_ON, Source,
-    Terminal, WAITING, passes, shown,
+    CLIENTS, Chunks, EDIT, LINE, NAME, Out, Owner, RAW, RAW_QUEUE, ReadAnswer, STATUS_OFF,
+    STATUS_ON, Source, Terminal, WAITING, passes, shown,
 };
+
+const _: () = assert!(RAW as u64 + 1 == proto::CONSOLE_RAW_CLIENT);
+const _: () = assert!(RAW_QUEUE == libsys::console::MAX_RAW && RAW_QUEUE <= MAX_BYTES);
 
 /// console's CSpace: a 16-slot CNode with guard 0 of size 60, so `CPtr`
 /// `n` is slot `n` (`docs/design.md`, "Capabilities").
@@ -53,6 +63,10 @@ pub mod slot {
     pub const UART: u64 = 3;
     /// Endpoint F, console's fault endpoint.
     pub const FAULT: u64 = 4;
+    /// From M8, notification NT, term's, with Write and badge `KEYS`:
+    /// signalled once per uart `Read` that put bytes in the raw queue. An
+    /// empty slot makes the signal do nothing.
+    pub const KEYS: u64 = 5;
 
     /// Where client `badge`'s saved Read reply goes: slots 8 to 15.
     pub const fn saved_read(badge: u64) -> u64 {
@@ -68,12 +82,15 @@ pub enum Request<'a> {
     Flush,
     Read,
     Sync,
+    /// Client 4's raw queue, at once.
+    ReadRaw,
 }
 
-/// Decodes a request: its label, then its badge (1 to 8), then its length
-/// (`docs/design.md`, "Protocols"), any byte string into `buf`. Returns
-/// the client's index, `badge - 1`. `word` reads MR0 and up. Requests
-/// without words ignore any sent.
+/// Decodes a request: its label, then its badge (1 to 8; `ReadRaw` only
+/// from 4, and `Read` from any but 4), then its length (`docs/design.md`,
+/// "Protocols"), any byte string into `buf`. Returns the client's index,
+/// `badge - 1`. `word` reads MR0 and up. Requests without words ignore any
+/// sent.
 pub fn decode<'a>(
     label: u64,
     badge: u64,
@@ -84,11 +101,20 @@ pub fn decode<'a>(
     let limit = match label {
         label::CONSOLE_ATTACH => NAME,
         label::CONSOLE_WRITE => MAX_BYTES,
-        label::CONSOLE_FLUSH | label::CONSOLE_READ | label::CONSOLE_SYNC => 0,
+        label::CONSOLE_FLUSH
+        | label::CONSOLE_READ
+        | label::CONSOLE_SYNC
+        | label::CONSOLE_READ_RAW => 0,
         _ => return Err(Refusal::BadLabel),
     };
     if !(1..=CLIENTS as u64).contains(&badge) {
         return Err(Refusal::BadBadge);
+    }
+    let raw = badge == proto::CONSOLE_RAW_CLIENT;
+    match label {
+        label::CONSOLE_READ if raw => return Err(Refusal::BadBadge),
+        label::CONSOLE_READ_RAW if !raw => return Err(Refusal::BadBadge),
+        _ => {}
     }
     let c = badge as usize - 1;
     let req = match label {
@@ -102,6 +128,7 @@ pub fn decode<'a>(
         }
         label::CONSOLE_FLUSH => Request::Flush,
         label::CONSOLE_READ => Request::Read,
+        label::CONSOLE_READ_RAW => Request::ReadRaw,
         _ => Request::Sync,
     };
     Ok((c, req))
