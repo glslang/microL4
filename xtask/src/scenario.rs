@@ -717,20 +717,7 @@ fn run_one(
         (Some(_), false) => {}
     }
     why.extend(screendump_errors);
-
-    // Only a run that passed everything else may bless its screens: a
-    // failed one may show a panic, or the wrong moment.
-    let bless = goldens.bless && why.is_empty();
-    if goldens.bless && !bless && !screens.is_empty() {
-        why.push("--bless wrote no golden, since the scenario failed".into());
-    }
-    let mut notes = Vec::new();
-    for (name, ppm) in &screens {
-        match check_screen(sc, name, ppm, goldens, bless) {
-            Ok(note) => notes.extend(note),
-            Err(e) => why.push(e),
-        }
-    }
+    let notes = check_screens(sc, &screens, goldens, &mut why);
 
     let mut report = String::new();
     if why.is_empty() {
@@ -757,6 +744,31 @@ fn run_one(
         }
     }
     Ok((why.is_empty(), report))
+}
+
+/// Checks a run's screens, each a screendump's name and its PPM, against
+/// their goldens, once `why` holds every other reason the run failed; adds
+/// the screens' failures to `why` and returns their notes. Only a run that
+/// passed everything else may bless its screens: a failed one may show a
+/// panic, or the wrong moment.
+fn check_screens(
+    sc: &Scenario,
+    screens: &[(&str, PathBuf)],
+    goldens: &Goldens,
+    why: &mut Vec<String>,
+) -> Vec<String> {
+    let bless = goldens.bless && why.is_empty();
+    if goldens.bless && !bless && !screens.is_empty() {
+        why.push("--bless wrote no golden, since the scenario failed".into());
+    }
+    let mut notes = Vec::new();
+    for (name, ppm) in screens {
+        match check_screen(sc, name, ppm, goldens, bless) {
+            Ok(note) => notes.extend(note),
+            Err(e) => why.push(e),
+        }
+    }
+    notes
 }
 
 /// A screendump's files beside its scenario's log: QEMU's PPM, deleted once
@@ -860,12 +872,16 @@ fn check_screen(
             screen::HOST_RENDER
         )));
     }
+    // `Source` names QEMU, but OVMF draws on the screen too (`ovmf` is all
+    // OVMF's), so an OVMF update can change a golden with QEMU the same.
     let qemu = source(&golden)
         .filter(|v| *v != goldens.qemu)
         .map(|v| format!("; the golden came from {v:?}, this is {:?}", goldens.qemu))
         .unwrap_or_default();
     Err(fail(format!(
-        "differs from {}: {difference}{qemu}; the screen is in {}{shown}; if it is right, {bless_hint}",
+        "differs from {}: {difference}{qemu}; a golden QEMU drew also depends on the OVMF \
+         build, which its Source does not record; the screen is in {}{shown}; if it is \
+         right, {bless_hint}",
         rel(&path),
         rel(&png)
     )))
@@ -1462,9 +1478,17 @@ expect: TEST PASS
         assert_eq!(fs::metadata(&golden).unwrap().modified().unwrap(), before);
         assert!(!diff.exists());
 
-        // One pixel off, from another QEMU: a difference image beside it.
+        // One pixel off, from the same QEMU: OVMF may have changed, which
+        // Source does not record.
         let mut off = img.clone();
         off.rgb[3 * 5] ^= 1;
+        let ovmf =
+            "a golden QEMU drew also depends on the OVMF build, which its Source does not record";
+        let e = check(&goldens, &off).unwrap_err();
+        assert!(e.contains(ovmf) && !e.contains("came from"), "{e}");
+        fs::remove_file(&diff).unwrap();
+
+        // From another QEMU: a difference image beside it.
         goldens.qemu = "QEMU emulator version 9.0.0".into();
         let e = check(&goldens, &off).unwrap_err();
         assert!(
@@ -1472,7 +1496,8 @@ expect: TEST PASS
             "{e}"
         );
         assert!(
-            e.contains("the golden came from \"QEMU emulator version 8.2.2\", this is \"QEMU emulator version 9.0.0\""),
+            e.contains("the golden came from \"QEMU emulator version 8.2.2\", this is \"QEMU emulator version 9.0.0\"; ")
+                && e.contains(ovmf),
             "{e}"
         );
         assert!(e.contains("where they differ in magenta in "), "{e}");
@@ -1571,9 +1596,11 @@ expect: TEST PASS
                 bless,
                 "{e}"
             );
-            // It neither offers --bless nor names a QEMU version.
+            // It neither offers --bless nor names a QEMU version or OVMF.
             assert!(
-                !e.contains("makes it the golden") && !e.contains("came from"),
+                !e.contains("makes it the golden")
+                    && !e.contains("came from")
+                    && !e.contains("OVMF"),
                 "{e}"
             );
             assert!(diff.exists() && png.exists(), "{e}");
@@ -1591,6 +1618,75 @@ expect: TEST PASS
         let blessed = screen::decode_png(&fs::read(&golden).unwrap()).unwrap();
         assert_eq!(blessed.image, off);
         assert_eq!(blessed.text, [("Source".into(), goldens.qemu.clone())]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Only a run that passed everything else blesses its screens: with
+    /// another failure, `--bless` writes no golden and leaves one that
+    /// differs as it is, says so, and the screen fails its check as
+    /// without `--bless`; with none, it blesses.
+    #[test]
+    fn a_failed_run_never_blesses() {
+        let dir = unit_dir("a_failed_run_never_blesses");
+        let sc = parse("tui", "exit: success\nexpect: x\nscreendump: s\n").unwrap();
+        let goldens = Goldens {
+            dir: dir.join("golden"),
+            bless: true,
+            qemu: "QEMU emulator version 8.2.2".into(),
+        };
+        let golden = goldens.dir.join("s.png");
+        let img = screen::Image::new(4, 3, (0..36).map(|i| i * 7).collect()).unwrap();
+        let mut off = img.clone();
+        off.rgb[0] ^= 0x80;
+        let failed = "timed out after 60 s waiting for \"x\"";
+        let run = |why: &mut Vec<String>| {
+            check_screens(&sc, &[("s", write_ppm(&dir, "s", &img))], &goldens, why)
+        };
+
+        // No golden: none is written.
+        let mut why = vec![failed.to_string()];
+        assert_eq!(run(&mut why), Vec::<String>::new());
+        assert!(!golden.exists());
+        assert_eq!(why.len(), 3, "{why:?}");
+        assert_eq!(
+            why[..2],
+            [failed, "--bless wrote no golden, since the scenario failed"]
+        );
+        assert!(
+            why[2].starts_with("screendump \"s\": no golden "),
+            "{why:?}"
+        );
+
+        // A golden that differs stays as it is.
+        fs::create_dir_all(&goldens.dir).unwrap();
+        let old = screen::encode_png(&off, &[("Source", &goldens.qemu)]);
+        fs::write(&golden, &old).unwrap();
+        let mut why = vec![failed.to_string()];
+        assert_eq!(run(&mut why), Vec::<String>::new());
+        assert_eq!(fs::read(&golden).unwrap(), old);
+        assert!(
+            why.len() == 3 && why[2].contains("1 pixel differs"),
+            "{why:?}"
+        );
+
+        // The same run with nothing else failed blesses it.
+        let mut why = Vec::new();
+        let notes = run(&mut why);
+        assert!(why.is_empty(), "{why:?}");
+        assert!(
+            notes.len() == 1 && notes[0].starts_with("blessed "),
+            "{notes:?}"
+        );
+        let blessed = screen::decode_png(&fs::read(&golden).unwrap()).unwrap();
+        assert_eq!(blessed.image, img);
+
+        // A failed run with no screens says nothing of --bless.
+        let mut why = vec![failed.to_string()];
+        assert_eq!(
+            check_screens(&sc, &[], &goldens, &mut why),
+            Vec::<String>::new()
+        );
+        assert_eq!(why, [failed]);
         fs::remove_dir_all(&dir).unwrap();
     }
 
