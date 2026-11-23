@@ -206,6 +206,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tui"
+version = "0.1.0"
+dependencies = [
+ "libsys",
+]
+
+[[package]]
 name = "uart"
 version = "0.1.0"
 dependencies = [
