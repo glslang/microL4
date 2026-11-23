@@ -1,14 +1,23 @@
 //! The verdicts of `test=tui` and `test=nofb` (`docs/design.md`,
 //! "Scenarios" under "Framebuffer, terminal and TUI"): BootInfo's
 //! framebuffer as `fb` takes it, the lines root prints of the framebuffer,
-//! the write-combining check, the servers, tui's report and term's
-//! `Stats`, and what the report and the counts must hold.
+//! the write-combining check, the servers, the frames' mappings, the
+//! priorities, tui's report and term's `Stats`, and what the report, the
+//! probes and the counts must hold; and the line root fails with for a
+//! message on D that is not the report, a tui fault among them
+//! (`test=tui_fault`).
 
 use core::fmt;
 
-use libsys::BootInfo;
 use libsys::bootinfo::MAX_UNTYPED;
 use libsys::proto::TermStats;
+use libsys::{BootInfo, Error, SyscallError};
+
+use crate::process::{Fault, fault_kind};
+
+/// tui's badge on endpoint C, as console's client 5, and on endpoint D,
+/// its report and fault endpoint.
+pub const TUI_BADGE: u64 = 5;
 
 /// What the `tui` scenario types for client 4, the focus keys excluded:
 /// Down, Down, Enter, then `q`. tui reports the first 255 bytes it read
@@ -105,6 +114,140 @@ impl fmt::Display for Started {
     }
 }
 
+/// `fb: all <n> frames are mapped: ...`, once every framebuffer frame
+/// root holds has passed [`mapped`]'s probes.
+pub struct Mapped(pub u64);
+
+impl fmt::Display for Mapped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "fb: all {} frames are mapped: a second Frame_Map of each is refused as mapped, and a Frame_Remap without read for its rights",
+            self.0
+        )
+    }
+}
+
+/// Whether a framebuffer frame's two probes show it mapped, as the
+/// kernel checks in `docs/abi.md`'s order, changing nothing when it
+/// refuses: a second `Frame_Map`, into root's VSpace at an address
+/// aligned to no frame size, refused with `InvalidCapability` 0, which
+/// the kernel checks before the alignment (an unmapped frame would be an
+/// `AlignmentError`); and a `Frame_Remap` asking no read right, refused
+/// with `InvalidArgument` 0, which the kernel checks only after finding
+/// the frame mapped (an unmapped frame would be `IllegalOperation`). The
+/// second rules out an empty slot, which both refuse with
+/// `InvalidCapability` 0, before looking at any argument.
+pub fn mapped<'a>(
+    map: &'a Result<(), Error>,
+    remap: &'a Result<(), Error>,
+) -> Result<(), Unmapped<'a>> {
+    let mapped_map = Err(Error::Kernel(SyscallError::InvalidCapability(0)));
+    let mapped_remap = Err(Error::Kernel(SyscallError::InvalidArgument(0)));
+    if *map == mapped_map && *remap == mapped_remap {
+        Ok(())
+    } else {
+        Err(Unmapped { map, remap })
+    }
+}
+
+/// A framebuffer frame whose probes did not show it mapped: what each
+/// gave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unmapped<'a> {
+    pub map: &'a Result<(), Error>,
+    pub remap: &'a Result<(), Error>,
+}
+
+impl fmt::Display for Unmapped<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let probe = |r: &Result<(), Error>, f: &mut fmt::Formatter<'_>| match r {
+            Ok(()) => f.write_str("success"),
+            Err(e) => write!(f, "{e}"),
+        };
+        f.write_str("a second Frame_Map gave ")?;
+        probe(self.map, f)?;
+        f.write_str(", Frame_Remap without read ")?;
+        probe(self.remap, f)?;
+        f.write_str(": not InvalidCapability(0) and InvalidArgument(0), a mapped frame's")
+    }
+}
+
+/// A thread's priority as root set it, and its MCP as root read it back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sched {
+    pub priority: u64,
+    pub mcp: u64,
+}
+
+/// `servers: priority as set, MCP as read back: console <p>, <m>; term
+/// <p>, <m>; tui <p>, <m>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Priorities {
+    pub console: Sched,
+    pub term: Sched,
+    pub tui: Sched,
+}
+
+impl fmt::Display for Priorities {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("servers: priority as set, MCP as read back:")?;
+        let mut sep = " ";
+        for (name, s) in [
+            ("console", self.console),
+            ("term", self.term),
+            ("tui", self.tui),
+        ] {
+            write!(f, "{sep}{name} {}, {}", s.priority, s.mcp)?;
+            sep = "; ";
+        }
+        Ok(())
+    }
+}
+
+/// Console above term, its client, and term above tui, its client
+/// (`docs/design.md`, "Where it runs"), each with an MCP equal to its
+/// priority, as `spawn_server` sets them.
+pub fn priorities(p: &Priorities) -> Result<(), Failure> {
+    let all = [p.console, p.term, p.tui];
+    if all.iter().any(|s| s.mcp != s.priority) {
+        return Err(Failure::Priorities("an MCP is not its thread's priority"));
+    }
+    if !(p.console.priority > p.term.priority && p.term.priority > p.tui.priority) {
+        return Err(Failure::Priorities("not console above term above tui"));
+    }
+    Ok(())
+}
+
+/// What root fails with for a message on D that is not tui's report: for
+/// a fault, since D is tui's fault endpoint, `tui fault <label>
+/// (<kind>), MR0 to MR3 <words>`, as `watch` names a server's; for
+/// anything else its badge and label.
+pub struct OnD {
+    pub badge: u64,
+    pub label: u64,
+    pub mr: [u64; 4],
+}
+
+impl fmt::Display for OnD {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.badge == TUI_BADGE && fault_kind(self.label).is_some() {
+            let fault = Fault {
+                who: "tui",
+                label: self.label,
+                mr: self.mr,
+            };
+            return write!(f, "{fault}");
+        }
+        let [a, b, c, d] = self.mr;
+        write!(
+            f,
+            "tui: a message on D with badge {}, label {}, MR0 to MR3 {a:#x} {b:#x} {c:#x} {d:#x}",
+            self.badge, self.label
+        )
+    }
+}
+
 /// `tui: read <n> bytes: <the bytes>`, escaped as a scenario's `send:`
 /// writes them, from tui's report.
 pub struct ReadLine<'a>(pub &'a [u8]);
@@ -135,6 +278,8 @@ pub enum Failure {
     Stats(&'static str),
     /// `test=nofb` read another line.
     Line,
+    /// The priorities or MCPs are wrong: what.
+    Priorities(&'static str),
 }
 
 impl fmt::Display for Failure {
@@ -146,6 +291,7 @@ impl fmt::Display for Failure {
             }
             Failure::Stats(what) => write!(f, "term's Stats: {what}"),
             Failure::Line => write!(f, "nofb did not read {NOFB_LINE:?}"),
+            Failure::Priorities(what) => write!(f, "priorities: {what}"),
         }
     }
 }
@@ -383,6 +529,170 @@ mod tests {
             assert_eq!(
                 format!("{}", Failure::Stats(why)),
                 format!("term's Stats: {why}")
+            );
+        }
+    }
+
+    /// Only a mapped frame passes both probes; an unmapped one, an empty
+    /// slot or another capability fails one, with what each gave.
+    #[test]
+    fn the_probes_show_a_frame_mapped() {
+        use SyscallError::*;
+        let k = |e| Err(Error::Kernel(e));
+        assert_eq!(
+            mapped(&k(InvalidCapability(0)), &k(InvalidArgument(0))),
+            Ok(())
+        );
+        for (map, remap) in [
+            // Unmapped: the alignment, then the mapping, refuse.
+            (k(AlignmentError), k(IllegalOperation)),
+            // An empty slot.
+            (k(InvalidCapability(0)), k(InvalidCapability(0))),
+            // Another type of capability.
+            (k(IllegalOperation), k(IllegalOperation)),
+            // Either probe alone.
+            (k(InvalidCapability(0)), k(IllegalOperation)),
+            (k(AlignmentError), k(InvalidArgument(0))),
+            (Ok(()), k(InvalidArgument(0))),
+            (k(InvalidCapability(0)), Ok(())),
+            (k(InvalidCapability(1)), k(InvalidArgument(0))),
+        ] {
+            assert_eq!(
+                mapped(&map, &remap),
+                Err(Unmapped {
+                    map: &map,
+                    remap: &remap
+                }),
+                "{map:?} {remap:?}"
+            );
+        }
+        assert_eq!(
+            Unmapped {
+                map: &k(AlignmentError),
+                remap: &Ok(())
+            }
+            .to_string(),
+            "a second Frame_Map gave AlignmentError, Frame_Remap without read success: not InvalidCapability(0) and InvalidArgument(0), a mapped frame's"
+        );
+        assert_eq!(
+            Mapped(489).to_string(),
+            "fb: all 489 frames are mapped: a second Frame_Map of each is refused as mapped, and a Frame_Remap without read for its rights"
+        );
+    }
+
+    #[test]
+    fn the_priorities_line() {
+        let s = |p| Sched {
+            priority: p,
+            mcp: p,
+        };
+        let good = Priorities {
+            console: s(150),
+            term: s(125),
+            tui: s(100),
+        };
+        assert_eq!(priorities(&good), Ok(()));
+        assert_eq!(
+            good.to_string(),
+            "servers: priority as set, MCP as read back: console 150, 150; term 125, 125; tui 100, 100"
+        );
+        let mcp = Failure::Priorities("an MCP is not its thread's priority");
+        let order = Failure::Priorities("not console above term above tui");
+        let term_mcp = Sched {
+            priority: 125,
+            mcp: 255,
+        };
+        let tui_mcp = Sched {
+            priority: 100,
+            mcp: 0,
+        };
+        for (bad, why) in [
+            (
+                Priorities {
+                    term: term_mcp,
+                    ..good
+                },
+                mcp,
+            ),
+            (
+                Priorities {
+                    tui: tui_mcp,
+                    ..good
+                },
+                mcp,
+            ),
+            (
+                Priorities {
+                    term: s(150),
+                    ..good
+                },
+                order,
+            ),
+            (
+                Priorities {
+                    tui: s(125),
+                    ..good
+                },
+                order,
+            ),
+            (
+                Priorities {
+                    term: s(90),
+                    ..good
+                },
+                order,
+            ),
+            (
+                Priorities {
+                    console: s(100),
+                    ..good
+                },
+                order,
+            ),
+        ] {
+            assert_eq!(priorities(&bad), Err(why), "{bad:?}");
+        }
+        assert_eq!(
+            order.to_string(),
+            "priorities: not console above term above tui"
+        );
+    }
+
+    /// tui's fault on D reads as `watch`'s line for a server's; any other
+    /// message by its badge and label.
+    #[test]
+    fn a_message_on_d_that_is_not_the_report() {
+        let on_d = |badge, label| {
+            OnD {
+                badge,
+                label,
+                mr: [0, 0, 1, 0x14],
+            }
+            .to_string()
+        };
+        assert_eq!(
+            on_d(TUI_BADGE, 5),
+            "tui fault 5 (VMFault), MR0 to MR3 0x0 0x0 0x1 0x14"
+        );
+        assert_eq!(
+            on_d(TUI_BADGE, 1),
+            "tui fault 1 (CapFault), MR0 to MR3 0x0 0x0 0x1 0x14"
+        );
+        assert_eq!(
+            on_d(TUI_BADGE, 2),
+            "tui fault 2 (UnknownSyscall), MR0 to MR3 0x0 0x0 0x1 0x14"
+        );
+        assert_eq!(
+            on_d(TUI_BADGE, 3),
+            "tui fault 3 (UserException), MR0 to MR3 0x0 0x0 0x1 0x14"
+        );
+        // Label 4 is reserved, 0x131 tui's report; badge 3 is not tui's.
+        for (badge, label) in [(TUI_BADGE, 4), (TUI_BADGE, 0x131), (3, 5), (0, 0)] {
+            assert_eq!(
+                on_d(badge, label),
+                format!(
+                    "tui: a message on D with badge {badge}, label {label}, MR0 to MR3 0x0 0x0 0x1 0x14"
+                )
             );
         }
     }

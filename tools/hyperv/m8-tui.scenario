@@ -22,6 +22,8 @@ expect: ; 128x48 cells
 expect: fb: full clear: uncached
 expect: , write-combining
 expect: servers: term and tui started; root CNode
+expect: frames are mapped: a second Frame_Map of each is refused as mapped, and a Frame_Remap without read for its rights
+expect: servers: priority as set, MCP as read back: console 150, 150; term 125, 125; tui 100, 100
 expect: tui: 128x48 terminal
 expect: tui: frame 1 drawn: Overview, item 1
 screendump: tui-main

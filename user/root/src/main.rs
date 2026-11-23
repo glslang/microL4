@@ -41,6 +41,10 @@
 //! - `test=tui`: the TUI app runs inside the terminal emulator, which
 //!   draws to the framebuffer mapped write-combining, with keys the
 //!   harness types ([`tui`], [`servers`]);
+//! - `test=term_fault` and `test=tui_fault` (review): once tui has drawn
+//!   its first frame, term or tui faults, and the run ends with failure
+//!   through `watch` or through root's report of tui's fault on D
+//!   ([`tui`]);
 //! - `test=nofb`: with no display, root starts no terminal and still
 //!   reads its line ([`nofb`]).
 //!
@@ -119,6 +123,8 @@ fn main(bi: &'static BootInfo) -> ! {
         Some("release") => release::run(bi),
         Some("release_fault") => release_fault::run(bi),
         Some("tui") => tui::run(bi),
+        Some("term_fault") => tui::fault(bi, tui::Victim::Term),
+        Some("tui_fault") => tui::fault(bi, tui::Victim::Tui),
         Some("nofb") => nofb::run(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),

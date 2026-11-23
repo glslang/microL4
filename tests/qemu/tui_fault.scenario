@@ -1,0 +1,31 @@
+# Review test for M8's failure path (user/root/src/tui.rs; docs/design.md,
+# "Failures" under "Framebuffer, terminal and TUI"): a tui fault reaches
+# root on D, tui's fault endpoint, and root reports it through console and
+# fails the test. The root task starts everything as test=tui does, then
+# reads a line as client 1, which has focus; the harness types Enter once
+# tui has drawn its first frame, so tui waits in term's Read. Root prints
+# its line and syncs, suspends tui, writes its rip 0 and resumes it, and
+# waits on D for tui's report, as test=tui does. tui's next instruction
+# fetch, at address 0, which nothing maps, is a VMFault (ip 0, address 0,
+# a fetch, fsr 0x14: a user-mode fetch of a page not present); the kernel
+# sends it on D with badge 5, and root prints TEST FAIL naming tui, as
+# watch names a server, through console and ends the run with exit(1), a
+# Sync and DebugHalt(1). The next: lines show that nothing comes between
+# root's two lines and the halt's two: tui, stopped, prints and draws
+# nothing more, and term, whose only client it was, draws nothing.
+cmdline: test=tui_fault
+exit: failure
+qemu_args: -vga std -global VGA.xres=1280 -global VGA.yres=800
+expect: root: cmdline "test=tui_fault"
+expect: fb: 1280x800 BGR, stride 1280, 4000 KiB at 0x80000000: 6 untyped, 1 2 MiB and 488 4 KiB frames; 160x50 cells
+expect: servers: term and tui started; root CNode
+expect: tui: frame 1 drawn: Overview, item 1
+send: \r                           # Enter: root's line
+expect: tui_fault: suspending tui, setting its rip to 0 and resuming it
+next: TEST FAIL: tui fault 5 (VMFault), MR0 to MR3 0x0 0x0 0x1 0x14
+next: dispatch: invocations preempted and restarted:   # DebugHalt's first line
+next: DEBUG HALT 1 from TCB
+forbid: tui reported after its rip was set to 0
+forbid: tui: frame 2
+forbid: TEST PASS
+forbid: KERNEL PANIC

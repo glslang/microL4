@@ -8,7 +8,10 @@
 # frame plan; times a full clear mapped uncached, then write-combining
 # [H10] (TCG has no cache model, so the times mean nothing here); starts
 # term (125), with the framebuffer mapped write-combining in its VSpace
-# alone, and tui (100); then waits on endpoint D. tui asks term's Size,
+# alone, and tui (100); shows each framebuffer frame it holds mapped (a
+# second Frame_Map refused as mapped, a Frame_Remap without read refused
+# for its rights), prints the priorities it set with the MCPs it reads
+# back; then waits on endpoint D. tui asks term's Size,
 # writes its banner, enters the alternate buffer and draws its first
 # frame. Keys typed for console's raw client 4 (Ctrl-T 4 focuses it)
 # reach term through ReadRaw and tui through term's Read: Down, Down,
@@ -27,6 +30,8 @@ expect: root: cmdline "test=tui"
 expect: fb: 1280x800 BGR, stride 1280, 4000 KiB at 0x80000000: 6 untyped, 1 2 MiB and 488 4 KiB frames; 160x50 cells
 expect: fb: full clear: uncached
 expect: servers: term and tui started; root CNode
+expect: fb: all 489 frames are mapped: a second Frame_Map of each is refused as mapped, and a Frame_Remap without read for its rights
+expect: servers: priority as set, MCP as read back: console 150, 150; term 125, 125; tui 100, 100
 expect: tui: 160x50 terminal
 expect: tui: frame 1 drawn: Overview, item 1
 screendump: tui-main
