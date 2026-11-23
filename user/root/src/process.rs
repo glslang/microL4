@@ -255,12 +255,15 @@ impl Plan {
 pub mod fault_badge {
     pub const UART: u64 = 1;
     pub const CONSOLE: u64 = 2;
+    /// From M8: a term fault ends the run as a uart or console fault does.
+    pub const TERM: u64 = 3;
 
     /// The server a badge names.
     pub const fn name(badge: u64) -> &'static str {
         match badge {
             UART => "uart",
             CONSOLE => "console",
+            TERM => "term",
             _ => "an unknown server",
         }
     }
@@ -503,6 +506,14 @@ mod tests {
         assert_eq!(
             line(2, 3),
             "TEST FAIL: console fault 3 (UserException), MR0 to MR3 0x401234 0xdead 0x0 0x6"
+        );
+        assert_eq!(
+            line(3, 5),
+            "TEST FAIL: term fault 5 (VMFault), MR0 to MR3 0x401234 0xdead 0x0 0x6"
+        );
+        assert_eq!(
+            line(3, 2),
+            "TEST FAIL: term fault 2 (UnknownSyscall), MR0 to MR3 0x401234 0xdead 0x0 0x6"
         );
         assert_eq!(
             line(7, 0x130),

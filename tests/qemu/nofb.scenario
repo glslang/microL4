@@ -1,0 +1,20 @@
+# A machine with no display (user/root/src/nofb.rs; docs/design.md,
+# "Scenarios" under "Framebuffer, terminal and TUI"): with -vga none OVMF
+# finds no display, the loader passes no framebuffer, and the root task
+# says so, starts no term and no tui, and reads a line as client 1. The
+# bytes typed while client 4 has focus wait in console's raw queue, which
+# signals NT with no thread bound to it; the line after Ctrl-T 1 still
+# reaches root. Nothing attached as client 4, so console names it by number.
+cmdline: test=nofb
+exit: success
+qemu_args: -vga none
+expect: root: cmdline "test=nofb"
+expect: fb: none: the loader found no GOP framebuffer
+expect: nofb: type a line
+send: \x144abc\e[A\x141hi\r       # client 4's bytes, then root's line
+expect: [console] focus 4 (client 4)
+expect: [console] focus 1 (root)
+expect: nofb: read "hi"
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
+forbid: TEST FAIL

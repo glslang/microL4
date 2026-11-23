@@ -1,10 +1,13 @@
 //! Starting `watch`, `uart` and `console` (`docs/design.md`, "Where the
-//! servers run", "Capabilities" and "Failures"): each server in a CSpace
-//! of its own, a 16-slot CNode filled from its crate's slot table only,
-//! and a VSpace built from the root task's image frames by
+//! servers run", "Capabilities" and "Failures"), and from M8 `term` and
+//! `tui` ("Framebuffer, terminal and TUI", "Where it runs"): each server
+//! in a CSpace of its own, a 16-slot CNode filled from its crate's slot
+//! table only, and a VSpace built from the root task's image frames by
 //! `root::process::Plan`; `watch` in the root task's own spaces, receiving
-//! the servers' faults on endpoint F. Nothing here prints, so a test on a
-//! kernel without `debug` can start the servers before it has a console.
+//! the servers' faults on endpoint F. term's VSpace also maps its state
+//! window and the framebuffer's frames, write-combining, from `fb::Plan`.
+//! Nothing here prints, so a test on a kernel without `debug` can start
+//! the servers before it has a console.
 
 use core::fmt::Write;
 
@@ -17,8 +20,8 @@ use libsys::invoke::{
     tcb_write_registers,
 };
 use libsys::output::{EXIT_FAILURE, EXIT_PORT_NUMBER, IoPort, Polled};
-use libsys::proto::{IRQ, RX_READY};
-use libsys::vspace::{self, EXECUTE, READ, READ_WRITE, Table, WRITE_BACK};
+use libsys::proto::{IRQ, KEYS, RX_READY, TERM_CLIENT};
+use libsys::vspace::{self, EXECUTE, READ, READ_WRITE, Table, WRITE_BACK, WRITE_COMBINING};
 use libsys::{
     BootInfo, CPtr, Ipc, IpcBufferFrame, ObjectAlloc, ObjectType, Registers, Rights, Slot, UserReg,
     recv,
@@ -33,6 +36,25 @@ pub const WATCH_PRIORITY: u64 = 255;
 pub const UART_PRIORITY: u64 = 200;
 pub const CONSOLE_PRIORITY: u64 = 150;
 pub const CLIENT_PRIORITY: u64 = 100;
+/// From M8: term above its client tui, below console, whose client it is.
+pub const TERM_PRIORITY: u64 = 125;
+pub const TUI_PRIORITY: u64 = 100;
+
+/// The badge of root's own capability to term's endpoint T: `Stats` only.
+pub const TERM_STATS_BADGE: u64 = 2;
+/// tui's badge on endpoint C, as console's client 5, and on endpoint D.
+pub const TUI_BADGE: u64 = 5;
+
+// Every server's CNode has the same shape, which `fill` relies on.
+const _: () = assert!(
+    uart::slot::RADIX == console::slot::RADIX
+        && uart::slot::RADIX == term::slot::RADIX
+        && uart::slot::RADIX == tui::slot::RADIX
+        && uart::slot::CNODE == term::slot::CNODE
+        && uart::slot::CNODE == tui::slot::CNODE
+);
+// console's raw client is term.
+const _: () = assert!(libsys::proto::CONSOLE_RAW_CLIENT == 4);
 
 /// COM1's ports.
 pub const COM1_FIRST: u16 = 0x3F8;
@@ -63,6 +85,11 @@ pub struct Servers {
     pub watch_tcb: CPtr,
     /// Root slots each server's VSpace and CNode took.
     pub slots_each: u64,
+    /// Endpoint F's original, which `watch` receives on.
+    pub fault_ep: CPtr,
+    /// Notification NT's original, term's, which console's slot 5 signals
+    /// with `KEYS`.
+    pub nt: CPtr,
 }
 
 fn root_slot(n: CPtr) -> Slot {
@@ -137,8 +164,10 @@ pub fn start(
     let com1 = issue(ipc, objects, COM1_FIRST, COM1_LAST);
     let eps = retype(ipc, objects, ObjectType::Endpoint, 0, 3);
     let (uart_ep, console_ep, fault_ep) = (eps, eps + 1, eps + 2);
-    let ntfns = retype(ipc, objects, ObjectType::Notification, 0, 2);
-    let (nu, nc) = (ntfns, ntfns + 1);
+    // NT, term's, from M8: console's slot 5 signals it whether or not
+    // term runs; a signal with no thread bound waits in it.
+    let ntfns = retype(ipc, objects, ObjectType::Notification, 0, 3);
+    let (nu, nc, nt) = (ntfns, ntfns + 1, ntfns + 2);
     let tcbs = retype(ipc, objects, ObjectType::Tcb, 0, 3);
     let (watch_tcb, uart_tcb, console_tcb) = (tcbs, tcbs + 1, tcbs + 2);
     let cnodes = retype(ipc, objects, ObjectType::CNode, uart::slot::RADIX, 2);
@@ -252,9 +281,10 @@ pub fn start(
             cnode: uart_cnode,
             space: uart_space,
             fault_ep: uart::slot::FAULT,
-            ntfn: nu,
+            ntfn: Some(nu),
             priority: UART_PRIORITY,
             entry: uart_main,
+            args: [0; 3],
         },
     );
 
@@ -286,6 +316,13 @@ pub fn start(
                 w_gr,
                 None,
             ),
+            (
+                "NT badged KEYS",
+                s(console::slot::KEYS),
+                nt,
+                Rights::WRITE,
+                Some(KEYS),
+            ),
         ],
     );
     let console_space = vspace(ipc, objects, &plan, scratch);
@@ -297,9 +334,10 @@ pub fn start(
             cnode: console_cnode,
             space: console_space,
             fault_ep: console::slot::FAULT,
-            ntfn: nc,
+            ntfn: Some(nc),
             priority: CONSOLE_PRIORITY,
             entry: console_main,
+            args: [0; 3],
         },
     );
 
@@ -314,7 +352,294 @@ pub fn start(
         console_tcb,
         watch_tcb,
         slots_each,
+        fault_ep,
+        nt,
     }
+}
+
+/// The framebuffer's frames and the page tables of its window, each kind
+/// in consecutive root slots in the order `fb::Plan` gives them: frame
+/// `i` of `Plan::frames` is `first_frame + i`, the table for the `j`th
+/// address of `Plan::page_tables` is `first_table + j`. The root task
+/// keeps them all; term holds none.
+#[derive(Clone, Copy, Debug)]
+pub struct FbObjects {
+    pub first_frame: CPtr,
+    pub frames: u64,
+    pub first_table: CPtr,
+    pub tables: u64,
+}
+
+/// Retypes `plan`'s frames from the framebuffer's device untyped,
+/// `framebuffer_untyped`'s descriptor `r.untyped` for each retype `r`,
+/// and the window's page tables from RAM.
+pub fn framebuffer_objects(
+    bi: &BootInfo,
+    ipc: Ipc,
+    objects: &mut ObjectAlloc,
+    plan: &fb::Plan<'_>,
+) -> FbObjects {
+    let mut first_frame = None;
+    let mut frames = 0;
+    for r in plan.retypes() {
+        let ty = if r.huge() {
+            ObjectType::Frame2M
+        } else {
+            ObjectType::Frame4K
+        };
+        let untyped = bi.framebuffer_untyped.start + r.untyped as u64;
+        let first = objects
+            .retype_from(ipc, untyped, ty, 0, r.count as u64)
+            .unwrap_or_else(|e| {
+                fail!(
+                    "servers: retyping {} {ty:?} at {:#x} from framebuffer untyped {untyped}: {e}",
+                    r.count,
+                    r.paddr
+                )
+            });
+        let at = *first_frame.get_or_insert(first);
+        if first != at + frames {
+            fail!("servers: the framebuffer's frames are not in consecutive slots");
+        }
+        frames += r.count as u64;
+    }
+    let tables = plan.page_tables().count() as u64;
+    let first_table = if tables == 0 {
+        0
+    } else {
+        retype(ipc, objects, ObjectType::PageTable, 0, tables)
+    };
+    FbObjects {
+        first_frame: first_frame.unwrap_or(0),
+        frames,
+        first_table,
+        tables,
+    }
+}
+
+impl FbObjects {
+    /// Maps the window's page tables in `vspace`, whose page directory
+    /// for the first GiB exists (the root image's).
+    pub fn map_tables(&self, ipc: Ipc, plan: &fb::Plan<'_>, vspace: CPtr) {
+        for (j, base) in plan.page_tables().enumerate() {
+            vspace::map_table(
+                ipc,
+                self.first_table + j as u64,
+                Table::PageTable,
+                base,
+                vspace,
+            )
+            .unwrap_or_else(|e| {
+                fail!("servers: mapping the framebuffer's page table at {base:#x}: {e}")
+            });
+        }
+    }
+
+    /// Unmaps the window's page tables, leaving them unmapped and empty,
+    /// so they can be mapped in another VSpace.
+    pub fn unmap_tables(&self) {
+        for j in 0..self.tables {
+            vspace::unmap_table(self.first_table + j, Table::PageTable)
+                .unwrap_or_else(|e| fail!("servers: unmapping a framebuffer page table: {e}"));
+        }
+    }
+
+    /// Maps every frame at its window address in `vspace`, read-write,
+    /// no-execute, with the attributes word `cache` (`UNCACHED` or
+    /// `WRITE_COMBINING`).
+    pub fn map_frames(&self, ipc: Ipc, plan: &fb::Plan<'_>, vspace: CPtr, cache: u64) {
+        for (i, f) in plan.frames().enumerate() {
+            vspace::frame_map(
+                ipc,
+                self.first_frame + i as u64,
+                f.vaddr,
+                READ_WRITE,
+                cache,
+                vspace,
+            )
+            .unwrap_or_else(|e| {
+                fail!(
+                    "servers: mapping the framebuffer's frame at {:#x} at {:#x}: {e}",
+                    f.paddr,
+                    f.vaddr
+                )
+            });
+        }
+    }
+
+    /// Unmaps every frame.
+    pub fn unmap_frames(&self) {
+        for i in 0..self.frames {
+            vspace::frame_unmap(self.first_frame + i)
+                .unwrap_or_else(|e| fail!("servers: unmapping a framebuffer frame: {e}"));
+        }
+    }
+}
+
+/// What the root task keeps of term and tui.
+#[derive(Clone, Copy, Debug)]
+pub struct Terminal {
+    /// Endpoint T with badge 2, for term's `Stats`.
+    pub stats: CPtr,
+}
+
+/// Starts `term` and `tui` (`docs/design.md`, "Where it runs" and
+/// "Capabilities" under "Framebuffer, terminal and TUI"): term in a CSpace
+/// of its own with T, console's raw client capability and F, and a VSpace
+/// with its state window and the framebuffer's frames mapped
+/// write-combining, bound to NT before it starts, with the geometry's
+/// three words in `rdi`, `rsi` and `rdx`; then tui, with T as term's
+/// client, console as client 5 and D, its report and fault endpoint. The
+/// framebuffer's frames and tables must be unmapped and empty.
+pub fn start_terminal(
+    bi: &BootInfo,
+    ipc: Ipc,
+    objects: &mut ObjectAlloc,
+    s: &Servers,
+    plan: &fb::Plan<'_>,
+    fbo: &FbObjects,
+    d: CPtr,
+) -> Terminal {
+    let image = Plan::new(image(bi), bi.user_image_frames)
+        .unwrap_or_else(|e| fail!("servers: the root task's image: {e}"));
+    let scratch = image
+        .scratch()
+        .unwrap_or_else(|| fail!("servers: no free page under the root task's page tables"));
+    let t_ep = retype(ipc, objects, ObjectType::Endpoint, 0, 1);
+    let tcbs = retype(ipc, objects, ObjectType::Tcb, 0, 2);
+    let (term_tcb, tui_tcb) = (tcbs, tcbs + 1);
+    let cnodes = retype(ipc, objects, ObjectType::CNode, term::slot::RADIX, 2);
+    let (term_cnode, tui_cnode) = (cnodes, cnodes + 1);
+    let stats = slots(objects, 1);
+    let w_gr = Rights(Rights::WRITE.0 | Rights::GRANT_REPLY.0);
+    cnode_mint(
+        ipc,
+        root_slot(stats),
+        root_slot(t_ep),
+        w_gr,
+        TERM_STATS_BADGE,
+    )
+    .unwrap_or_else(|e| fail!("servers: minting root's Stats capability to T: {e}"));
+
+    // term.
+    let s_term = |n| Slot::new(term_cnode, n, term::slot::RADIX);
+    fill(
+        ipc,
+        term_cnode,
+        "term",
+        &[
+            (
+                "T with Read",
+                s_term(term::slot::ENDPOINT),
+                t_ep,
+                Rights::READ,
+                None,
+            ),
+            (
+                "C badged 4",
+                s_term(term::slot::CONSOLE),
+                s.console_ep,
+                w_gr,
+                Some(libsys::proto::CONSOLE_RAW_CLIENT),
+            ),
+            (
+                "F badged TERM",
+                s_term(term::slot::FAULT),
+                s.fault_ep,
+                w_gr,
+                Some(fault_badge::TERM),
+            ),
+        ],
+    );
+    let space = vspace(ipc, objects, &image, scratch);
+    // The state window: fresh frames, zeroed by the retype, under a page
+    // table of their own.
+    let table = retype(ipc, objects, ObjectType::PageTable, 0, 1);
+    vspace::map_table(
+        ipc,
+        table,
+        Table::PageTable,
+        term::layout::STATE,
+        space.pml4,
+    )
+    .unwrap_or_else(|e| fail!("servers: mapping term's state window's page table: {e}"));
+    let state = retype(
+        ipc,
+        objects,
+        ObjectType::Frame4K,
+        0,
+        term::layout::STATE_PAGES,
+    );
+    for i in 0..term::layout::STATE_PAGES {
+        let addr = term::layout::STATE + i * PAGE;
+        vspace::frame_map(ipc, state + i, addr, READ_WRITE, WRITE_BACK, space.pml4)
+            .unwrap_or_else(|e| fail!("servers: mapping term's state at {addr:#x}: {e}"));
+    }
+    // The framebuffer, write-combining, in term's VSpace alone.
+    fbo.map_tables(ipc, plan, space.pml4);
+    fbo.map_frames(ipc, plan, space.pml4, WRITE_COMBINING);
+    let [rdi, rsi, rdx] = plan.geometry().to_words();
+    spawn_server(
+        ipc,
+        &image,
+        Server {
+            tcb: term_tcb,
+            cnode: term_cnode,
+            space,
+            fault_ep: term::slot::FAULT,
+            ntfn: Some(s.nt),
+            priority: TERM_PRIORITY,
+            entry: term_main,
+            args: [rdi, rsi, rdx],
+        },
+    );
+
+    // tui.
+    let s_tui = |n| Slot::new(tui_cnode, n, tui::slot::RADIX);
+    fill(
+        ipc,
+        tui_cnode,
+        "tui",
+        &[
+            (
+                "T badged 1",
+                s_tui(tui::slot::TERM),
+                t_ep,
+                w_gr,
+                Some(TERM_CLIENT),
+            ),
+            (
+                "C badged 5",
+                s_tui(tui::slot::CONSOLE),
+                s.console_ep,
+                w_gr,
+                Some(TUI_BADGE),
+            ),
+            (
+                "D badged 5",
+                s_tui(tui::slot::REPORT),
+                d,
+                w_gr,
+                Some(TUI_BADGE),
+            ),
+        ],
+    );
+    let space = vspace(ipc, objects, &image, scratch);
+    spawn_server(
+        ipc,
+        &image,
+        Server {
+            tcb: tui_tcb,
+            cnode: tui_cnode,
+            space,
+            fault_ep: tui::slot::REPORT,
+            ntfn: None,
+            priority: TUI_PRIORITY,
+            entry: tui_main,
+            args: [0; 3],
+        },
+    );
+    Terminal { stats }
 }
 
 type Fill<'a> = (&'a str, Slot, CPtr, Rights, Option<u64>);
@@ -434,16 +759,19 @@ struct Server {
     space: Space,
     /// Its fault endpoint, a `CPtr` in its own CSpace.
     fault_ep: CPtr,
-    /// The notification it is bound to.
-    ntfn: CPtr,
+    /// The notification it is bound to, if any.
+    ntfn: Option<CPtr>,
     priority: u64,
     entry: spawn::Entry,
+    /// Its arguments, in `rdi`, `rsi` and `rdx`: term's geometry; 0 for
+    /// the others.
+    args: [u64; 3],
 }
 
 /// Configures and starts a server: its CSpace with the guard, its VSpace
 /// and IPC buffer, its fault endpoint, priority and MCP, bound to its
-/// notification, at its entry on its own stack at the top of the `_start`
-/// stack's range.
+/// notification if it has one, at its entry on its own stack at the top of
+/// the `_start` stack's range, with its arguments.
 fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
     let Server {
         tcb,
@@ -453,6 +781,7 @@ fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
         ntfn,
         priority,
         entry,
+        args: [a0, a1, a2],
     } = s;
     let end = plan.image().end;
     let buffer = IpcBufferFrame {
@@ -462,7 +791,10 @@ fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
     let regs = Registers::ZERO
         .with(UserReg::Rip, entry as usize as u64)
         .with(UserReg::Rsp, end - 8)
-        .with(UserReg::Rflags, RFLAGS);
+        .with(UserReg::Rflags, RFLAGS)
+        .with(UserReg::Rdi, a0)
+        .with(UserReg::Rsi, a1)
+        .with(UserReg::Rdx, a2);
     tcb_configure(
         ipc,
         tcb,
@@ -473,7 +805,8 @@ fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
         Some(buffer),
     )
     .and_then(|()| tcb_set_sched_params(ipc, tcb, CAP_INIT_TCB, priority, priority))
-    .and_then(|()| tcb_bind_notification(ipc, tcb, ntfn))
+    .and_then(|()| ntfn.map_or(Ok(()), |n| tcb_bind_notification(ipc, tcb, n)))
+    // Words 0 to 8: rip to rdi, so rdx and rsi too.
     .and_then(|()| tcb_write_registers(ipc, tcb, false, &regs, UserReg::Rdi.index() + 1))
     .and_then(|()| tcb_resume(tcb))
     .unwrap_or_else(|e| fail!("servers: starting the thread in TCB slot {tcb}: {e}"));
@@ -485,6 +818,40 @@ extern "C" fn uart_main(_: u64, _: u64, _: u64, _: u64) -> ! {
 
 extern "C" fn console_main(_: u64, _: u64, _: u64, _: u64) -> ! {
     console::run()
+}
+
+/// term's entry: checks the geometry root passed again, then makes its
+/// pixel and state slices over the windows root mapped and runs it.
+extern "C" fn term_main(size: u64, format: u64, offset: u64, _: u64) -> ! {
+    // Before anything can panic: the statics are a copy of the root
+    // task's, whose print! may name a console capability of its CSpace.
+    libsys::output::reset();
+    let Some(g) = fb::Geometry::from_words([size, format, offset]) else {
+        panic!("term: a geometry fb refuses: {size:#x} {format:#x} {offset:#x}")
+    };
+    // SAFETY: `start_terminal` mapped `fb::Plan`'s frames, which cover the
+    // visible bytes `[base, base + 4 x stride x height)`, read-write at
+    // `fb::WINDOW` + (their address - `base` rounded down to 2 MiB), in
+    // this VSpace and no other; `offset` is `base` mod 2 MiB, so the
+    // `stride x height` pixels from `fb::WINDOW + offset` are the visible
+    // bytes, 4-byte aligned since `base` is (`from_words` checked both).
+    // Nothing else in this VSpace names them, and this is the only slice
+    // made of them. Every bit pattern is a valid `u32`.
+    let pixels = unsafe {
+        core::slice::from_raw_parts_mut((fb::WINDOW + g.offset()) as *mut u32, g.pixels())
+    };
+    // SAFETY: `start_terminal` mapped `term::layout::STATE_PAGES` fresh
+    // frames read-write at `term::layout::STATE` in this VSpace and no
+    // other, page-aligned and covering `term::STATE_WORDS` words; this is
+    // the only slice made of them. Every bit pattern is a valid `u64`.
+    let state = unsafe {
+        core::slice::from_raw_parts_mut(term::layout::STATE as *mut u64, term::STATE_WORDS)
+    };
+    term::run(g, pixels, state)
+}
+
+extern "C" fn tui_main(_: u64, _: u64, _: u64, _: u64) -> ! {
+    tui::run()
 }
 
 /// `watch`: receives the servers' faults on F and ends the run with
