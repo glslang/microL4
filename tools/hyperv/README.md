@@ -204,6 +204,41 @@ The `-Scenario` and `-ConnectAfterSeconds` code and the thumbnail were
 written without a Windows host to run them. If the script itself fails,
 paste its error into the PR with the log, which is written all the same.
 
+## At the M9 check
+
+First, COM1's lost bytes: each M8 `m8-release` run lost a few bytes of one
+of root's lines while root's summary flooded `uart`, though `uart` wrote
+every burst after an LSR that said THRE (`docs/design.md`, Open
+questions). The kernel command line's `uart.burst=<n>`, `n` from 1 to 15,
+caps `uart`'s burst; root prints `root: uart.burst=<n>: uart's burst capped
+at <n>` after its `root: cmdline` line, and `uart`'s line ends `burst <n>,
+<m> stale THREs`. CI builds `microl4-vhdx-m9-check`:
+`release-burst1/disk.vhdx` and `release-burst15/disk.vhdx` boot
+`test=release` on the release kernel with `uart.burst=1` and
+`uart.burst=15`, and beside them are `m9-burst1.scenario` and
+`m9-burst15.scenario`, `m8-release.scenario`'s steps with the cap. Run each
+twice:
+
+```powershell
+gh run download --repo glslang/microL4 --name microl4-vhdx-m9-check --dir m9-check <run-id>
+
+foreach ($burst in 1, 15) {
+    foreach ($run in 'a', 'b') {
+        .\Test-L4Vhdx.ps1 -VhdxPath ".\m9-check\release-burst$burst\disk.vhdx" `
+            -Scenario ".\m9-check\m9-burst$burst.scenario" -LogPath "m9-burst$burst-$run.log"
+    }
+}
+```
+
+Paste the four logs into the PR. A scenario sees only the lines it
+expects, so a run can pass with another line cut; the session reads every
+line for missing bytes.
+
+| Run | The log must show | It settles |
+| --- | --- | --- |
+| `m9-burst1`, twice | `root: uart.burst=1: uart's burst capped at 1`; `uart`'s line with `, burst 1,`; the rest as `m8-release`; whether every line is whole | lines whole with burst 1 but cut with 15: Hyper-V's FIFO takes fewer bytes after it reports THRE than `uart` writes; cut either way: the named pipe drops what its reader has not taken. Burst 1 also writes more slowly, a THRE interrupt a byte, so whole lines with burst 1 alone do not clear a pipe that drops bytes only when its reader falls behind |
+| `m9-burst15`, twice | `root: uart.burst=15: uart's burst capped at 15`; `, burst 15,`; the rest as `m8-release`; whether every line is whole | the control: `uart` writes as in the M8 re-run, so whether the loss repeats |
+
 ## Optional: the M4 check
 
 The M4 self-test still runs on Hyper-V, though CI no longer uploads its
@@ -256,6 +291,7 @@ tables.
 | `Read-L4Com1.ps1` | reads COM1 from the named pipe until a marker line |
 | `Test-L4Vhdx.ps1` | all of the above, plus the pass or fail verdict; with `-Scenario`, follows a scenario file, typing into COM1 and saving the screen (M8) |
 | `m8-tui.scenario`, `m8-release.scenario` | the M8 check's scenarios; `golden/` holds the screens `m8-tui` must show |
+| `m9-burst1.scenario`, `m9-burst15.scenario` | the M9 check's runs with `uart`'s burst capped at 1 and at 15 |
 
 To watch COM1 by hand instead, start the VM and run `.\Read-L4Com1.ps1`, or
 connect PuTTY to the serial line `\\.\pipe\l4-com1`.

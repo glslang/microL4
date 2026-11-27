@@ -77,6 +77,24 @@ jobs:
           name: microl4-vhdx-m8-check
           path: target/xtask/m8-check
           if-no-files-found: error
+      # The M9 Hyper-V check (tools/hyperv/README.md, "At the M9 check"):
+      # COM1's lost bytes first, test=release on the release kernel with
+      # uart's burst capped at 1 and at 15, each in a folder named after
+      # it, beside the scenarios Test-L4Vhdx.ps1 -Scenario follows.
+      - name: Build the M9 check images
+        run: |
+          for burst in 1 15; do
+            mkdir -p "target/xtask/m9-check/release-burst$burst"
+            cargo xtask image --kernel release --cmdline "test=release uart.burst=$burst"
+            mv target/xtask/image/disk.vhdx "target/xtask/m9-check/release-burst$burst/disk.vhdx"
+          done
+          cp tools/hyperv/m9-burst1.scenario tools/hyperv/m9-burst15.scenario target/xtask/m9-check/
+      - name: Upload the M9 check VHDXs
+        uses: actions/upload-artifact@v4
+        with:
+          name: microl4-vhdx-m9-check
+          path: target/xtask/m9-check
+          if-no-files-found: error
 
   lint:
     name: rustfmt and clippy

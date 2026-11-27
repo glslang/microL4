@@ -1,0 +1,42 @@
+# The M9 Hyper-V check's burst-15 run (tools/hyperv/README.md, "At the M9
+# check"; docs/design.md, "Transmit and receive"): m8-release.scenario with
+# uart.burst=15 on the command line, the burst setup chooses with working
+# FIFOs, as the M8 check found Hyper-V's: the control for
+# m9-burst1.scenario, whose lines differ from these by a digit, and the
+# same writes as the M8 re-run's. Both M8 runs lost a few bytes of one of
+# root's lines during the flood of its summary with burst 15. Lines whole
+# with burst 1 but cut with 15 mean Hyper-V's FIFO takes fewer bytes after
+# it reports THRE than uart writes; cut either way points at the named
+# pipe. The scenario cannot see a cut line it does not expect, so the
+# session reads each of root's lines in the log: run it twice. Root's line
+# "root: uart.burst=15: uart's burst capped at 15" comes right after its
+# cmdline line, but is not expected, so that bytes lost there leave the
+# run going. The release kernel prints nothing; root issues no exit port,
+# since this is not QEMU, and halts after TEST PASS; the script turns the
+# VM off. The typed line is 14 bytes, whose last 6 only the character
+# timeout delivers.
+cmdline: test=release uart.burst=15
+kernel: release
+exit: success
+expect: loader: microL4 loader
+expect: entering kernel
+next: root: microL4 root task
+expect: root: cmdline "test=release uart.burst=15"
+expect: root: image frames: slots
+expect: root: empty: slots
+expect: release: watch (priority 255), uart (priority 200) with the COM1 IOPort and IRQ 4, console (priority 150); exit port none: not QEMU
+expect: release: a probe thread's DebugPutChar, DebugHalt, DebugDumpScheduler and reserved numbers 19 and 31 each raised UnknownSyscall with the number in MR18
+expect: release: type a line
+send: release input\r
+expect: release: read "release input"
+expect: release: uart:
+expect: , 14 bytes received,
+expect: , 0 overruns, 0 line errors,
+expect: , burst 15, # working FIFOs, under the cap
+expect: TEST PASS
+forbid: microL4 kernel
+forbid: bootinfo:
+forbid: DEBUG HALT
+forbid: KERNEL PANIC
+forbid: , 0 THRE bursts
+forbid: ignored: not a number

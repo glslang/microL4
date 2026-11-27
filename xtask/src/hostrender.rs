@@ -205,7 +205,8 @@ fn tui_screendumps_are_the_host_render() {
 /// The moments are the `tui` scenario's screendumps, and the Hyper-V
 /// check's: each golden here belongs to a step that takes the screen. The
 /// Hyper-V check's scenarios are in the harness's format, which
-/// `Test-L4Vhdx.ps1 -Scenario` follows.
+/// `Test-L4Vhdx.ps1 -Scenario` follows; from M9 they include the burst
+/// runs, `m8-release`'s steps with uart's burst capped.
 #[test]
 fn the_moments_are_the_scenarios_screendumps() {
     let names: Vec<&str> = MOMENTS.iter().map(|(n, _)| *n).collect();
@@ -222,6 +223,37 @@ fn the_moments_are_the_scenarios_screendumps() {
         (release.cmdline.as_str(), release.kernel),
         ("test=release", crate::compile::Kernel::Release)
     );
+    // M9's burst runs are m8-release's with uart's burst capped: only the
+    // command line, its `root: cmdline` line and the burst differ, and
+    // root's line for an ignored cap is forbidden.
+    for cap in [1, 15] {
+        let name = format!("m9-burst{cap}");
+        let sc = hyperv(&name);
+        let cmdline = format!("test=release uart.burst={cap}");
+        assert_eq!(
+            (sc.cmdline.as_str(), sc.kernel, sc.exit),
+            (cmdline.as_str(), release.kernel, release.exit),
+            "{name}"
+        );
+        let steps: Vec<scenario::Step> = release
+            .steps
+            .iter()
+            .map(|s| match s {
+                scenario::Step::Expect(t) if t == "root: cmdline \"test=release\"" => {
+                    scenario::Step::Expect(format!("root: cmdline {cmdline:?}"))
+                }
+                scenario::Step::Expect(t) if t == ", burst 1" => {
+                    scenario::Step::Expect(format!(", burst {cap},"))
+                }
+                s => s.clone(),
+            })
+            .collect();
+        assert_ne!(steps, release.steps);
+        assert_eq!(sc.steps, steps, "{name}");
+        let mut forbid = release.forbid.clone();
+        forbid.push("ignored: not a number".into());
+        assert_eq!(sc.forbid, forbid, "{name}");
+    }
     // The QEMU scenario takes these screendumps, at the 1280x800 the
     // goldens are drawn at.
     let text = fs::read_to_string(crate::root().join("tests/qemu/tui.scenario")).unwrap();
