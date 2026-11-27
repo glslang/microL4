@@ -216,6 +216,8 @@ struct Config {
     line_errors: bool,
     /// The old loop: service, then Ack.
     service_first: bool,
+    /// A THR write leaves a pending THRE interrupt pending (`Dev`).
+    stale_thre: bool,
 }
 
 /// The device, the pin and the outside world, as uart's [`Port`] and
@@ -253,6 +255,7 @@ impl Sim {
     fn new(cfg: &Config, rng: Rng) -> Sim {
         let mut dev = Dev::new(cfg.tx, cfg.rx);
         dev.has_fifos = cfg.fifos;
+        dev.stale_thre = cfg.stale_thre;
         Sim {
             dev,
             pin: Pin::new(cfg.edges),
@@ -649,6 +652,7 @@ fn config(rng: &mut Rng) -> Config {
         p_console: [100, 500, 1000][pick(rng, 3)],
         line_errors: pick(rng, 4) == 0,
         service_first: false,
+        stale_thre: pick(rng, 4) == 0,
     }
 }
 
@@ -658,6 +662,27 @@ fn random_interleavings_lose_nothing_and_never_strand_uart() {
     for seed in 0..runs {
         let mut rng = Rng::new(1000 + seed);
         let cfg = config(&mut rng);
+        match run(cfg, seed) {
+            Ok((uart, sim, con)) => check_end(&cfg, &uart, &sim, &con),
+            Err(f) => panic!("seed {seed}, {cfg:?}: {f:?}"),
+        }
+    }
+}
+
+/// A THRE interrupt left pending by a THR write (`Dev::stale_thre`, which
+/// Hyper-V's 16550 appears to do: the M8 Hyper-V check lost 6 bytes of a
+/// line uart had written) must not bring a burst onto a FIFO that still
+/// holds bytes: uart writes one only when LSR says THRE.
+#[test]
+fn a_stale_thre_interrupt_never_overflows_the_fifo() {
+    let runs = if cfg!(miri) { 2 } else { 300 };
+    for seed in 0..runs {
+        let mut rng = Rng::new(9000 + seed);
+        let cfg = Config {
+            fifos: true,
+            stale_thre: true,
+            ..config(&mut rng)
+        };
         match run(cfg, seed) {
             Ok((uart, sim, con)) => check_end(&cfg, &uart, &sim, &con),
             Err(f) => panic!("seed {seed}, {cfg:?}: {f:?}"),
@@ -703,6 +728,7 @@ fn quiet(tx: Tx) -> (Uart, Sim) {
         p_console: 1000,
         line_errors: false,
         service_first: false,
+        stale_thre: false,
     };
     let mut sim = Sim::new(&cfg, Rng::new(1));
     let (uart, _) = Uart::start(&mut sim);

@@ -21,7 +21,8 @@
 //!   `Stats` ([`decode`] checks the label, badge and length first).
 //!
 //! The rules: a 2,048-byte transmit queue, written in bursts of 15 bytes
-//! per THRE seen (1 without FIFOs), so even a debug kernel's byte cannot
+//! per THRE seen (1 without FIFOs; a THRE interrupt counts only if LSR
+//! still says THRE), so even a debug kernel's byte cannot
 //! overflow the 16-byte FIFO; a 256-byte receive ring, whose filling clears
 //! IER's data bit until a `Read` makes room; IER.THRI exactly while the
 //! queue holds bytes or a `Drain` is held; one held request at a time, in
@@ -319,6 +320,12 @@ impl Uart {
                     out.signal_console |= n > 0;
                     n > 0
                 }
+                // A THRE interrupt is taken only if LSR still says THRE, as
+                // Linux's 8250 driver does: a device that leaves the
+                // interrupt pending after a THR write (Hyper-V's appears to)
+                // would otherwise bring a burst onto a FIFO that still holds
+                // a refill's bytes, or release a Drain early.
+                IIR_THRI if self.lsr(port) & LSR_THRE == 0 => false,
                 IIR_THRI if self.tx.is_empty() => {
                     if self.held == Some(Held::Drain) {
                         self.held = None;
