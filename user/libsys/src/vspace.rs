@@ -7,10 +7,15 @@
 //! directory, at an address aligned to [`HUGE_PAGE`] where no page table
 //! is mapped. A frame from device untyped maps only [`UNCACHED`] or
 //! [`WRITE_COMBINING`], one from RAM only [`WRITE_BACK`].
+//!
+//! [`frame_get_address`] (M9) gives a frame's physical address, which is
+//! also the bus address a device's DMA uses: the address root passes a
+//! driver for its DMA frame, or `vmbus` posts in a GPADL.
 
 use l4core::cap::Rights;
 use l4core::vspace::label;
 
+use crate::device::{Request, undecoded, word};
 use crate::error::Error;
 use crate::invoke::invoke;
 use crate::syscall::{CPtr, Ipc};
@@ -114,6 +119,37 @@ pub fn frame_unmap(frame: CPtr) -> Result<(), Error> {
     invoke(None, frame, label::FRAME_UNMAP, &[], &[]).map(|_| ())
 }
 
+/// The most bits a physical address has on x86-64.
+const MAX_PHYS_BITS: u32 = 52;
+
+/// `Frame_GetAddress`'s message: the label, no registers, no extra
+/// capabilities.
+pub const fn get_address_request() -> Request {
+    Request::new(label::FRAME_GET_ADDRESS, &[], &[])
+}
+
+/// The physical address a `Frame_GetAddress` result word names, or `None`
+/// for one the kernel never returns: not page-aligned, or at or past
+/// 2^52.
+pub const fn frame_address(word: u64) -> Option<u64> {
+    if word.is_multiple_of(PAGE) && word >> MAX_PHYS_BITS == 0 {
+        Some(word)
+    } else {
+        None
+    }
+}
+
+/// `Frame_GetAddress` (M9): the physical address of the frame's first
+/// byte, for any frame capability (RAM or device, either size, mapped or
+/// not, any rights). Without an IOMMU it is also the bus address a
+/// device's DMA uses; DMA into a `WriteBack` RAM frame is coherent.
+/// Deleting the frame or revoking its untyped does not stop a device that
+/// was given the address: stop the device first. Needs no IPC buffer.
+pub fn frame_get_address(frame: CPtr) -> Result<u64, Error> {
+    let r = get_address_request().call(None, frame)?;
+    frame_address(word(&r, 0)?).ok_or_else(|| undecoded(&r))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +172,27 @@ mod tests {
             [Table::Pdpt, Table::PageDirectory, Table::PageTable].map(Table::unmap_label),
             [0x41, 0x43, 0x45]
         );
+    }
+
+    /// `Frame_GetAddress` is label `0x53` with no registers and no extra
+    /// capabilities, and its one result word is a page-aligned physical
+    /// address.
+    #[test]
+    fn get_address_is_the_abis() {
+        let r = get_address_request();
+        assert_eq!((r.label, r.args(), r.caps()), (0x53, &[][..], &[][..]));
+        for a in [
+            0,
+            0x1000,
+            0x20_0000,
+            0xE000_0000,
+            0x8_0000_0000,
+            (1 << 52) - 0x1000,
+        ] {
+            assert_eq!(frame_address(a), Some(a));
+        }
+        for a in [0x800, 0x1001, 1 << 52, !0xFFF] {
+            assert_eq!(frame_address(a), None, "{a:#x}");
+        }
     }
 }

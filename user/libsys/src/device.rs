@@ -1,6 +1,6 @@
 //! Interrupts and I/O ports: the IRQControl, IRQHandler, IOPortControl and
 //! IOPort invocations (`docs/abi.md`, "Interrupts, I/O ports and
-//! Hyper-V").
+//! Hyper-V"), from M9 `GetMSI` and `GetSint` among them.
 //!
 //! Each wrapper builds its message with a [`Request`], so the encoding is
 //! host-tested, and sends it by `Call` through [`crate::invoke::invoke`].
@@ -11,9 +11,11 @@
 //! A driver binds its handler, Acks once and services its device once, then
 //! loops by its pin's trigger (ADR 0028): an edge pin (ISA IRQ 4, COM1's,
 //! on both platforms) wait, Ack, service; a level pin wait, service, Ack.
+//! An MSI's or a SINT's `Ack` does nothing, so their drivers need no
+//! handler capability.
 
 use l4core::ioport::{Width, label as port_label};
-use l4core::irq::label as irq_label;
+use l4core::irq::{IRQS, label as irq_label};
 
 use crate::error::Error;
 use crate::invoke::{Reply, Slot, invoke};
@@ -31,7 +33,7 @@ pub struct Request {
 }
 
 impl Request {
-    const fn new(label: u64, args: &[u64], caps: &[CPtr]) -> Request {
+    pub(crate) const fn new(label: u64, args: &[u64], caps: &[CPtr]) -> Request {
         let mut a = [0; 5];
         let mut i = 0;
         while i < args.len() {
@@ -63,7 +65,7 @@ impl Request {
 
     /// Sends it to `cap` by `Call`; `ipc` must be the caller's buffer if
     /// it has more than four registers or a capability.
-    fn call(&self, ipc: Option<Ipc>, cap: CPtr) -> Result<Reply, Error> {
+    pub(crate) fn call(&self, ipc: Option<Ipc>, cap: CPtr) -> Result<Reply, Error> {
         invoke(ipc, cap, self.label, self.args(), self.caps())
     }
 
@@ -82,6 +84,20 @@ impl Request {
         Request::new(
             irq_label::GET_IOAPIC,
             &[gsi, level as u64, active_low as u64, dest.index, dest.depth],
+            &[dest.root],
+        )
+    }
+
+    /// `IRQControl_GetMSI` (M9): MR0 and MR1 the destination.
+    pub const fn get_msi(dest: Slot) -> Request {
+        Request::new(irq_label::GET_MSI, &[dest.index, dest.depth], &[dest.root])
+    }
+
+    /// `IRQControl_GetSint` (M9): MR0 `sint`, then the destination.
+    pub const fn get_sint(sint: u64, dest: Slot) -> Request {
+        Request::new(
+            irq_label::GET_SINT,
+            &[sint, dest.index, dest.depth],
             &[dest.root],
         )
     }
@@ -161,6 +177,47 @@ impl IsaIrq {
     }
 }
 
+/// What `IRQControl_GetMSI` returns: the IRQ, and the message address and
+/// data the device must send for it, which the driver writes into it
+/// unchanged (an MSI-X table entry: the address's low dword, its high
+/// dword 0, the data, then its mask bit cleared).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Msi {
+    pub irq: u8,
+    /// `0xFEE0_0000 | (APIC ID << 12)`: physical destination, the boot
+    /// CPU; the upper 32 bits are 0.
+    pub address: u64,
+    /// `0x30 + irq`, the vector: fixed delivery, edge-triggered.
+    pub data: u32,
+}
+
+impl Msi {
+    /// Decodes the result words MR0 `irq`, MR1 `address` and MR2 `data`;
+    /// `None` for values `docs/abi.md` says the kernel never returns: an
+    /// IRQ of 192 or more, an address other than `0xFEE0_0000` with an
+    /// APIC ID in bits 12 to 19, or data other than the IRQ's vector.
+    pub fn from_words(irq: u64, address: u64, data: u64) -> Option<Msi> {
+        let irq = u8::try_from(irq).ok().filter(|&i| usize::from(i) < IRQS)?;
+        let fits =
+            address & !0xF_F000 == 0xFEE0_0000 && data == u64::from(l4core::irq::vector(irq));
+        fits.then_some(Msi {
+            irq,
+            address,
+            data: data as u32,
+        })
+    }
+
+    /// The xAPIC ID the message goes to.
+    pub const fn apic_id(&self) -> u8 {
+        (self.address >> 12) as u8
+    }
+
+    /// The vector it raises.
+    pub const fn vector(&self) -> u8 {
+        self.data as u8
+    }
+}
+
 /// The result word `i` of `reply`, or an undecodable-reply error if the
 /// kernel sent fewer.
 pub(crate) fn word(reply: &Reply, i: usize) -> Result<u64, Error> {
@@ -206,6 +263,31 @@ pub fn irq_control_get_ioapic(
 ) -> Result<u8, Error> {
     let r = Request::get_ioapic(gsi, level, active_low, dest).call(Some(ipc), control)?;
     u8::try_from(word(&r, 0)?).map_err(|_| undecoded(&r))
+}
+
+/// `IRQControl_GetMSI` (M9): reserves a vector for one MSI or MSI-X
+/// message and puts its handler in `dest`; returns the IRQ and the
+/// message's address and data. `RevokeFirst` if no device vector is free
+/// (GetISA, GetIOAPIC, GetMSI and GetSint share 192). The kernel never
+/// masks an MSI, and its handler's `Ack` does nothing.
+pub fn irq_control_get_msi(ipc: Ipc, control: CPtr, dest: Slot) -> Result<Msi, Error> {
+    let r = Request::get_msi(dest).call(Some(ipc), control)?;
+    Msi::from_words(word(&r, 0)?, word(&r, 1)?, word(&r, 2)?).ok_or_else(|| undecoded(&r))
+}
+
+/// `IRQControl_GetSint` (M9): a handler for Hyper-V SynIC interrupt source
+/// `sint` (0 to 15), unmasked, into `dest`; returns the IRQ.
+/// `IllegalOperation` with no usable SynIC (not Hyper-V, or the kernel
+/// made no Hypervisor capability), `RangeError(0, 15)` past 15,
+/// `RevokeFirst` if the SINT has a handler or no vector is free. A SINT's
+/// interrupt that came before the handler was bound signalled nothing, so
+/// look at the slot once after binding.
+pub fn irq_control_get_sint(ipc: Ipc, control: CPtr, sint: u64, dest: Slot) -> Result<u8, Error> {
+    let r = Request::get_sint(sint, dest).call(Some(ipc), control)?;
+    u8::try_from(word(&r, 0)?)
+        .ok()
+        .filter(|&i| usize::from(i) < IRQS)
+        .ok_or_else(|| undecoded(&r))
 }
 
 /// `IRQHandler_Ack`: clears the pin's `pending` and unmasks it if the
@@ -317,6 +399,51 @@ mod tests {
             (r.label, r.args(), r.caps()),
             (0x70, &[0x3F8, 0x3FF, 40, 64][..], &[2][..])
         );
+    }
+
+    /// `GetMSI`: MR0 `index`, MR1 `depth`, the destination CNode as extra
+    /// capability 0; `GetSint`: MR0 `sint`, then the same.
+    #[test]
+    fn m9_issues_name_the_source_then_the_destination() {
+        let r = Request::get_msi(DEST);
+        assert_eq!(
+            (r.label, r.args(), r.caps()),
+            (0x62, &[40, 64][..], &[2][..])
+        );
+        let r = Request::get_sint(2, DEST);
+        assert_eq!(
+            (r.label, r.args(), r.caps()),
+            (0x63, &[2, 40, 64][..], &[2][..])
+        );
+    }
+
+    #[test]
+    fn get_msi_results_decode_as_the_abi_has_them() {
+        let m = Msi::from_words(0, 0xFEE0_0000, 0x30).unwrap();
+        assert_eq!((m.irq, m.apic_id(), m.vector(), m.data), (0, 0, 0x30, 0x30));
+        let m = Msi::from_words(191, 0xFEEF_F000, 0xEF).unwrap();
+        assert_eq!((m.irq, m.apic_id(), m.vector()), (191, 0xFF, 0xEF));
+        assert_eq!(Msi::from_words(3, 0xFEE0_1000, 0x33).unwrap().apic_id(), 1);
+        for (irq, address, data) in [
+            // No IRQ 192, and nothing past a byte.
+            (192, 0xFEE0_0000, 0xF0),
+            (256, 0xFEE0_0000, 0x30),
+            // Data is the vector and nothing else.
+            (0, 0xFEE0_0000, 0x31),
+            (0, 0xFEE0_0000, 0x30 | 1 << 15),
+            (0, 0xFEE0_0000, 0x30 | 1 << 32),
+            // The address: 0xFEE, the APIC ID, then 0s; the upper half 0.
+            (0, 0xFED0_0000, 0x30),
+            (0, 0xFEE0_0008, 0x30),
+            (0, 0xFEE0_0004, 0x30),
+            (0, 0x1_FEE0_0000, 0x30),
+        ] {
+            assert_eq!(
+                Msi::from_words(irq, address, data),
+                None,
+                "{irq} {address:#x} {data:#x}"
+            );
+        }
     }
 
     #[test]
