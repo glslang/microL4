@@ -177,11 +177,15 @@ function Save-L4Screen([string] $VMName, [string] $Path, [int] $Width = 1024, [i
     } elseif ($out.ReturnValue -ne 0) {
         throw "GetVirtualSystemThumbnailImage returned $($out.ReturnValue)"
     }
+    # Every byte the API returned is kept, before any check. The pixels are
+    # its first 2 x width x height bytes, as Microsoft's samples copy them;
+    # on the owner's host the API returned 4 bytes more (1,572,868 for
+    # 1024x768), which the PNG leaves out.
     $data = [byte[]] $out.ImageData
-    if ($data.Length -ne 2 * $Width * $Height) {
-        throw "GetVirtualSystemThumbnailImage gave $($data.Length) bytes, not $(2 * $Width * $Height) for ${Width}x${Height} at 2 bytes a pixel"
-    }
     [System.IO.File]::WriteAllBytes([System.IO.Path]::ChangeExtension($Path, '.rgb565'), $data)
+    if ($data.Length -lt 2 * $Width * $Height) {
+        throw "GetVirtualSystemThumbnailImage gave $($data.Length) bytes, fewer than $(2 * $Width * $Height) for ${Width}x${Height} at 2 bytes a pixel"
+    }
 
     Add-Type -AssemblyName System.Drawing
     $rect = [System.Drawing.Rectangle]::new(0, 0, $Width, $Height)
@@ -210,6 +214,9 @@ function Save-L4Screen([string] $VMName, [string] $Path, [int] $Width = 1024, [i
 
 $logDir = Split-Path -Parent $LogPath
 if (-not $logDir) { $logDir = '.' }
+# Absolute, since .NET (WriteAllBytes, Bitmap.Save) resolves a relative
+# path against the process's starting directory, not the current location.
+$logDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($logDir)
 
 # The scenario's state, which the reader's callbacks below advance.
 $scn = $null
@@ -244,7 +251,9 @@ if ($Scenario) {
         $png = Join-Path $logDir "l4-$($step.Text).png"
         try {
             Save-L4Screen -VMName $VMName -Path $png
-            "l4: screendump $($step.Text) saved as $png"
+            $raw = [System.IO.Path]::ChangeExtension($png, '.rgb565')
+            $extra = (Get-Item -LiteralPath $raw).Length - 2 * 1024 * 768
+            "l4: screendump $($step.Text) saved as $png ($extra bytes past the pixels, kept in $raw)"
         } catch {
             if ($null -eq $scn.Unsaved) { $scn.Unsaved = "could not save screendump $($step.Text): $_" }
             "l4: screendump $($step.Text) failed: $_"
