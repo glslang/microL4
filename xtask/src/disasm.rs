@@ -26,7 +26,17 @@
 //!   `edi` or `rdi`) the straight-line code before it set to such an
 //!   immediate: those functions take the port as their first argument and
 //!   move it into `dx` themselves, so this is how a caller would name COM1;
-//! - any symbol whose name contains `serial`.
+//! - any symbol whose name contains `serial`;
+//! - from M9, a call or jump into the Hyper-V hypercall page, `.hvcall`
+//!   (`__hvcall_start` to `__hvcall_end`), from a function other than
+//!   [`HYPERCALL_CALLER`], `hyperv::hypercall`, the one function that runs
+//!   a hypercall once the page has read back enabled (ADR 0029); the
+//!   page's address in any other instruction but [`HVCALL_ADDRESS`]'s,
+//!   `hyperv::hvcall_page`, which takes it for the hypercall MSR, or in
+//!   the kernel's data; and anything in `.hvcall` but its `int3` filler,
+//!   4096 of them, so that the page is what the hypervisor overlays and
+//!   nothing else (`docs/design.md`, "Hypercalls (M9)", "The Hypervisor
+//!   capability (M9)").
 //!
 //! The first three rules hold whatever the port: UART code needs `in` and
 //! `out`, which only io.rs has, so it must reach io.rs through one of the
@@ -108,6 +118,18 @@ pub const EXECUTOR_CALLERS: &[&str] =
 /// The section holding the root task's ELF, which the kernel copies and
 /// never follows: its bytes are not kernel data.
 const ROOT_IMAGE: &str = ".rootimage";
+/// The linker script's bounds of `.hvcall`, the hypercall page.
+const HVCALL_SYMBOLS: [&str; 2] = ["__hvcall_start", "__hvcall_end"];
+/// `.hvcall`'s size: one page, all `int3`.
+pub const HVCALL_SIZE: u64 = 4096;
+/// The one function a release kernel may call `.hvcall` from, demangled:
+/// `hyperv::hypercall`, `#[inline(never)]`, which asserts that the page
+/// read back enabled before its `call`. Inlined, cloned or renamed, it
+/// fails the check.
+pub const HYPERCALL_CALLER: &str = "kernel::arch::x86_64::hyperv::hypercall";
+/// The one other function that may name `.hvcall`'s address, demangled:
+/// `hyperv::hvcall_page`, which takes it for the hypercall MSR.
+pub const HVCALL_ADDRESS: &str = "kernel::arch::x86_64::hyperv::hvcall_page";
 
 /// What a scan of a listing found.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -122,6 +144,10 @@ pub struct Scan {
     /// Direct calls and jumps to the [`EXECUTOR`] from
     /// [`EXECUTOR_CALLERS`].
     pub executor_calls: usize,
+    /// `.hvcall`'s `int3`s.
+    pub hvcall_int3: usize,
+    /// Direct calls into `.hvcall` from [`HYPERCALL_CALLER`].
+    pub hvcall_calls: usize,
     /// Each broken rule, one line each.
     pub findings: Vec<String>,
 }
@@ -167,18 +193,23 @@ pub fn check(kernel: &Path) -> Result<String> {
         || scan.io_outs == 0
         || scan.io_calls == 0
         || scan.executor_calls == 0
+        || scan.hvcall_int3 as u64 != HVCALL_SIZE
+        || scan.hvcall_calls == 0
         || data.bytes == 0
     {
         return Err(format!(
             "the listing of {what} is not one this check can read: {} instructions, \
              {} functions in {IO_MODULE} with {} in and {} out, {} calls to them, \
-             {} calls to the IOPort executor from invoke_port, {} bytes of data",
+             {} calls to the IOPort executor from invoke_port, {} int3 in .hvcall \
+             (not {HVCALL_SIZE}), {} calls to it from {HYPERCALL_CALLER}, {} bytes of data",
             scan.instructions,
             scan.io_functions,
             scan.io_ins,
             scan.io_outs,
             scan.io_calls,
             scan.executor_calls,
+            scan.hvcall_int3,
+            scan.hvcall_calls,
             data.bytes
         )
         .into());
@@ -187,7 +218,8 @@ pub fn check(kernel: &Path) -> Result<String> {
         "disassembly: {} instructions of the release kernel; in and out only in io.rs's {} \
          functions ({} in, {} out), called {} times, only from the IOPort executor, \
          pic::init and arch::exit; the executor called {} times, only from \
-         invoke_port::<Objects>; their addresses in no other instruction and in none of \
+         invoke_port::<Objects>; .hvcall {} int3, called {} times, only from \
+         hyperv::hypercall; their addresses in no other instruction and in none of \
          {} bytes of data; no COM1 port in dx or passed to io.rs, no serial symbol",
         scan.instructions,
         scan.io_functions,
@@ -195,6 +227,8 @@ pub fn check(kernel: &Path) -> Result<String> {
         scan.io_outs,
         scan.io_calls,
         scan.executor_calls,
+        scan.hvcall_int3,
+        scan.hvcall_calls,
         data.bytes
     ))
 }
@@ -240,6 +274,10 @@ pub fn scan(symbols: &str, listing: &str) -> Scan {
     let executor_at = |addr: u64| executor.iter().position(|r: &Range<u64>| r.contains(&addr));
     let in_executor = |addr: u64| executor_at(addr).is_some();
     let within = |ranges: &[Range<u64>], addr: u64| ranges.iter().any(|r| r.contains(&addr));
+    let hvcall = hvcall_page(symbols);
+    let in_hvcall = |addr: u64| hvcall.as_ref().is_some_and(|r| r.contains(&addr));
+    let hypercall = named(symbols, &[HYPERCALL_CALLER]);
+    let hvcall_address = named(symbols, &[HVCALL_ADDRESS]);
 
     let mut function = "";
     // The immediate the port argument last got on the straight-line code
@@ -307,7 +345,33 @@ pub fn scan(symbols: &str, listing: &str) -> Scan {
                 ));
             }
         }
+        if in_hvcall(addr) {
+            if mnemonic == "int3" {
+                s.hvcall_int3 += 1;
+            } else {
+                s.findings
+                    .push(format!("something other than int3 in .hvcall: {}", at()));
+            }
+        }
+        if target.is_some_and(in_hvcall) {
+            if mnemonic == "call" && within(&hypercall, addr) {
+                s.hvcall_calls += 1;
+            } else {
+                s.findings.push(format!(
+                    "the hypercall page called or jumped to from a function other than \
+                     hyperv::hypercall: {}",
+                    at()
+                ));
+            }
+        }
         for v in numbers(text).into_iter().filter(|&v| Some(v) != target) {
+            if in_hvcall(v) && !within(&hvcall_address, addr) {
+                s.findings.push(format!(
+                    "the hypercall page's address {v:#x} other than as hyperv::hypercall's \
+                     call target: {}",
+                    at()
+                ));
+            }
             if in_io(v) {
                 s.findings.push(format!(
                     "io.rs's address {v:#x} other than as a call's or jump's target: {}",
@@ -350,6 +414,21 @@ pub fn scan(symbols: &str, listing: &str) -> Scan {
     s
 }
 
+/// `.hvcall`'s address range, from the linker script's `__hvcall_start`
+/// and `__hvcall_end` in `symbols`; `None` without both or with an empty
+/// or reversed range.
+fn hvcall_page(symbols: &str) -> Option<Range<u64>> {
+    let at = |name: &str| {
+        symbols
+            .lines()
+            .filter_map(Symbol::parse)
+            .find(|s| s.name == name)
+            .map(|s| s.addr)
+    };
+    let (start, end) = (at(HVCALL_SYMBOLS[0])?, at(HVCALL_SYMBOLS[1])?);
+    (start < end).then_some(start..end)
+}
+
 /// io.rs's functions in `symbols` (`llvm-objdump --syms --demangle`):
 /// their address ranges.
 fn io_functions(symbols: &str) -> Vec<Range<u64>> {
@@ -389,8 +468,8 @@ pub struct Data {
     pub findings: Vec<String>,
 }
 
-/// Scans the kernel's data for the addresses of io.rs's functions and the
-/// [`EXECUTOR`]'s: every allocated section the file holds bytes for, but
+/// Scans the kernel's data for the addresses of io.rs's functions, the
+/// [`EXECUTOR`]'s and `.hvcall`'s: every allocated section the file holds bytes for, but
 /// code, which the listing covers, and [`ROOT_IMAGE`]. A function pointer
 /// to one of them, in a table, a static or a trait object's vtable, would
 /// be such an address, at any alignment.
@@ -401,6 +480,7 @@ pub fn data(symbols: &str, elf: &[u8]) -> Option<Data> {
     const SHF_EXECINSTR: u64 = 4;
     let io = io_functions(symbols);
     let executor = named(symbols, &EXECUTOR);
+    let hvcall = hvcall_page(symbols);
     let mut d = Data::default();
     for sec in sections(elf)? {
         if sec.flags & SHF_ALLOC == 0 || sec.flags & SHF_EXECINSTR != 0 || sec.name == ROOT_IMAGE {
@@ -413,6 +493,8 @@ pub fn data(symbols: &str, elf: &[u8]) -> Option<Data> {
                 "io.rs's"
             } else if executor.iter().any(|r| r.contains(&v)) {
                 "the IOPort executor's"
+            } else if hvcall.as_ref().is_some_and(|r| r.contains(&v)) {
+                "the hypercall page's"
             } else {
                 continue;
             };
@@ -663,6 +745,8 @@ ffffffff80009095:      \tret
                 io_outs: 2,
                 io_calls: 3,
                 executor_calls: 0,
+                hvcall_int3: 0,
+                hvcall_calls: 0,
                 findings: vec![],
             }
         );
@@ -1335,5 +1419,182 @@ ffffffff80003016:      \tjmp\t0xffffffff8001d9d0 <<kernel::arch::x86_64::objects
                     .to_string()
             ])
         );
+    }
+
+    /// M9's hypercall functions and `.hvcall`, as llvm-objdump prints a
+    /// release kernel built from M9's tree (the panic path trimmed).
+    const HV_SYMBOLS: &str = "\
+ffffffff80010690 l     F .text\t0000000000000008 kernel::arch::x86_64::hyperv::hvcall_page
+ffffffff80010ea0 l     F .text\t0000000000000033 .hidden kernel::arch::x86_64::hyperv::hypercall (.llvm.948683377648153445)
+ffffffff80034000 g       .hvcall\t0000000000000000 __text_end
+ffffffff80033000 g       .hvcall\t0000000000000000 __hvcall_start
+ffffffff80034000 g       .hvcall\t0000000000000000 __hvcall_end
+";
+    const HV_FUNCTIONS: &str = "\
+ffffffff80010690 <kernel::arch::x86_64::hyperv::hvcall_page>:
+ffffffff80010690:      \tlea\trax, [rip + 0x22969] # 0xffffffff80033000 <__hvcall_start>
+ffffffff80010697:      \tret
+
+ffffffff80010ea0 <kernel::arch::x86_64::hyperv::hypercall (.llvm.948683377648153445)>:
+ffffffff80010ea0:      \tmovzx\teax, byte ptr [rip + 0xf8179] # 0xffffffff80109020 <kernel::arch::x86_64::hyperv::HYPERCALLS (.llvm.948683377648153445)+0x8>
+ffffffff80010ea7:      \tcmp\tal, 0x2
+ffffffff80010ea9:      \tjne\t0xffffffff80010eba <kernel::arch::x86_64::hyperv::hypercall (.llvm.948683377648153445)+0x1a>
+ffffffff80010eab:      \tmov\trcx, rdi
+ffffffff80010eae:      \txor\tr8d, r8d
+ffffffff80010eb1:      \tmov\trdx, rsi
+ffffffff80010eb4:      \tcall\t0xffffffff80033000 <__hvcall_start>
+ffffffff80010eb9:      \tret
+ffffffff80010eba:      \tpush\trax
+ffffffff80010ec0:      \tmov\trdi, -0x7ffc6730
+ffffffff80010ece:      \tcall\t0xffffffff80030b00 <core::panicking::panic_fmt>
+";
+
+    /// `.hvcall`'s listing: 4096 `int3`s, `replace` put in at offset
+    /// `at`, if any.
+    fn hvcall_listing(replace: Option<(u64, &str)>) -> String {
+        let mut out = String::from(
+            "\nDisassembly of section .hvcall:\n\nffffffff80033000 <__hvcall_start>:\n",
+        );
+        for i in 0..HVCALL_SIZE {
+            let text = match replace {
+                Some((at, text)) if at == i => text,
+                _ => "int3",
+            };
+            writeln!(out, "{:x}:      \t{text}", 0xffffffff80033000u64 + i).unwrap();
+        }
+        out
+    }
+
+    /// The M7 fixture with the hypercall functions, `.hvcall`, and a
+    /// function `name` at `0xffffffff80006000` holding `lines`.
+    fn hv_scan(name: &str, lines: &str, page: Option<(u64, &str)>) -> Scan {
+        let symbols = format!(
+            "{SYMBOLS}{HV_SYMBOLS}ffffffff80006000 l     F .text\t0000000000000040 .hidden {name}\n"
+        );
+        let listing = format!(
+            "{LISTING}\nffffffff80006000 <{name}>:\n{lines}\n\n{HV_FUNCTIONS}{}",
+            hvcall_listing(page)
+        );
+        scan(&symbols, &listing)
+    }
+
+    #[test]
+    fn a_clean_hypercall_page_passes() {
+        let s = hv_scan("f", "ffffffff80006000:      \tret", None);
+        assert_eq!(s.findings, Vec::<String>::new());
+        assert_eq!((s.hvcall_int3, s.hvcall_calls), (4096, 1));
+        // `__text_end`, which `paging` reads, is the page's end, not in it.
+        let s = hv_scan(
+            "kernel::arch::x86_64::paging::kernel_layout",
+            "ffffffff80006000:      \tlea\trax, [rip + 0x1] # 0xffffffff80034000 <__text_end>",
+            None,
+        );
+        assert_eq!(s.findings, Vec::<String>::new());
+        assert_eq!(
+            hvcall_page(HV_SYMBOLS),
+            Some(0xffffffff80033000..0xffffffff80034000)
+        );
+        assert_eq!(hvcall_page(SYMBOLS), None);
+    }
+
+    #[test]
+    fn the_hypercall_page_is_called_only_from_hyperv_hypercall() {
+        let calls = "ffffffff80006004:      \tcall\t0xffffffff80033000 <__hvcall_start>\n\
+                     ffffffff80006010:      \tje\t0xffffffff80033010 <__hvcall_start+0x10>\n\
+                     ffffffff80006016:      \tjmp\t0xffffffff80033ff0 <__hvcall_start+0xff0>";
+        // The executor of the Hypervisor invocations, the invocation, a
+        // clone or a helper of `hypercall`, its neighbour.
+        for name in [
+            "<kernel::arch::x86_64::objects::Objects as l4core::hyperv::invocation::Hypercalls>::post_message",
+            "l4core::hyperv::invocation::invoke::<kernel::arch::x86_64::objects::Objects>",
+            "kernel::arch::x86_64::hyperv::hypercall.specialized.1",
+            "kernel::arch::x86_64::hyperv::hypercall::{closure#0}",
+            "kernel::arch::x86_64::hyperv::hvcall_page",
+            "kernel::arch::x86_64::hyperv::set_up_hypercalls",
+        ] {
+            let s = hv_scan(name, calls, None);
+            assert_eq!(s.hvcall_calls, 1, "{name}: hypercall's own");
+            assert_eq!(s.findings.len(), 3, "{name}: {:?}", s.findings);
+            for (f, addr) in s.findings.iter().zip(["80006004", "80006010", "80006016"]) {
+                assert!(
+                    f.starts_with(
+                        "the hypercall page called or jumped to from a function other than \
+                         hyperv::hypercall: "
+                    ) && f.contains(&format!("0xffffffff{addr} in {name}: ")),
+                    "{f}"
+                );
+            }
+        }
+        // `hypercall` itself, under its own name, LLVM's suffix or not:
+        // a call is its one allowed use; a jump into the page is not.
+        for name in [
+            HYPERCALL_CALLER.to_string(),
+            format!("{HYPERCALL_CALLER} (.llvm.123)"),
+        ] {
+            let s = hv_scan(&name, calls, None);
+            assert_eq!(s.hvcall_calls, 2, "{name}");
+            assert_eq!(s.findings.len(), 2, "{name}: {:?}", s.findings);
+        }
+    }
+
+    #[test]
+    fn the_hypercall_page_s_address_appears_only_in_hvcall_page() {
+        for line in [
+            "lea\trax, [rip + 0x2cffc]      # 0xffffffff80033000 <__hvcall_start>",
+            "mov\trax, -0x7ffcd000",
+            "movabs\trax, 0xffffffff80033008",
+            "mov\tqword ptr [rip + 0x10], -0x7ffcc001",
+            "call\tqword ptr [rip + 0x3f4a]      # 0xffffffff80033000 <__hvcall_start>",
+            "call\trax",
+        ] {
+            let s = hv_scan("f", &format!("ffffffff80006004:      \t{line}"), None);
+            if line == "call\trax" {
+                // An indirect call names nothing: the address rule is
+                // what stops its operand being made.
+                assert_eq!(s.findings, Vec::<String>::new());
+                continue;
+            }
+            assert_eq!(s.findings.len(), 1, "{line}: {:?}", s.findings);
+            assert!(
+                s.findings[0].starts_with("the hypercall page's address 0xffffffff80033")
+                    && s.findings[0].contains("other than as hyperv::hypercall's call target"),
+                "{line}: {:?}",
+                s.findings
+            );
+        }
+        // Next to the page is not the page.
+        for line in ["mov\trax, -0x7ffcd001", "movabs\trax, 0xffffffff80034000"] {
+            let s = hv_scan("f", &format!("ffffffff80006004:      \t{line}"), None);
+            assert_eq!(s.findings, Vec::<String>::new(), "{line}");
+        }
+        // In data, as a function pointer would be.
+        let page = 0xffffffff80033000u64.to_le_bytes();
+        let file = elf(&[(".data", 1, 3, 0xffffffff80094000, &page)]);
+        let symbols = format!("{SYMBOLS}{HV_SYMBOLS}");
+        assert_eq!(
+            data(&symbols, &file).map(|d| d.findings),
+            Some(vec![
+                "the hypercall page's address 0xffffffff80033000 stored in .data at \
+                 0xffffffff80094000"
+                    .to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn anything_but_int3_in_the_hypercall_page_fails() {
+        for (at, text) in [(0, "nop"), (0xFFF, "ret"), (0x800, "vmcall")] {
+            let s = hv_scan("f", "ffffffff80006000:      \tret", Some((at, text)));
+            assert_eq!(s.hvcall_int3, 4095, "{text}");
+            assert_eq!(s.findings.len(), 1, "{text}: {:?}", s.findings);
+            assert!(
+                s.findings[0].starts_with(&format!(
+                    "something other than int3 in .hvcall: {:#x} in __hvcall_start: {text}",
+                    0xffffffff80033000u64 + at
+                )),
+                "{:?}",
+                s.findings
+            );
+        }
     }
 }
