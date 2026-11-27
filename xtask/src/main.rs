@@ -230,6 +230,8 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "--package",
             "net",
             "--package",
+            "virtio-net",
+            "--package",
             "vmbus",
             "--package",
             "hvmock",
