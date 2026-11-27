@@ -200,8 +200,9 @@ pub struct UartStats {
     /// MR7: service routines cut short by the limit of 64 reads that move
     /// no byte.
     pub cut_short: u64,
-    /// MR8 (M8): the transmit burst setup chose, 15 with working FIFOs
-    /// and 1 without, for the Hyper-V check of its 16550.
+    /// MR8 (M8): the transmit burst in use, 15 with working FIFOs and 1
+    /// without, for the Hyper-V check of its 16550; from M9 at most `n`
+    /// under the command line's `uart.burst=<n>`.
     pub burst: u64,
     /// MR9 (M8): THRE interrupts found stale, IIR naming THRE while LSR
     /// said the FIFO still held bytes, which uart then ignores; for the
@@ -245,7 +246,7 @@ impl UartStats {
 }
 
 /// What root's uart lines show; `release` expects `, burst 15` (working
-/// FIFOs) near their end.
+/// FIFOs) near their end, and `release_burst1` `, burst 1,`.
 impl fmt::Display for UartStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

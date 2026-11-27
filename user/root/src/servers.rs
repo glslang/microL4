@@ -26,7 +26,7 @@ use libsys::{
     BootInfo, CPtr, Ipc, IpcBufferFrame, ObjectAlloc, ObjectType, Registers, Rights, Slot, UserReg,
     recv,
 };
-use root::process::{FaultLine, Image, PAGE, PT_SPAN, Plan, Role, fault_badge};
+use root::process::{FaultLine, Image, PAGE, PT_SPAN, Plan, Role, UartBurst, fault_badge};
 
 use crate::fail;
 use crate::spawn::{self, STACKS, Thread};
@@ -148,8 +148,10 @@ pub fn exit_port(ipc: Ipc, objects: &mut ObjectAlloc, bi: &BootInfo) -> Option<C
 }
 
 /// Starts `watch`, then `uart` and `console`, with the capabilities
-/// `docs/design.md`'s tables give them. `exit_port` is what `watch` ends a
-/// failed run through; `None` for `DebugHalt`.
+/// `docs/design.md`'s tables give them, and uart with the cap on its
+/// burst that the command line's `uart.burst=<n>` asks for (M9).
+/// `exit_port` is what `watch` ends a failed run through; `None` for
+/// `DebugHalt`.
 pub fn start(
     bi: &BootInfo,
     ipc: Ipc,
@@ -284,7 +286,8 @@ pub fn start(
             ntfn: Some(nu),
             priority: UART_PRIORITY,
             entry: uart_main,
-            args: [0; 3],
+            // From M9: the command line's cap on its burst, 0 for none.
+            args: [UartBurst::parse(bi.cmdline()).cap().to_word(), 0, 0],
         },
     );
 
@@ -772,8 +775,8 @@ struct Server {
     ntfn: Option<CPtr>,
     priority: u64,
     entry: spawn::Entry,
-    /// Its arguments, in `rdi`, `rsi` and `rdx`: term's geometry; 0 for
-    /// the others.
+    /// Its arguments, in `rdi`, `rsi` and `rdx`: term's geometry, uart's
+    /// cap on its burst in `rdi` (M9); 0 for the others.
     args: [u64; 3],
 }
 
@@ -821,8 +824,10 @@ fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
     .unwrap_or_else(|e| fail!("servers: starting the thread in TCB slot {tcb}: {e}"));
 }
 
-extern "C" fn uart_main(_: u64, _: u64, _: u64, _: u64) -> ! {
-    uart::run()
+/// uart's entry: the cap on its burst, from the command line's
+/// `uart.burst=<n>`, is in `rdi`.
+extern "C" fn uart_main(cap: u64, _: u64, _: u64, _: u64) -> ! {
+    uart::run(uart::Cap::from_word(cap))
 }
 
 extern "C" fn console_main(_: u64, _: u64, _: u64, _: u64) -> ! {

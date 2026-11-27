@@ -78,6 +78,7 @@ mod tui;
 use libsys::bootinfo::{CAP_INIT_CNODE, SlotRegion};
 use libsys::ipc::word;
 use libsys::{BootInfo, Ipc, Message, MessageInfo, call, cmdline, println};
+use root::process::UartBurst;
 
 libsys::entry!(main);
 
@@ -144,6 +145,11 @@ pub(crate) fn summary(bi: &BootInfo) {
         Ipc::root().as_ptr() as u64
     );
     println!("root: cmdline {:?}", bi.cmdline());
+    // From M9: a cap on uart's burst, which `servers::start` passes on.
+    let burst = UartBurst::parse(bi.cmdline());
+    if burst != UartBurst::Absent {
+        println!("root: {burst}");
+    }
     let region = |name: &str, r: SlotRegion| {
         if r.is_empty() {
             println!("root: {name}: none");

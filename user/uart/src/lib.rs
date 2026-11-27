@@ -10,9 +10,10 @@
 //! user target, where the root task starts it in a VSpace and CSpace of
 //! its own with the capabilities [`slot`] lists.
 //!
-//! - [`Uart::start`] programs the device ([`setup`]), then Acks and
-//!   services once, since an interrupt between issue and binding signalled
-//!   nothing.
+//! - [`Uart::start`] programs the device ([`setup`]), caps the burst
+//!   setup chose with the command line's `uart.burst=<n>` ([`Cap`]), then
+//!   Acks and services once, since an interrupt between issue and binding
+//!   signalled nothing.
 //! - [`Uart::on_interrupt`] runs for every signal: `Ack`, then the service
 //!   routine, which reads IIR until no cause is pending (ADR 0028: on an
 //!   edge pin the Ack must open the pin before the driver's last look at
@@ -21,13 +22,14 @@
 //!   `Stats` ([`decode`] checks the label, badge and length first).
 //!
 //! The rules: a 2,048-byte transmit queue, written in bursts of 15 bytes
-//! per THRE seen (1 without FIFOs; a THRE interrupt counts only if LSR
-//! still says THRE), so even a debug kernel's byte cannot
-//! overflow the 16-byte FIFO; a 256-byte receive ring, whose filling clears
-//! IER's data bit until a `Read` makes room; IER.THRI exactly while the
-//! queue holds bytes or a `Drain` is held; one held request at a time, in
-//! slot 7, its refusal decided by `CNode_SaveCaller`; and a limit of 64
-//! reads that move no byte per service routine.
+//! per THRE seen (1 without FIFOs, at most `n` under `uart.burst=<n>`; a
+//! THRE interrupt counts only if LSR still says THRE), so even a debug
+//! kernel's byte cannot overflow the 16-byte FIFO; a 256-byte receive
+//! ring, whose filling clears IER's data bit until a `Read` makes room;
+//! IER.THRI exactly while the queue holds bytes or a `Drain` is held; one
+//! held request at a time, in slot 7, its refusal decided by
+//! `CNode_SaveCaller`; and a limit of 64 reads that move no byte per
+//! service routine.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -88,6 +90,53 @@ pub const IDLE_LIMIT: u32 = 64;
 pub const TEMT_POLLS: u32 = 10_000;
 
 const _: () = assert!(TX_QUEUE >= 2 * MAX_BYTES);
+
+/// A cap on the burst: the kernel command line's `uart.burst=<n>`, `n`
+/// from 1 to [`FIFO_BURST`], which root passes in `rdi` at spawn
+/// ([`Cap::to_word`]). uart's burst is then the smaller of `n` and the
+/// burst setup chose; [`Cap::NONE`] keeps setup's. For the M9 Hyper-V
+/// check, which runs with burst 1 and 15 to tell a FIFO that takes fewer
+/// bytes after THRE than uart writes from a pipe that drops them
+/// (`docs/design.md`, "Transmit and receive").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cap(u8);
+
+impl Cap {
+    /// No cap: the burst setup chose.
+    pub const NONE: Cap = Cap(0);
+
+    /// A cap of `n`, from 1 to [`FIFO_BURST`]; `None` for any other `n`.
+    pub const fn new(n: u64) -> Option<Cap> {
+        if n >= 1 && n <= FIFO_BURST as u64 {
+            Some(Cap(n as u8))
+        } else {
+            None
+        }
+    }
+
+    /// The word root passes in `rdi`: `n`, or 0 for none.
+    pub const fn to_word(self) -> u64 {
+        self.0 as u64
+    }
+
+    /// The cap in `rdi`; a word [`Cap::new`] refuses, which root never
+    /// passes, is no cap.
+    pub const fn from_word(word: u64) -> Cap {
+        match Cap::new(word) {
+            Some(cap) => cap,
+            None => Cap::NONE,
+        }
+    }
+
+    /// The burst under this cap, given the burst setup chose.
+    pub const fn apply(self, burst: usize) -> usize {
+        if self.0 != 0 && (self.0 as usize) < burst {
+            self.0 as usize
+        } else {
+            burst
+        }
+    }
+}
 
 /// The device's registers, by offset from `0x3F8`.
 pub trait Port {
@@ -233,9 +282,10 @@ pub struct Uart {
 }
 
 impl Uart {
-    /// Programs the device, then Acks and services it once.
-    pub fn start<D: Port + Irq>(dev: &mut D) -> (Uart, Outcome) {
-        let burst = setup(dev);
+    /// Programs the device, caps the burst setup chose with `cap`, then
+    /// Acks and services the device once.
+    pub fn start<D: Port + Irq>(dev: &mut D, cap: Cap) -> (Uart, Outcome) {
+        let burst = cap.apply(setup(dev));
         let mut uart = Uart {
             burst,
             ier: IER_SETUP,
@@ -243,7 +293,7 @@ impl Uart {
             rx: Ring::new(),
             held: None,
             held_bytes: [0; MAX_BYTES],
-            // Stats MR8 reports the burst setup chose.
+            // Stats MR8 reports the burst in use, so a cap shows.
             stats: UartStats {
                 burst: burst as u64,
                 ..UartStats::default()
@@ -254,7 +304,8 @@ impl Uart {
         (uart, out)
     }
 
-    /// The transmit burst: 15, or 1 without working FIFOs.
+    /// The transmit burst: 15, or 1 without working FIFOs, and at most
+    /// the cap.
     pub fn burst(&self) -> usize {
         self.burst
     }

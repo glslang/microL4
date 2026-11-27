@@ -2,8 +2,9 @@
 //! (`docs/design.md`, "Where the servers run"): which role each image page
 //! has, which of the root task's image frames covers it, the paging
 //! structures the server's VSpace needs, the scratch page the root task
-//! fills fresh frames through, and the line `watch` prints when a server
-//! faults. The root task's `servers.rs` does the invocations.
+//! fills fresh frames through, the line `watch` prints when a server
+//! faults, and from M9 the cap on uart's burst the command line may ask
+//! for. The root task's `servers.rs` does the invocations.
 
 use core::fmt;
 
@@ -250,6 +251,69 @@ impl Plan {
     }
 }
 
+/// The kernel command line's `uart.burst=<n>`, a cap on uart's burst for
+/// the M9 Hyper-V check (`docs/design.md`, "Transmit and receive"), which
+/// `servers.rs` passes to uart in `rdi` ([`UartBurst::cap`]). Its
+/// `Display` is the line root's summary prints for a word it found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UartBurst<'a> {
+    /// No `uart.burst=` word: uart keeps the burst setup chose.
+    Absent,
+    /// `n`, decimal, from 1 to 15: uart's burst is the smaller of `n` and
+    /// setup's.
+    Cap(uart::Cap),
+    /// Any other value, which root ignores.
+    Ignored(&'a str),
+}
+
+impl<'a> UartBurst<'a> {
+    /// The word's key.
+    pub const KEY: &'static str = "uart.burst";
+
+    /// The first `uart.burst=` word of `cmdline`, as `l4core::cmdline`
+    /// finds it.
+    pub fn parse(cmdline: &'a str) -> UartBurst<'a> {
+        let Some(v) = libsys::cmdline::value(cmdline, Self::KEY) else {
+            return UartBurst::Absent;
+        };
+        let decimal = !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit());
+        match decimal
+            .then(|| v.parse().ok())
+            .flatten()
+            .and_then(uart::Cap::new)
+        {
+            Some(cap) => UartBurst::Cap(cap),
+            None => UartBurst::Ignored(v),
+        }
+    }
+
+    /// The cap uart gets: none unless the word gave one.
+    pub const fn cap(self) -> uart::Cap {
+        match self {
+            UartBurst::Cap(cap) => cap,
+            UartBurst::Absent | UartBurst::Ignored(_) => uart::Cap::NONE,
+        }
+    }
+}
+
+impl fmt::Display for UartBurst<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let key = Self::KEY;
+        match *self {
+            UartBurst::Absent => write!(f, "no {key}= word: uart's burst is setup's"),
+            UartBurst::Cap(cap) => {
+                let n = cap.to_word();
+                write!(f, "{key}={n}: uart's burst capped at {n}")
+            }
+            UartBurst::Ignored(v) => write!(
+                f,
+                "{key}={v:?} ignored: not a number from 1 to {}",
+                uart::FIFO_BURST
+            ),
+        }
+    }
+}
+
 /// Badges of endpoint F, the servers' fault endpoint, which `watch`
 /// receives on: each names the server.
 pub mod fault_badge {
@@ -358,6 +422,82 @@ mod tests {
             start,
             end: start + len,
         }
+    }
+
+    #[test]
+    fn uart_burst_takes_1_to_15_and_ignores_the_rest() {
+        let cap = |n| UartBurst::Cap(uart::Cap::new(n).unwrap());
+        // Absent: nothing changes, whatever else the line holds.
+        for line in [
+            "",
+            "test=release",
+            "uart.burstx=1 uart=1 burst=1 test=uart.burst=1",
+        ] {
+            assert_eq!(UartBurst::parse(line), UartBurst::Absent, "{line:?}");
+            assert_eq!(UartBurst::parse(line).cap(), uart::Cap::NONE);
+        }
+        // 1 to 15, decimal, anywhere on the line; the first word counts.
+        for n in 1..=15 {
+            let line = format!("test=release uart.burst={n}");
+            assert_eq!(UartBurst::parse(&line), cap(n), "{line:?}");
+            assert_eq!(UartBurst::parse(&line).cap().to_word(), n);
+        }
+        assert_eq!(UartBurst::parse("uart.burst=1 test=release"), cap(1));
+        assert_eq!(UartBurst::parse("uart.burst=07"), cap(7));
+        assert_eq!(UartBurst::parse("uart.burst=15 uart.burst=99"), cap(15));
+        assert_eq!(
+            UartBurst::parse("uart.burst=99 uart.burst=1"),
+            UartBurst::Ignored("99")
+        );
+        // Anything else is ignored, and uart gets no cap.
+        for v in [
+            "",
+            "0",
+            "00",
+            "16",
+            "255",
+            "-1",
+            "+1",
+            "1.0",
+            "0x1",
+            "1,",
+            "one",
+            "18446744073709551616",
+            "99999999999999999999999",
+            "=1",
+        ] {
+            let line = format!("test=release uart.burst={v}");
+            assert_eq!(UartBurst::parse(&line), UartBurst::Ignored(v), "{line:?}");
+            assert_eq!(UartBurst::parse(&line).cap(), uart::Cap::NONE);
+        }
+        // A bare word, or one the space ends, has an empty value.
+        assert_eq!(UartBurst::parse("uart.burst"), UartBurst::Ignored(""));
+        assert_eq!(UartBurst::parse("uart.burst= 1"), UartBurst::Ignored(""));
+    }
+
+    #[test]
+    fn uart_bursts_lines() {
+        let line = |cmdline: &str| format!("root: {}", UartBurst::parse(cmdline));
+        assert_eq!(
+            line("test=release uart.burst=1"),
+            "root: uart.burst=1: uart's burst capped at 1"
+        );
+        assert_eq!(
+            line("uart.burst=015"),
+            "root: uart.burst=15: uart's burst capped at 15"
+        );
+        assert_eq!(
+            line("uart.burst=16"),
+            "root: uart.burst=\"16\" ignored: not a number from 1 to 15"
+        );
+        assert_eq!(
+            line("uart.burst"),
+            "root: uart.burst=\"\" ignored: not a number from 1 to 15"
+        );
+        assert_eq!(
+            line(""),
+            "root: no uart.burst= word: uart's burst is setup's"
+        );
     }
 
     #[test]
