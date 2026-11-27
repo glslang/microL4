@@ -18,7 +18,8 @@
 //!   binding included, and [`Error`] is the error a failed one returns,
 //!   decoded.
 //! - [`device`] performs the IRQControl, IRQHandler, IOPortControl and
-//!   IOPort invocations (M7).
+//!   IOPort invocations (M7), `GetMSI` and `GetSint` included (M9), and
+//!   [`hyperv`] the Hypervisor invocations (M9).
 //! - [`objects`] hands out the root task's free slots and picks the untyped
 //!   its objects are retyped from.
 //! - [`proto`] defines the `uart`, `console` and `term` protocols;
@@ -58,6 +59,7 @@ mod debug;
 pub mod device;
 pub mod error;
 pub mod frames;
+pub mod hyperv;
 #[cfg(target_os = "none")]
 pub mod image;
 pub mod invoke;

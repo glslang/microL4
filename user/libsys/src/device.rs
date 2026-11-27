@@ -163,7 +163,7 @@ impl IsaIrq {
 
 /// The result word `i` of `reply`, or an undecodable-reply error if the
 /// kernel sent fewer.
-fn word(reply: &Reply, i: usize) -> Result<u64, Error> {
+pub(crate) fn word(reply: &Reply, i: usize) -> Result<u64, Error> {
     if i < reply.length() {
         Ok(reply.word(i))
     } else {
@@ -171,7 +171,8 @@ fn word(reply: &Reply, i: usize) -> Result<u64, Error> {
     }
 }
 
-fn undecoded(reply: &Reply) -> Error {
+/// The error for a successful reply whose words the kernel never sends.
+pub(crate) fn undecoded(reply: &Reply) -> Error {
     Error::Undecoded {
         label: 0,
         length: reply.length() as u64,
