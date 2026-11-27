@@ -1,6 +1,7 @@
 //! A 16550 and an I/O APIC pin, as uart's host tests need them
 //! (`docs/design.md`, "Code and tests"): IIR priorities; THRE cleared by an
-//! IIR read that reports it or a THR write; 16-byte FIFOs, the receive
+//! IIR read that reports it or a THR write (with `stale_thre`, only by the
+//! IIR read, as Hyper-V's 16550 appears to behave); 16-byte FIFOs, the receive
 //! trigger and the character timeout; OE; OUT2 gating the line; a
 //! transmitter that takes a byte time per byte or empties at once as
 //! QEMU's does; a receiver that overruns as hardware does or, as QEMU's,
@@ -71,6 +72,9 @@ pub struct Dev {
     pub wire: Vec<(Src, u8)>,
     /// A THR write found the FIFO full.
     pub overflowed: bool,
+    /// A THR write leaves a pending THRE interrupt pending: only an IIR
+    /// read that reports it clears it.
+    pub stale_thre: bool,
     /// Bytes received while the FIFO was full.
     pub lost: usize,
 }
@@ -97,6 +101,7 @@ impl Dev {
             rx_mode,
             wire: Vec::new(),
             overflowed: false,
+            stale_thre: false,
             lost: 0,
         }
     }
@@ -187,7 +192,9 @@ impl Dev {
     pub fn write(&mut self, reg: u8, value: u8, src: Src) {
         match reg {
             THR if !self.dlab() => {
-                self.thr_pending = false;
+                if !self.stale_thre {
+                    self.thr_pending = false;
+                }
                 if self.tx.len() >= self.cap() {
                     self.overflowed = true;
                 } else {
