@@ -1,6 +1,6 @@
 [package]
 name = "libsys"
-description = "microL4's user-space library: _start, the system calls, kernel invocations, slot and untyped allocation, print! and the panic handler"
+description = "microL4's user-space library: _start, the system calls, kernel invocations, slot and untyped allocation, print! and the panic handler, device windows and shared memory, and the frame queues"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,3 +14,8 @@ doctest = false
 
 [dependencies]
 l4core = { path = "../../core" }
+
+[dev-dependencies]
+# The frame queues' proptests against a model of their two owners. `std`
+# alone: no forking, timeouts or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

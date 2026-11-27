@@ -7,6 +7,8 @@ use crate::mem::Ram;
 use core::sync::atomic::Ordering::Relaxed;
 use std::vec::Vec;
 
+mod model;
+
 const MAC: Mac = Mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
 /// Zeroed memory for the queues: only what the layout uses, which keeps
