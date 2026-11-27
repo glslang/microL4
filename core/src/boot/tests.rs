@@ -625,6 +625,41 @@ fn q35_untyped_fit_at_every_width() {
     assert!(counts.windows(2).all(|w| w[0].1 <= w[1].1));
 }
 
+/// M9 (`docs/design.md`, "What user space gets, and kernel devices"):
+/// root reaches PCI on q35 through device untyped alone. At every width,
+/// the MCFG's ECAM range, `InterruptInfo.ecam[0]`, all 256 MiB, is device
+/// untyped (the map's `RESERVED` range there); so is a 64-bit BAR above
+/// 4 GiB wherever the firmware puts it below `2^phys_addr_bits`, above the
+/// direct map included: OVMF's 64-bit aperture (from memory, at 32 GiB on
+/// a small q35), the top of the address space, and the 4 GiB above RAM.
+#[test]
+#[cfg_attr(miri, ignore = "decodes the ACPI dumps: minutes under Miri")]
+fn q35_ecam_and_64_bit_bars_are_device_untyped_at_every_width() {
+    let interrupts = Boot::Q35.interrupts();
+    assert_eq!(interrupts.ecam_count, 1);
+    let ecam = interrupts.ecam[0];
+    let range = span(
+        ecam.base + (u64::from(ecam.start_bus) << 20),
+        ecam.base + ((u64::from(ecam.end_bus) + 1) << 20),
+    );
+    assert_eq!(range, span(0xE000_0000, 0xF000_0000));
+    for bits in widths() {
+        let b = build(Boot::Q35.input(bits), interrupts).unwrap();
+        let list = b.bi.untyped();
+        assert!(all_covered(list, range, true), "ECAM at {bits} bits");
+        assert_eq!(b.bi.interrupts.ecam[0], ecam);
+        let top = 1u64 << bits;
+        let mut bars = std::vec![span(0x1_0000_0000, 0x2_0000_0000), span(top - 0x4000, top)];
+        if top > 0x8_0000_4000 {
+            bars.push(span(0x8_0000_0000, 0x8_0000_4000));
+        }
+        for bar in bars {
+            assert!(all_covered(list, bar, true), "{bar:x?} at {bits} bits");
+        }
+        assert_eq!(list.iter().map(|d| d.end()).max(), Some(top));
+    }
+}
+
 #[test]
 fn hyperv_untyped_fit_at_every_width() {
     let counts = sweep("hyperv", Boot::HyperV);

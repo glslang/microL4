@@ -16,6 +16,10 @@
 //!   second message signals again with no `Ack` between, since the kernel
 //!   never masks an MSI; after the handler's deletion a third lands on a
 //!   free entry and signals nothing.
+//! - `test=ecam` (`tests/qemu/ecam.scenario`): BootInfo's ECAM range as
+//!   the MCFG gives it, all device untyped, and every memory BAR the
+//!   firmware assigned on bus 0, a 64-bit one above 4 GiB among them,
+//!   inside device untyped.
 //! - `test=frame_address` (`tests/qemu/frame_address.scenario`):
 //!   `Frame_GetAddress` on the root task's own frames (mapped), a 4 KiB
 //!   device frame and a 2 MiB RAM frame retyped from untyped (unmapped),
@@ -40,7 +44,7 @@ use l4core::tcb::Tcbs;
 use l4core::vspace::label as frame;
 
 use super::{ExitCode, FACTS, Objects, StaticCell, apic, cpu, exit, hpet, idle, set_resume_hook};
-use crate::boot::RootSpace;
+use crate::boot::{BootState, RootSpace};
 
 fn fail(test: &str, why: core::fmt::Arguments<'_>) -> ! {
     kprintln!("TEST FAIL: {test}: {why}");
@@ -414,6 +418,181 @@ fn msi_step() -> ! {
 }
 
 static STALE_BEFORE: AtomicU8 = AtomicU8::new(0);
+
+// ---------------------------------------------------------------------------
+// test=ecam
+// ---------------------------------------------------------------------------
+
+/// One function's configuration space, through the direct map, which maps
+/// ECAM uncached (no 2 MiB page of it holds RAM).
+struct Config(u64);
+
+impl Config {
+    fn read(&self, offset: u64) -> u32 {
+        // SAFETY: `self.0` is a function's 4 KiB of ECAM, inside the MCFG's
+        // range and below the direct map's end (checked by `test_ecam`),
+        // mapped uncached there; `offset` is a 32-bit register below 4 KiB.
+        // Reading configuration space has no side effects.
+        unsafe { core::ptr::read_volatile((super::phys_to_virt(self.0) + offset) as *const u32) }
+    }
+
+    fn write(&self, offset: u64, value: u32) {
+        // SAFETY: as in `read`. Only `bar_size` writes, as firmware sizes
+        // a BAR: the command register with decode off, the BAR with all
+        // ones, then both back as they were.
+        unsafe {
+            core::ptr::write_volatile((super::phys_to_virt(self.0) + offset) as *mut u32, value)
+        }
+    }
+
+    /// Memory BAR `i`'s base and size, and whether it is 64-bit; `None`
+    /// for an I/O BAR, a BAR the firmware left at 0, or a size that does
+    /// not read back. Sizes it with decode off, as firmware does.
+    fn bar(&self, i: u64) -> Option<(u64, u64, bool)> {
+        let at = 0x10 + 4 * i;
+        let low = self.read(at);
+        if low & 1 != 0 {
+            return None;
+        }
+        let wide = low >> 1 & 3 == 2;
+        let high = if wide { self.read(at + 4) } else { 0 };
+        let base = u64::from(high) << 32 | u64::from(low & !0xF);
+        if base == 0 {
+            return None;
+        }
+        let command = self.read(4);
+        self.write(4, command & !0x3);
+        self.write(at, u32::MAX);
+        let mask_low = self.read(at);
+        self.write(at, low);
+        let mask_high = if wide {
+            self.write(at + 4, u32::MAX);
+            let m = self.read(at + 4);
+            self.write(at + 4, high);
+            m
+        } else {
+            u32::MAX
+        };
+        self.write(4, command);
+        let mask = u64::from(mask_high) << 32 | u64::from(mask_low & !0xF);
+        let size = (!mask).wrapping_add(1);
+        (size != 0 && size.is_power_of_two()).then_some((base, size, wide))
+    }
+}
+
+/// `test=ecam` (`tests/qemu/ecam.scenario`, with a `virtio-net-pci`): the
+/// MCFG's one range in BootInfo's `InterruptInfo.ecam`, as the design
+/// gives it for q35; all of it in device untyped; then bus 0's functions,
+/// read through the direct map, each memory BAR the firmware assigned,
+/// sized, inside device untyped, a 64-bit one above 4 GiB among them
+/// (`docs/design.md`, "What user space gets, and kernel devices").
+pub fn test_ecam(boot: &BootState, bi: &BootInfo) -> ! {
+    let facts = FACTS.get().expect("boot facts before the self-tests");
+    let fail = |why: core::fmt::Arguments<'_>| -> ! { fail("ecam", why) };
+    let covered = |start: u64, end: u64| {
+        let mut at = start & !0xFFF;
+        while at < end {
+            match bi
+                .untyped()
+                .iter()
+                .find(|d| d.device() && d.paddr <= at && at < d.end())
+            {
+                Some(d) => at = d.end(),
+                None => return false,
+            }
+        }
+        true
+    };
+    let info = &bi.interrupts;
+    let ecam = info.ecam[0];
+    let from_acpi = facts.platform.ecam.get(0).copied();
+    if info.ecam_count != 1
+        || from_acpi.map(|e| (e.base, e.segment, e.start_bus, e.end_bus))
+            != Some((ecam.base, ecam.segment, ecam.start_bus, ecam.end_bus))
+    {
+        fail(format_args!(
+            "InterruptInfo.ecam: {} entries, the first {ecam:?}; the MCFG gave {from_acpi:?}",
+            info.ecam_count
+        ))
+    }
+    let (start, end) = (
+        ecam.base + (u64::from(ecam.start_bus) << 20),
+        ecam.base + ((u64::from(ecam.end_bus) + 1) << 20),
+    );
+    if !covered(start, end) {
+        fail(format_args!(
+            "ECAM {start:#x}-{end:#x} is not all device untyped"
+        ))
+    }
+    kprintln!(
+        "ecam: ok   InterruptInfo.ecam: base {:#x}, segment {}, buses {}-{}; {start:#x}-{end:#x} all device untyped",
+        ecam.base,
+        ecam.segment,
+        ecam.start_bus,
+        ecam.end_bus
+    );
+    // Bus 0's 1 MiB, which the test reads, in the direct map.
+    if ecam.start_bus != 0 || ecam.base + (1 << 20) > boot.handoff.direct_map_end() {
+        fail(format_args!("bus 0's ECAM is not in the direct map"))
+    }
+    let (mut functions, mut bars, mut high) = (0, 0, 0);
+    for dev in 0..32u64 {
+        for func in 0..8u64 {
+            let cfg = Config(ecam.base + (dev << 15 | func << 12));
+            let id = cfg.read(0);
+            if id & 0xFFFF == 0xFFFF {
+                if func == 0 {
+                    break;
+                }
+                continue;
+            }
+            functions += 1;
+            let header = cfg.read(0xC) >> 16 & 0xFF;
+            kprintln!(
+                "ecam: 00:{dev:02x}.{func} {:04x}:{:04x} class {:06x}",
+                id & 0xFFFF,
+                id >> 16,
+                cfg.read(8) >> 8
+            );
+            if header & 0x7F == 0 {
+                let mut i = 0;
+                while i < 6 {
+                    let Some((base, size, wide)) = cfg.bar(i) else {
+                        i += 1;
+                        continue;
+                    };
+                    if !covered(base, base + size) {
+                        fail(format_args!(
+                            "00:{dev:02x}.{func} BAR{i} {base:#x}+{size:#x} is not all device untyped"
+                        ))
+                    }
+                    kprintln!(
+                        "ecam: ok   00:{dev:02x}.{func} BAR{i} {base:#x}, {size:#x} bytes, {}-bit: device untyped",
+                        if wide { 64 } else { 32 }
+                    );
+                    bars += 1;
+                    if base >= 1 << 32 {
+                        high += 1;
+                    }
+                    i += if wide { 2 } else { 1 };
+                }
+            }
+            if func == 0 && header & 0x80 == 0 {
+                break;
+            }
+        }
+    }
+    if high == 0 {
+        fail(format_args!(
+            "{functions} functions, {bars} memory BARs, none above 4 GiB"
+        ))
+    }
+    kprintln!(
+        "ecam: ok   {functions} functions on bus 0; {bars} memory BARs, {high} above 4 GiB, all in device untyped"
+    );
+    kprintln!("TEST PASS");
+    exit(ExitCode::Success)
+}
 
 // ---------------------------------------------------------------------------
 // test=frame_address

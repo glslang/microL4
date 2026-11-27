@@ -416,6 +416,10 @@ Errors, in the order they are checked:
 The call may be preempted while the untyped is cleared; it then restarts
 from the thread's saved registers with progress kept.
 
+An Untyped retyped from device untyped is device memory too, at every
+depth: it retypes only into Untyped and Frames, is never cleared, and its
+frames are device frames, which map only `Uncached` or `WriteCombining`.
+
 ### CNode invocations
 
 | Label | Name |

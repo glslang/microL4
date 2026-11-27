@@ -626,6 +626,18 @@ fn retype_places_consecutive_objects_where_the_destination_names() {
     // starts with its watermark at 0.
     w.make(S_DEV, ObjectType::Untyped, 10, SELF, 40, 2);
     assert_eq!(w.cap(rs(41)), Cap::untyped(DEV + 1024, 10, true, 0));
+    // A child of a device untyped is device memory at every depth
+    // (`docs/abi.md`, "Untyped_Retype"): it makes only untyped and
+    // frames, and its untyped are device untyped again (M9's carving).
+    w.make(41, ObjectType::Untyped, 9, SELF, 43, 2);
+    assert_eq!(w.cap(rs(44)), Cap::untyped(DEV + 1536, 9, true, 0));
+    for ty in [ObjectType::Endpoint, ObjectType::Notification] {
+        assert_eq!(
+            w.call(rs(44), RETYPE, &rt(ty, 0, SELF, 45, 1), &[rs(S_ROOT)]),
+            Err(InvokeError::Error(SyscallError::InvalidArgument(0))),
+            "{ty:?} from a device untyped's child"
+        );
+    }
     w.ok(rs(S_ROOT), REVOKE, &at(r(S_DEV)), &[]);
     w.make(S_DEV, ObjectType::Frame4K, 0, SELF, 42, 1);
     let f = w.cap(rs(42));
