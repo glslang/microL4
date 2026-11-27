@@ -1,0 +1,79 @@
+# The M9 Hyper-V check's burst-1 run (tools/hyperv/README.md, "At the M9
+# check"; docs/design.md, "The M9 Hyper-V check"): m8-release.scenario
+# with uart.burst=1 release.flood=32 on the command line. uart writes one
+# byte per THRE seen, though Hyper-V's 16550 has working FIFOs, and root
+# prints 32 numbered lines right after its summary: 2,400 bytes, more than
+# uart's 2,048-byte queue, so uart holds console's writes and keeps the
+# FIFO fed, as root's summary did when both M8 runs lost bytes with burst
+# 15. The first flood line is expected, the other 31 with next:, each
+# whole, and release's line comes right after the last, so a lost byte
+# there fails the run; the script then goes on from the next expect:, so
+# the log still reaches uart's line and TEST PASS. Lines whole with burst
+# 1 but cut with 15 (m9-release-burst15.scenario) mean Hyper-V's FIFO
+# takes fewer bytes after it reports THRE than uart writes; cut either way
+# points at the named pipe, which the raw reader (-Raw) tells from a
+# reader that fell behind. The scenario cannot see a cut line it does not
+# expect, so the session reads each of root's lines in the log. Root's
+# line "root: uart.burst=1: uart's burst capped at 1" comes right after its
+# cmdline line, but is not expected, so that bytes lost there leave the
+# run going. The release kernel prints nothing; root issues no exit port,
+# since this is not QEMU, and halts after TEST PASS; the script turns the
+# VM off. The typed line is 14 bytes, whose last 6 only the character
+# timeout delivers.
+cmdline: test=release uart.burst=1 release.flood=32
+kernel: release
+exit: success
+expect: loader: microL4 loader
+expect: entering kernel
+next: root: microL4 root task
+expect: root: cmdline "test=release uart.burst=1 release.flood=32"
+expect: root: image frames: slots
+expect: root: empty: slots
+expect: release: flood 01/32 123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0
+next: release: flood 02/32 23456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP01
+next: release: flood 03/32 3456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP012
+next: release: flood 04/32 456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123
+next: release: flood 05/32 56789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP01234
+next: release: flood 06/32 6789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP012345
+next: release: flood 07/32 789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456
+next: release: flood 08/32 89abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP01234567
+next: release: flood 09/32 9abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP012345678
+next: release: flood 10/32 abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789
+next: release: flood 11/32 bcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789a
+next: release: flood 12/32 cdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789ab
+next: release: flood 13/32 defghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abc
+next: release: flood 14/32 efghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcd
+next: release: flood 15/32 fghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcde
+next: release: flood 16/32 ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdef
+next: release: flood 17/32 hijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefg
+next: release: flood 18/32 ijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefgh
+next: release: flood 19/32 jklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghi
+next: release: flood 20/32 klmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghij
+next: release: flood 21/32 lmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijk
+next: release: flood 22/32 mnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijkl
+next: release: flood 23/32 nopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklm
+next: release: flood 24/32 opqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmn
+next: release: flood 25/32 pqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmno
+next: release: flood 26/32 qrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnop
+next: release: flood 27/32 rstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopq
+next: release: flood 28/32 stuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqr
+next: release: flood 29/32 tuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrs
+next: release: flood 30/32 uvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrst
+next: release: flood 31/32 vwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrstu
+next: release: flood 32/32 wxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrstuv
+next: release: watch (priority 255), uart (priority 200) with the COM1 IOPort and IRQ 4, console (priority 150); exit port none: not QEMU
+expect: release: a probe thread's DebugPutChar, DebugHalt, DebugDumpScheduler and reserved numbers 19 and 31 each raised UnknownSyscall with the number in MR18
+expect: release: type a line
+send: release input\r
+expect: release: read "release input"
+expect: release: uart:
+expect: , 14 bytes received,
+expect: , 0 overruns, 0 line errors,
+expect: , burst 1, # the cap: not 15
+expect: TEST PASS
+forbid: microL4 kernel
+forbid: bootinfo:
+forbid: DEBUG HALT
+forbid: KERNEL PANIC
+forbid: , 0 THRE bursts
+forbid: ignored: not a number

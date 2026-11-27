@@ -1622,6 +1622,130 @@ udp_echo: 1000
         assert!(all.iter().any(|s| s.name == "m8-release"));
     }
 
+    /// The lines root's `release.flood=<n>` prints (`root::flood`), from
+    /// the design rather than root's code: `release: flood <i>/<n> `, `i`
+    /// zero-padded to `n`'s width, then `0`-`9`, `a`-`z`, `A`-`P` rotated
+    /// left by `i`.
+    fn flood(n: usize) -> Vec<String> {
+        let alphabet: Vec<char> = ('0'..='9').chain('a'..='z').chain('A'..='P').collect();
+        assert_eq!(alphabet.len(), 52);
+        let width = n.to_string().len();
+        (1..=n)
+            .map(|i| {
+                let rotated: String = (0..52).map(|j| alphabet[(i + j) % 52]).collect();
+                format!("release: flood {i:0width$}/{n} {rotated}")
+            })
+            .collect()
+    }
+
+    /// The M9 COM1 runs, `release_burst1` and `release_burst15` on QEMU and
+    /// `m9-release-burst1` and `-burst15` on Hyper-V, which boot the same
+    /// command lines, are `release`'s and `m8-release`'s steps with the cap
+    /// and the flood: the command line and its `root: cmdline` line; the 32
+    /// flood lines after `root: empty: slots`, the first an `expect:` and
+    /// the rest `next:`; release's own line `next:` after them; the burst
+    /// in uart's line; and root's line for an ignored word forbidden. On
+    /// QEMU root's line for the cap is `next:` after its command line; on
+    /// Hyper-V it is not expected, so a byte lost there leaves the run
+    /// going.
+    #[test]
+    fn the_com1_runs_are_release_with_the_cap_and_the_flood() {
+        let load = |dir: &str, name: &str| {
+            let path = crate::root().join(dir).join(format!("{name}.scenario"));
+            parse(name, &fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let lines = flood(32);
+        assert_eq!(
+            lines[0],
+            "release: flood 01/32 123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0"
+        );
+        let bytes: usize = lines.iter().map(|l| l.len() + 2).sum();
+        assert_eq!(bytes, 2400, "with console's CR LF");
+        let flood: Vec<Step> = lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| if i == 0 { expect(&l) } else { next(&l) })
+            .collect();
+        for (dir, base, prefix, base_burst) in [
+            ("tests/qemu", "release", "release_burst", ", burst 15"),
+            (
+                "tools/hyperv",
+                "m8-release",
+                "m9-release-burst",
+                ", burst 1",
+            ),
+        ] {
+            let qemu = dir == "tests/qemu";
+            let base = load(dir, base);
+            for cap in [1, 15] {
+                let name = format!("{prefix}{cap}");
+                let sc = load(dir, &name);
+                let cmdline = format!("test=release uart.burst={cap} release.flood=32");
+                assert_eq!(
+                    (sc.cmdline.as_str(), sc.kernel, sc.exit, sc.timeout, sc.nic),
+                    (
+                        cmdline.as_str(),
+                        Kernel::Release,
+                        base.exit,
+                        base.timeout,
+                        None
+                    ),
+                    "{name}"
+                );
+                assert!(sc.qemu_args.is_empty() && base.qemu_args.is_empty());
+                let mut want = Vec::new();
+                let mut changes = 0;
+                for s in &base.steps {
+                    let Step::Expect(t) = s else {
+                        want.push(s.clone());
+                        continue;
+                    };
+                    changes += 1;
+                    match t.as_str() {
+                        "root: cmdline \"test=release\"" => {
+                            want.push(expect(&format!("root: cmdline {cmdline:?}")));
+                            if qemu {
+                                want.push(next(&format!(
+                                    "root: uart.burst={cap}: uart's burst capped at {cap}"
+                                )));
+                            }
+                        }
+                        "root: empty: slots" => {
+                            want.push(s.clone());
+                            want.extend(flood.iter().cloned());
+                        }
+                        t if t.starts_with("release: watch (priority 255), ") => want.push(next(t)),
+                        t if t == base_burst => want.push(expect(&match qemu {
+                            true => format!(", burst {cap}, 0 stale THREs"),
+                            false => format!(", burst {cap},"),
+                        })),
+                        _ => {
+                            changes -= 1;
+                            want.push(s.clone());
+                        }
+                    }
+                }
+                assert_eq!(changes, 4, "{name}: each change found its step");
+                assert_eq!(sc.steps, want, "{name}");
+                let mut forbid = base.forbid.clone();
+                forbid.push("ignored: not a number".into());
+                assert_eq!(sc.forbid, forbid, "{name}");
+            }
+        }
+        // CI builds the Hyper-V images with the scenarios' command lines
+        // and puts the scenarios beside them.
+        let ci = fs::read_to_string(crate::root().join(".github/workflows/ci.yml")).unwrap();
+        for text in [
+            "for burst in 1 15; do",
+            "--kernel release --cmdline \"test=release uart.burst=$burst release.flood=32\"",
+            "target/xtask/m9-com1/release-burst$burst/disk.vhdx",
+            "cp tools/hyperv/m9-release-burst1.scenario tools/hyperv/m9-release-burst15.scenario target/xtask/m9-com1/",
+            "name: microl4-vhdx-m9-com1",
+        ] {
+            assert!(ci.contains(text), "ci.yml has no {text:?}");
+        }
+    }
+
     #[test]
     fn screendump_names_are_unique_across_scenarios() {
         let a = parse("a", "exit: success\nexpect: x\nscreendump: one\n").unwrap();
