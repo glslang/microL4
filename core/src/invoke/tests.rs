@@ -514,12 +514,13 @@ fn a_label_outside_the_type_or_unassigned_is_illegal_before_the_length() {
         check(s, &cnode_labels);
         check(s, &unassigned);
     }
-    // IRQControl decodes GetISA and GetIOAPIC from M7, and nothing else:
-    // GetMSI and GetSint wait for M9, and IRQHandler's labels are another
-    // type's (`crate::irq`'s tests cover the rest of the range).
+    // IRQControl decodes GetISA and GetIOAPIC from M7, GetMSI and GetSint
+    // from M9 (GetSint is IllegalOperation without a SynIC, as here), and
+    // nothing else: IRQHandler's labels are another type's (`crate::irq`'s
+    // tests cover the rest of the range).
     check(rs(27), &[RETYPE]);
     check(rs(27), &cnode_labels);
-    let others = [0x62, 0x63, 0x64, 0x67, 0x68, 0x69, 0x6A, 0x70];
+    let others = [0x63, 0x64, 0x67, 0x68, 0x69, 0x6A, 0x70];
     check(rs(27), &others);
     check(
         rs(27),
@@ -1406,11 +1407,13 @@ fn cnode_errors_one_per_row() {
             &root,
             ILLEGAL,
         ),
-        // A Hypervisor capability takes only word 0 until M9's narrowing.
+        // A Hypervisor capability's Mint word has bits 26-63 clear
+        // (`crate::hyperv`'s tests cover the narrowing); Mutate and Rotate
+        // take only word 0.
         cnode_case(
-            "mint a Hypervisor capability, word 1",
+            "mint a Hypervisor capability, word 1 << 26",
             MINT,
-            mint(r(40), r(29), 0xF, 1),
+            mint(r(40), r(29), 0xF, 1 << 26),
             &root,
             ILLEGAL,
         ),

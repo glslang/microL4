@@ -465,6 +465,37 @@ impl crate::irq::Interrupts for Space {
     fn irq_action(&mut self, _: crate::irq::Action) -> bool {
         unreachable!("no interrupt in a paging test")
     }
+
+    fn apic_id(&self) -> u8 {
+        unreachable!("no interrupt in a paging test")
+    }
+
+    fn synic(&self) -> bool {
+        unreachable!("no interrupt in a paging test")
+    }
+
+    fn sint_action(&mut self, _: crate::irq::SintAction) {
+        unreachable!("no interrupt in a paging test")
+    }
+}
+
+/// No paging test holds a Hypervisor capability.
+impl crate::hyperv::Hypercalls for Space {
+    fn post_message(&mut self, _: crate::hyperv::PostMessage) -> u16 {
+        unreachable!("no hypercall in a paging test")
+    }
+
+    fn signal_event(&mut self, _: crate::hyperv::SignalEvent) -> u16 {
+        unreachable!("no hypercall in a paging test")
+    }
+
+    fn eom(&mut self) {
+        unreachable!("no hypercall in a paging test")
+    }
+
+    fn vp_index(&mut self) -> u64 {
+        unreachable!("no hypercall in a paging test")
+    }
 }
 
 impl crate::ioport::IoPorts for Space {

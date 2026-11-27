@@ -10,9 +10,12 @@ use alloc::vec::Vec;
 use crate::acpi::IsaRoute;
 use crate::apic;
 use crate::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS, SLOT_SIZE};
+use crate::hyperv::{BLOCK_WORDS, Hypercalls, PostMessage, SignalEvent};
 use crate::ioport::{self, IoPorts, PortBitmap, Width};
 use crate::ipc::IpcEnv;
-use crate::irq::{self, Action, IRQS, Interrupts, IoApicDesc, IrqTable, Routing, RteWrite};
+use crate::irq::{
+    self, Action, IRQS, Interrupts, IoApicDesc, IrqTable, Routing, RteWrite, SintAction,
+};
 use crate::kernel::{Kernel, Preempted};
 use crate::sched::{Scheduler, Scheduling};
 use crate::slot::{Slot, SlotAddr, SlotMemory};
@@ -746,9 +749,71 @@ pub struct PortRecord {
     pub written: Option<u32>,
 }
 
+/// A hypercall, EOM write or VP index read the kernel made, as
+/// [`FakeDevices`] records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Hypercall {
+    /// `HvCallPostMessage`: the input value and the whole input block.
+    Post {
+        input: u64,
+        block: [u64; BLOCK_WORDS],
+    },
+    /// `HvCallSignalEvent`: the input value and the fast input.
+    Signal {
+        input: u64,
+        rdx: u64,
+    },
+    Eom,
+    VpIndex,
+}
+
+/// A model of the boot CPU's SynIC (M9), as far as the kernel reaches it:
+/// the 16 SINT registers, each write to them, and the hypervisor's side of
+/// a SINT: a message or event edge reaches the local APIC as the SINT's
+/// vector only while the SINT is unmasked, and is lost otherwise (TLFS).
+/// With `enabled` false there is no SynIC, as under QEMU's TCG.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FakeSynic {
+    pub enabled: bool,
+    /// SINT0 to SINT15, as the kernel left them at boot: masked, the
+    /// firmware's reserved bits kept.
+    pub sints: [u64; 16],
+    /// Every SINT write: the SINT and the value.
+    pub writes: Vec<(u8, u64)>,
+    /// Edges raised on a masked SINT, and so lost.
+    pub lost_edges: u64,
+}
+
+impl FakeSynic {
+    /// Reserved bits the model's SINTs start with, so tests see them kept.
+    pub const RESERVED: u64 = 0xA5A5_0000_0000_5A00;
+
+    /// A SynIC with every SINT masked, or none.
+    pub fn new(enabled: bool) -> FakeSynic {
+        FakeSynic {
+            enabled,
+            sints: [Self::RESERVED | crate::hyperv::SINT_MASKED; 16],
+            writes: Vec::new(),
+            lost_edges: 0,
+        }
+    }
+
+    /// The hypervisor raises an edge on SINT `n`: its vector, if unmasked.
+    pub fn raise(&mut self, n: u8) -> Option<u8> {
+        let v = self.sints[usize::from(n)];
+        if v & crate::hyperv::SINT_MASKED != 0 {
+            self.lost_edges += 1;
+            None
+        } else {
+            Some((v & crate::hyperv::SINT_VECTOR) as u8)
+        }
+    }
+}
+
 /// The interrupt and port state of a test kernel, and models of its
 /// devices: the IRQ table, the routes, the IRQ node, the I/O APICs
-/// ([`FakeIoApic`]), the local APIC's IRR, the port bitmap and the ports.
+/// ([`FakeIoApic`]), the local APIC's IRR, the port bitmap and the ports;
+/// from M9 the SynIC ([`FakeSynic`]) and the hypercalls made.
 #[derive(Clone, Debug)]
 pub struct FakeDevices {
     pub table: IrqTable,
@@ -769,6 +834,13 @@ pub struct FakeDevices {
     /// What a read of a port returns: the last value written to it, else
     /// [`FakeDevices::FLOATING`].
     pub port_values: BTreeMap<u16, u32>,
+    pub synic: FakeSynic,
+    /// Every hypercall, EOM and VP index read, in order.
+    pub hypercalls: Vec<Hypercall>,
+    /// What the next hypercalls return.
+    pub hv_status: u16,
+    /// What `VpIndex` reads.
+    pub vp_index: u64,
 }
 
 impl FakeDevices {
@@ -776,7 +848,7 @@ impl FakeDevices {
     /// see the zero-extension.
     pub const FLOATING: u32 = 0xDEAD_BEEF;
 
-    /// No I/O APIC, no route, nothing issued.
+    /// No I/O APIC, no route, nothing issued, no SynIC.
     pub fn new() -> FakeDevices {
         FakeDevices {
             table: IrqTable::new(),
@@ -789,7 +861,33 @@ impl FakeDevices {
             ports: PortBitmap::new(),
             port_log: Vec::new(),
             port_values: BTreeMap::new(),
+            synic: FakeSynic::new(false),
+            hypercalls: Vec::new(),
+            hv_status: 0,
+            vp_index: 0,
         }
+    }
+
+    /// Performs a SINT action as the kernel's `hyperv.rs` does: reads the
+    /// SINT, writes [`SintAction::value`].
+    pub fn sint_action(&mut self, action: SintAction) {
+        assert!(self.synic.enabled, "a SINT touched without a SynIC");
+        let n = action.sint();
+        let value = action.value(self.synic.sints[usize::from(n)]);
+        self.synic.sints[usize::from(n)] = value;
+        self.synic.writes.push((n, value));
+    }
+
+    /// The hypervisor raises an edge on SINT `n`.
+    pub fn raise_sint(&mut self, n: u8) {
+        let sent = self.synic.raise(n);
+        self.lapic_irr.extend(sent);
+    }
+
+    /// A device writes MSI `data` to the local APIC: its vector, bits 7:0,
+    /// becomes pending (an edge; a second one merges into the IRR bit).
+    pub fn msi(&mut self, data: u64) {
+        self.lapic_irr.insert(data as u8);
     }
 
     /// QEMU's q35 with one I/O APIC of `version` and 24 pins, GSI 0 to 23,
@@ -940,6 +1038,46 @@ impl Interrupts for TestKernel {
     fn irq_action(&mut self, action: Action) -> bool {
         self.dev.perform(action)
     }
+
+    fn apic_id(&self) -> u8 {
+        self.dev.apic_id
+    }
+
+    fn synic(&self) -> bool {
+        self.dev.synic.enabled
+    }
+
+    fn sint_action(&mut self, action: SintAction) {
+        self.dev.sint_action(action)
+    }
+}
+
+/// The hypercalls, recorded, each answering [`FakeDevices::hv_status`].
+impl Hypercalls for TestKernel {
+    fn post_message(&mut self, call: PostMessage) -> u16 {
+        self.dev.hypercalls.push(Hypercall::Post {
+            input: call.input_value(),
+            block: *call.block(),
+        });
+        self.dev.hv_status
+    }
+
+    fn signal_event(&mut self, call: SignalEvent) -> u16 {
+        self.dev.hypercalls.push(Hypercall::Signal {
+            input: call.input_value(),
+            rdx: call.input(),
+        });
+        self.dev.hv_status
+    }
+
+    fn eom(&mut self) {
+        self.dev.hypercalls.push(Hypercall::Eom);
+    }
+
+    fn vp_index(&mut self) -> u64 {
+        self.dev.hypercalls.push(Hypercall::VpIndex);
+        self.dev.vp_index
+    }
 }
 
 impl IoPorts for TestKernel {
@@ -979,6 +1117,36 @@ impl Interrupts for IpcTestKernel {
 
     fn irq_action(&mut self, action: Action) -> bool {
         self.0.irq_action(action)
+    }
+
+    fn apic_id(&self) -> u8 {
+        self.0.apic_id()
+    }
+
+    fn synic(&self) -> bool {
+        self.0.synic()
+    }
+
+    fn sint_action(&mut self, action: SintAction) {
+        self.0.sint_action(action)
+    }
+}
+
+impl Hypercalls for IpcTestKernel {
+    fn post_message(&mut self, call: PostMessage) -> u16 {
+        self.0.post_message(call)
+    }
+
+    fn signal_event(&mut self, call: SignalEvent) -> u16 {
+        self.0.signal_event(call)
+    }
+
+    fn eom(&mut self) {
+        self.0.eom()
+    }
+
+    fn vp_index(&mut self) -> u64 {
+        self.0.vp_index()
     }
 }
 

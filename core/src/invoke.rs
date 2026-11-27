@@ -2,9 +2,10 @@
 //! CNode methods (`docs/abi.md`, "Untyped invocations", "CNode invocations",
 //! "Error detail words" and "Invocation label index"; `docs/design.md`,
 //! "System-call dispatch"), and the routing of every other capability type
-//! to its own decoder: TCBs, paging objects, and from M7 IRQControl,
+//! to its own decoder: TCBs, paging objects, from M7 IRQControl,
 //! IRQHandler, IOPortControl and IOPort ([`crate::irq`],
-//! [`crate::ioport`]).
+//! [`crate::ioport`]), and from M9 the Hypervisor capability
+//! ([`crate::hyperv::invocation`]).
 //!
 //! The caller has looked up the invoked capability's slot and each extra
 //! capability, as a thread's `syscall` does. [`invoke`] checks the label and
@@ -51,6 +52,7 @@ use crate::cap::{Cap, CapType, Rights};
 use crate::cnode;
 use crate::cspace;
 use crate::error::{LookupFailure, SyscallError};
+use crate::hyperv::{self, Hypercalls};
 use crate::ioport::{self, IoPorts};
 use crate::ipc::{self, EndpointCap};
 use crate::irq::{self, Interrupts};
@@ -175,10 +177,11 @@ impl From<RetypeError> for InvokeError {
 /// ([`crate::tcb::invoke`]), a Frame or a PDPT, page directory or page
 /// table its map and unmap methods ([`vspace::invoke`]), IRQControl and
 /// IRQHandler theirs ([`irq::invoke_control`], [`irq::invoke_handler`]),
-/// and IOPortControl and IOPort theirs ([`ioport::invoke_control`],
-/// [`ioport::invoke_port`]); any other label, and every other capability
-/// type until its milestone, is `IllegalOperation`.
-pub fn invoke<K: Kernel + PagingStore + Threads + Interrupts + IoPorts + ?Sized>(
+/// IOPortControl and IOPort theirs ([`ioport::invoke_control`],
+/// [`ioport::invoke_port`]), and from M9 a Hypervisor capability its four
+/// ([`hyperv::invocation::invoke`]); any other label, and every other
+/// capability type, is `IllegalOperation`.
+pub fn invoke<K: Kernel + PagingStore + Threads + Interrupts + IoPorts + Hypercalls + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     msg: &Message<'_>,
@@ -196,6 +199,7 @@ pub fn invoke<K: Kernel + PagingStore + Threads + Interrupts + IoPorts + ?Sized>
         CapType::IrqHandler => irq::invoke_handler(k, slot, msg),
         CapType::IoPortControl => ioport::invoke_control(k, slot, msg),
         CapType::IoPort => ioport::invoke_port(k, slot, msg),
+        CapType::Hypervisor => hyperv::invocation::invoke(k, slot, msg),
         _ => Err(SyscallError::IllegalOperation.into()),
     }
 }

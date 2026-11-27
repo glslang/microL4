@@ -38,6 +38,7 @@ use crate::abi::Syscall;
 use crate::cap::{Cap, TCB_SLOT_CALLER, TCB_SLOT_CSPACE};
 use crate::cspace;
 use crate::error::{LookupFailure, SyscallError};
+use crate::hyperv::Hypercalls;
 use crate::invoke::{self, ExtraCap, InvokeError, Message};
 use crate::ioport::IoPorts;
 use crate::ipc::{
@@ -85,7 +86,7 @@ pub enum DebugCall {
 /// (`fault_ip` on the `syscall`, `next_ip` after it). `debug` says whether
 /// the kernel was built with the `debug` feature. The current thread must
 /// be `Running`.
-pub fn handle_syscall<E: IpcEnv + PagingStore + Interrupts + IoPorts + ?Sized>(
+pub fn handle_syscall<E: IpcEnv + PagingStore + Interrupts + IoPorts + Hypercalls + ?Sized>(
     e: &mut E,
     debug: bool,
 ) -> Outcome {
@@ -196,7 +197,7 @@ fn cap_fault<E: IpcEnv + ?Sized>(
 
 /// `Call` (`call`), `Send` (`blocking`) or `NBSend` by `t` (seL4
 /// `handleInvocation`).
-fn invocation<E: IpcEnv + PagingStore + Interrupts + IoPorts + ?Sized>(
+fn invocation<E: IpcEnv + PagingStore + Interrupts + IoPorts + Hypercalls + ?Sized>(
     e: &mut E,
     t: TcbRef,
     call: bool,

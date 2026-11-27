@@ -44,9 +44,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use l4core::bootinfo::{BOOTINFO_SIZE, BootInfo};
 use l4core::cap::{Cap, CapType, ENDPOINT_BITS, NOTIFICATION_BITS, SLOT_SIZE, TCB_BITS};
 use l4core::handoff::KERNEL_VIRT_BASE;
+use l4core::hyperv::{Hypercalls, PostMessage, SignalEvent};
 use l4core::ioport::{self, IoPorts, PortAccess, PortBitmap, Width};
 use l4core::ipc::{self, IpcEnv};
-use l4core::irq::{self, Action, IRQS, Interrupts, IrqTable, Routing};
+use l4core::irq::{self, Action, IRQS, Interrupts, IrqTable, Routing, SintAction};
 use l4core::kernel::{Kernel, Preempted};
 use l4core::objmem::ObjectMemory;
 use l4core::sched::{Scheduler, Scheduling};
@@ -54,7 +55,9 @@ use l4core::slot::{Slot, SlotAddr, SlotMemory};
 use l4core::syscall;
 use l4core::tcb::{self, EpRef, NtfnRef, REGS_OFFSET, TcbRef, Tcbs, Threads, XSAVE_OFFSET};
 
-use super::{BootFacts, StaticCell, apic, entry, fpu, io, ioapic, paging, phys_to_virt, thread};
+use super::{
+    BootFacts, StaticCell, apic, entry, fpu, hyperv, io, ioapic, paging, phys_to_virt, thread,
+};
 use crate::boot::BootState;
 
 #[cfg(feature = "debug")]
@@ -420,9 +423,10 @@ impl Threads for Objects {
         syscall::invoked_by_call(self)
     }
 
-    /// No SynIC page is recorded before M9.
+    /// The SynIC frames boot recorded, so that `TCB_SetIPCBuffer` refuses
+    /// them; zeros without a SynIC.
     fn synic_pages(&self) -> [u64; 2] {
-        [0; 2]
+        hyperv::synic_pages()
     }
 
     fn set_current_fs_base(&mut self, value: u64) {
@@ -517,6 +521,40 @@ impl Interrupts for Objects {
 
     fn irq_action(&mut self, action: Action) -> bool {
         ioapic::perform(action)
+    }
+
+    fn apic_id(&self) -> u8 {
+        apic::id()
+    }
+
+    fn synic(&self) -> bool {
+        hyperv::synic()
+    }
+
+    fn sint_action(&mut self, action: SintAction) {
+        hyperv::sint_action(action)
+    }
+}
+
+/// The Hypervisor capability's executor, in [`super::hyperv`]: the two
+/// hypercalls, whose inputs only `l4core::hyperv` builds, EOM and the VP
+/// index. A Hypervisor capability exists only once the hypercall page has
+/// read back enabled at `.hvcall`.
+impl Hypercalls for Objects {
+    fn post_message(&mut self, call: PostMessage) -> u16 {
+        hyperv::post_message(call)
+    }
+
+    fn signal_event(&mut self, call: SignalEvent) -> u16 {
+        hyperv::signal_event(call)
+    }
+
+    fn eom(&mut self) {
+        hyperv::eom()
+    }
+
+    fn vp_index(&mut self) -> u64 {
+        hyperv::vp_index()
     }
 }
 

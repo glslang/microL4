@@ -554,6 +554,8 @@ struct Tally {
     preempted: u64,
     recreated: u64,
     loaded_flushes: u64,
+    /// `Frame_GetAddress` calls (M9).
+    addresses: u64,
 }
 
 struct Run {
@@ -625,6 +627,17 @@ impl Run {
     /// result, flush and memory must agree, and a failure changes nothing.
     fn invoke(&mut self, op: &Op, slot: SlotAddr, l: u64, mrs: &[u64], extra: &[SlotAddr]) {
         let cap = self.mem().load(slot).cap;
+        // `Frame_GetAddress` (M9): one result, whatever the frame's state,
+        // and nothing changes.
+        if cap.cap_type() == CapType::Frame && l == label::FRAME_GET_ADDRESS {
+            let before = self.mem().clone();
+            assert_eq!(self.w.call(slot, l, mrs, extra), Ok(Reply { length: 1 }));
+            assert!(*self.mem() == before && self.w.k.flushes.is_empty());
+            self.tally.addresses += 1;
+            assert!(self.w.k.events.is_empty(), "an invocation called a hook");
+            self.settle(op);
+            return;
+        }
         let extra_cap = extra.first().map(|s| self.mem().load(*s).cap);
         let want = self.model.predict(slot, cap, l, mrs, extra_cap);
         let before = self.mem().clone();
@@ -1049,6 +1062,7 @@ fn the_random_sequences_cover_every_path() {
         total.preempted += t.preempted;
         total.recreated += t.recreated;
         total.loaded_flushes += t.loaded_flushes;
+        total.addresses += t.addresses;
     }
     std::println!("{total:?}");
     let Tally {
@@ -1061,7 +1075,11 @@ fn the_random_sequences_cover_every_path() {
         preempted,
         recreated,
         loaded_flushes,
+        addresses,
     } = total;
+    // A label of another type or level, `Frame_GetAddress` among them, is
+    // picked only now and then.
+    assert!(addresses > 0, "no Frame_GetAddress: {total:?}");
     for (what, n) in [
         ("maps", maps),
         ("unmaps that flushed", unmaps_that_flushed),

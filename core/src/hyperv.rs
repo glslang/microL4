@@ -6,12 +6,25 @@
 //! accesses; the kernel touches a synthetic MSR only if [`Privileges`] says
 //! it may, so no synthetic MSR access can fault.
 //!
+//! From M9 (`docs/design.md`, "Hypercalls (M9)", "SynIC (M9)", "The
+//! Hypervisor capability (M9)"; ADR 0029): the guest OS ID, the hypercall
+//! MSR's value and the read-back decision, the SynIC registers' values,
+//! the two hypercalls' input values and `PostMessage`'s input block; and in
+//! [`invocation`], the Hypervisor capability's fields, Mint's narrowing,
+//! the permission check and the invocations, performed through the
+//! [`Hypercalls`] trait the kernel implements in `arch/x86_64/hyperv.rs`.
+//!
 //! Numbers and bits follow the TLFS (`feature-discovery.md`,
 //! `hv_partition_privilege_mask.md`, `timers.md`,
 //! `inter-partition-communication.md`, `vp-properties.md`,
-//! `hypercall-interface.md`).
+//! `hypercall-interface.md`, `HvCallPostMessage.md`,
+//! `HvCallSignalEvent.md`, `hv_status.md`).
 
 use core::fmt;
+
+pub mod invocation;
+
+pub use invocation::{Hypercalls, HypervisorCap, PostMessage, SignalEvent, hypervisor_cap};
 
 /// CPUID.1:ECX bit 31: a hypervisor is present.
 pub const HYPERVISOR_PRESENT: u32 = 1 << 31;
@@ -376,6 +389,271 @@ impl HypercallMsr {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M9: hypercalls and the SynIC
+// ---------------------------------------------------------------------------
+
+/// `HV_X64_MSR_GUEST_OS_ID`.
+pub const MSR_GUEST_OS_ID: u32 = 0x4000_0000;
+/// `HV_X64_MSR_VP_INDEX`: this processor's VP index.
+pub const MSR_VP_INDEX: u32 = 0x4000_0002;
+/// The SynIC end-of-message register: a write of 0 makes the hypervisor
+/// try to deliver the next queued message.
+pub const MSR_EOM: u32 = 0x4000_0084;
+
+/// The guest OS identity the kernel writes before the hypercall page
+/// (ADR 0029): bit 63 set, the TLFS's encoding for an open-source system;
+/// OS type 0, as Microsoft has allocated none for microL4; OS ID,
+/// version and build 0, since the kernel has no release numbers. The TLFS
+/// needs only a non-zero value before the page will enable.
+pub const GUEST_OS_ID: u64 = 0x8000_0000_0000_0000;
+
+/// The hypercall MSR's bits 11:2: RsvdP, "preserved on writes".
+pub const HYPERCALL_RSVDP: u64 = 0xFFC;
+/// SIMP's and SIEFP's bits 11:1: reserved, preserved.
+pub const OVERLAY_RSVDP: u64 = 0xFFE;
+/// A page's address bits, 63:12.
+const PAGE_BITS: u64 = !0xFFF;
+
+/// A SINT's vector, bits 7:0.
+pub const SINT_VECTOR: u64 = 0xFF;
+/// A SINT's AutoEOI bit.
+pub const SINT_AUTO_EOI: u64 = 1 << 17;
+/// A SINT's polling bit.
+pub const SINT_POLLING: u64 = 1 << 18;
+/// The lowest vector a SINT takes: a SINT write with a vector below 16
+/// is `#GP` (TLFS).
+pub const SINT_MIN_VECTOR: u8 = 16;
+
+/// The privileges the Hypervisor capability needs, each with its TLFS
+/// name, in the order the kernel checks them (`docs/design.md`,
+/// "Detection (M3)"): the SynIC registers, the hypercall MSRs, the VP
+/// index, and the two hypercalls.
+pub const M9_PRIVILEGES: [(&str, fn(&Privileges) -> bool); 5] = [
+    ("AccessSynicRegs", Privileges::synic),
+    ("AccessHypercallMsrs", Privileges::hypercall_msrs),
+    ("AccessVpIndex", Privileges::vp_index),
+    ("PostMessages", Privileges::post_messages),
+    ("SignalEvents", Privileges::signal_events),
+];
+
+/// The first M9 privilege `p` lacks, if any.
+pub fn missing_m9_privilege(p: &Privileges) -> Option<&'static str> {
+    M9_PRIVILEGES
+        .iter()
+        .find(|(_, has)| !has(p))
+        .map(|&(name, _)| name)
+}
+
+/// Why the kernel makes no Hypervisor capability, and so sets up no
+/// SynIC: initial slots 12, 13 and 14 are null and `GetSint` is
+/// `IllegalOperation` (ADR 0029). A debug kernel prints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// No TLFS interface: not Hyper-V, as under QEMU's TCG.
+    NoInterface,
+    /// The partition lacks this M9 privilege.
+    Privilege(&'static str),
+    /// The firmware locked the hypercall MSR, disabled or over a page
+    /// that is not `.hvcall`: only a reset could move it.
+    Locked { page: u64, enabled: bool },
+    /// The hypercall MSR, written with `.hvcall` and the enable bit, read
+    /// back as this: not enabled at `.hvcall`, as the TLFS says it reads
+    /// when no guest OS identity was accepted.
+    NotEnabled { read_back: u64 },
+}
+
+impl fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::NoInterface => f.write_str("no TLFS interface"),
+            Self::Privilege(name) => write!(f, "no {name} privilege"),
+            Self::Locked {
+                page,
+                enabled: true,
+            } => write!(
+                f,
+                "the firmware locked the hypercall page at {page:#x}, not .hvcall"
+            ),
+            Self::Locked { enabled: false, .. } => {
+                f.write_str("the firmware locked the hypercall MSR disabled")
+            }
+            Self::NotEnabled { read_back } => write!(
+                f,
+                "the hypercall MSR read back {read_back:#x}, not enabled at .hvcall"
+            ),
+        }
+    }
+}
+
+/// What the kernel does with the hypercall MSR, read once the overlay
+/// reset is done and the guest OS ID written, for the hypercall page at
+/// physical `page` (`.hvcall`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HypercallStep {
+    /// Write this value, then read the MSR back ([`hypercall_enabled_at`]).
+    Write(u64),
+    /// The firmware locked it enabled at `page` already: nothing to write.
+    Ready,
+    /// No hypercall page: locked elsewhere, or locked disabled.
+    Unavailable(Unavailable),
+}
+
+/// The hypercall MSR's value that enables the page at `page`, from its
+/// value `old`: the page number in bits 63:12, bits 11:2 as read (RsvdP),
+/// Locked (bit 1) clear, the enable bit set (TLFS "Establishing the
+/// Hypercall Interface"; FreeBSD's `hypercall_page_setup`).
+pub const fn hypercall_enable(old: u64, page: u64) -> u64 {
+    (page & PAGE_BITS) | (old & HYPERCALL_RSVDP) | HYPERCALL_ENABLE
+}
+
+/// The step for the hypercall MSR reading `old`, for `.hvcall` at `page`.
+pub const fn hypercall_step(old: u64, page: u64) -> HypercallStep {
+    match HypercallMsr::of(old) {
+        HypercallMsr::Locked {
+            page: p,
+            enabled: true,
+        } if p == page & PAGE_BITS => HypercallStep::Ready,
+        HypercallMsr::Locked { page, enabled } => {
+            HypercallStep::Unavailable(Unavailable::Locked { page, enabled })
+        }
+        HypercallMsr::Off | HypercallMsr::Enabled { .. } => {
+            HypercallStep::Write(hypercall_enable(old, page))
+        }
+    }
+}
+
+/// Whether the hypercall MSR, read back as `read_back`, has the page
+/// enabled at `page`. Only then may anything call `.hvcall`: a page that
+/// did not enable still holds its `int3` filler (ADR 0029).
+pub const fn hypercall_enabled_at(read_back: u64, page: u64) -> bool {
+    read_back & HYPERCALL_ENABLE != 0 && read_back & PAGE_BITS == page & PAGE_BITS
+}
+
+/// SIMP's or SIEFP's value that enables the overlay at `page`, from its
+/// value `old`: the page number, bits 11:1 as read, the enable bit.
+pub const fn overlay_enable(old: u64, page: u64) -> u64 {
+    (page & PAGE_BITS) | (old & OVERLAY_RSVDP) | ENABLE
+}
+
+/// SCONTROL's value with the SynIC enabled, every other bit as read.
+pub const fn scontrol_enable(old: u64) -> u64 {
+    old | ENABLE
+}
+
+/// SINTn's value once `GetSint` issues it, from its value `old`: `vector`,
+/// unmasked, AutoEOI off, polling off, every reserved bit as read
+/// (`docs/design.md`, "SynIC (M9)"). AutoEOI stays off because the
+/// interrupt path EOIs every device vector itself. `vector` is a device
+/// vector, `0x30` to `0xEF`, so at least [`SINT_MIN_VECTOR`].
+pub const fn sint_issued(old: u64, vector: u8) -> u64 {
+    debug_assert!(vector >= SINT_MIN_VECTOR);
+    (old & !(SINT_VECTOR | SINT_MASKED | SINT_AUTO_EOI | SINT_POLLING)) | vector as u64
+}
+
+/// SINTn's value once its last handler is deleted: the mask bit set,
+/// every other bit as read.
+pub const fn sint_deleted(old: u64) -> u64 {
+    old | SINT_MASKED
+}
+
+/// `HvCallPostMessage`'s call code.
+pub const CALL_POST_MESSAGE: u64 = 0x005C;
+/// `HvCallSignalEvent`'s call code.
+pub const CALL_SIGNAL_EVENT: u64 = 0x005D;
+/// The hypercall input value's fast bit: input in registers.
+pub const FAST: u64 = 1 << 16;
+/// `PostMessage`'s input value: memory-based, no rep count, no variable
+/// header.
+pub const POST_MESSAGE_INPUT: u64 = CALL_POST_MESSAGE;
+/// `SignalEvent`'s input value: fast, its 8 bytes in `rdx`.
+pub const SIGNAL_EVENT_INPUT: u64 = FAST | CALL_SIGNAL_EVENT;
+/// `rax` bits 0-15, the `HV_STATUS`, after a hypercall.
+pub const STATUS_MASK: u64 = 0xFFFF;
+
+/// The `HV_STATUS` values the two hypercalls can return once the kernel's
+/// checks pass (`docs/abi.md`, "Hypervisor").
+pub mod status {
+    pub const SUCCESS: u16 = 0x00;
+    pub const INVALID_PARAMETER: u16 = 0x05;
+    pub const INVALID_VP_INDEX: u16 = 0x0E;
+    pub const INVALID_PORT_ID: u16 = 0x11;
+    pub const INVALID_CONNECTION_ID: u16 = 0x12;
+    pub const INSUFFICIENT_BUFFERS: u16 = 0x13;
+    pub const INVALID_SYNIC_STATE: u16 = 0x18;
+}
+
+/// Connection IDs are below `2^24`.
+pub const CONNECTIONS: u64 = 1 << 24;
+/// The highest message type: types are 1 to `2^31 - 1`.
+pub const MAX_MESSAGE_TYPE: u64 = 0x7FFF_FFFF;
+/// The most payload bytes one message carries.
+pub const MAX_PAYLOAD: u64 = 240;
+/// Event flags are below `2^16`.
+pub const FLAGS: u64 = 1 << 16;
+/// `HV_INPUT_POST_MESSAGE`, 256 bytes, as words.
+pub const BLOCK_WORDS: usize = 32;
+/// The words before the payload: connection and reserved, then message
+/// type and payload size.
+pub const BLOCK_HEADER_WORDS: usize = 2;
+
+/// `PostMessage`'s whole input block (`HvCallPostMessage.md`): connection
+/// ID (4 bytes), reserved 0 (4), message type (4), payload size (4), then
+/// the 240 payload bytes, those past `size` zero. `payload` gives the
+/// payload as little-endian words, byte `i` in byte `i mod 8` of word
+/// `i / 8`, as the message registers carry it; bytes past `size`, and
+/// words past the 30th, are ignored. A `size` above [`MAX_PAYLOAD`] counts
+/// as 240.
+pub fn post_message_block(
+    connection: u32,
+    message_type: u32,
+    size: u32,
+    payload: &[u64],
+) -> [u64; BLOCK_WORDS] {
+    let size = u64::from(size).min(MAX_PAYLOAD);
+    let mut block = [0u64; BLOCK_WORDS];
+    block[0] = u64::from(connection);
+    block[1] = u64::from(message_type) | size << 32;
+    for (i, w) in block[BLOCK_HEADER_WORDS..].iter_mut().enumerate() {
+        let bytes = size.saturating_sub(8 * i as u64).min(8);
+        let mask = if bytes == 8 {
+            u64::MAX
+        } else {
+            (1u64 << (8 * bytes)) - 1
+        };
+        *w = payload.get(i).copied().unwrap_or(0) & mask;
+    }
+    block
+}
+
+/// A block's fields, as a host reads them: connection ID, the reserved
+/// word, message type, payload size and the 240 payload bytes. For the
+/// mock host's tests.
+pub fn parse_post_message_block(block: &[u64; BLOCK_WORDS]) -> (u32, u32, u32, u32, [u8; 240]) {
+    let mut payload = [0u8; 240];
+    for (chunk, w) in payload
+        .chunks_exact_mut(8)
+        .zip(&block[BLOCK_HEADER_WORDS..])
+    {
+        chunk.copy_from_slice(&w.to_le_bytes());
+    }
+    (
+        block[0] as u32,
+        (block[0] >> 32) as u32,
+        block[1] as u32,
+        (block[1] >> 32) as u32,
+        payload,
+    )
+}
+
+/// `SignalEvent`'s 8 bytes of input, passed in `rdx`
+/// (`HvCallSignalEvent.md`): the connection ID in bits 0-31, the flag
+/// number in bits 32-47, bits 48-63 reserved 0. `connection` is below
+/// `2^24`.
+pub const fn signal_event_input(connection: u32, flag: u16) -> u64 {
+    connection as u64 | (flag as u64) << 32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,5 +862,230 @@ mod tests {
         );
         assert_eq!(HypercallMsr::of(0x1234_5002).locked_page(), None);
         assert_eq!(HypercallMsr::off(0), None);
+    }
+
+    // M9.
+
+    /// `.hvcall`'s physical page in these tests.
+    const HVCALL: u64 = 0x0123_4000;
+
+    #[test]
+    fn the_guest_os_id_is_open_source_with_every_other_field_zero() {
+        assert_eq!(GUEST_OS_ID, 1 << 63);
+        assert_ne!(GUEST_OS_ID, 0, "the TLFS needs a non-zero ID");
+        // OS type (62:56), OS ID (55:48), version (47:16), build (15:0).
+        assert_eq!(GUEST_OS_ID >> 56 & 0x7F, 0);
+        assert_eq!(GUEST_OS_ID & ((1 << 56) - 1), 0);
+        assert_eq!(
+            (MSR_GUEST_OS_ID, MSR_HYPERCALL, MSR_VP_INDEX, MSR_EOM),
+            (0x4000_0000, 0x4000_0001, 0x4000_0002, 0x4000_0084)
+        );
+    }
+
+    #[test]
+    fn the_hypercall_msr_keeps_bits_11_to_2_and_never_locks() {
+        assert_eq!(hypercall_enable(0, HVCALL), HVCALL | 1);
+        // RsvdP bits as read; Locked, the old enable and the old page not.
+        assert_eq!(hypercall_enable(0xFFF, HVCALL), HVCALL | 0xFFD);
+        assert_eq!(
+            hypercall_enable(0xDEAD_B000 | 0x5A4, HVCALL),
+            HVCALL | 0x5A5
+        );
+        // A page number with low bits set is the page.
+        assert_eq!(hypercall_enable(0, HVCALL | 0x123), HVCALL | 1);
+        assert_eq!(HYPERCALL_RSVDP, 0b1111_1111_1100);
+    }
+
+    #[test]
+    fn the_hypercall_step_for_each_state_the_firmware_can_leave() {
+        // Off, or enabled elsewhere (M3 turned that off already): write.
+        assert_eq!(
+            hypercall_step(0x8, HVCALL),
+            HypercallStep::Write(HVCALL | 0x9)
+        );
+        assert_eq!(
+            hypercall_step(0xDEAD_B001, HVCALL),
+            HypercallStep::Write(HVCALL | 1)
+        );
+        // Locked enabled at `.hvcall`: ready as it is.
+        assert_eq!(hypercall_step(HVCALL | 3, HVCALL), HypercallStep::Ready);
+        // Locked anywhere else, or disabled: no hypercall page.
+        assert_eq!(
+            hypercall_step(0xDEAD_B003, HVCALL),
+            HypercallStep::Unavailable(Unavailable::Locked {
+                page: 0xDEAD_B000,
+                enabled: true
+            })
+        );
+        assert_eq!(
+            hypercall_step(HVCALL | 2, HVCALL),
+            HypercallStep::Unavailable(Unavailable::Locked {
+                page: HVCALL,
+                enabled: false
+            })
+        );
+    }
+
+    #[test]
+    fn only_a_read_back_enabled_at_hvcall_lets_anything_call_the_page() {
+        assert!(hypercall_enabled_at(HVCALL | 1, HVCALL));
+        assert!(hypercall_enabled_at(HVCALL | 0xFFD, HVCALL));
+        assert!(hypercall_enabled_at(HVCALL | 3, HVCALL), "locked enabled");
+        // The TLFS: with no guest OS ID the enable bit stays 0.
+        assert!(!hypercall_enabled_at(HVCALL, HVCALL));
+        assert!(!hypercall_enabled_at(0, HVCALL));
+        assert!(!hypercall_enabled_at(0xDEAD_B001, HVCALL));
+        assert!(!hypercall_enabled_at(HVCALL + 0x1000 | 1, HVCALL));
+    }
+
+    #[test]
+    fn the_hypervisor_capability_needs_all_five_m9_privileges() {
+        assert_eq!(missing_m9_privilege(&GEN2), None);
+        let all = Privileges {
+            eax: 1 << 2 | 1 << 5 | 1 << 6,
+            ebx: 1 << 4 | 1 << 5,
+            edx: 0,
+        };
+        assert_eq!(missing_m9_privilege(&all), None);
+        for (bit, ebx, name) in [
+            (2, false, "AccessSynicRegs"),
+            (5, false, "AccessHypercallMsrs"),
+            (6, false, "AccessVpIndex"),
+            (4, true, "PostMessages"),
+            (5, true, "SignalEvents"),
+        ] {
+            let mut p = all;
+            if ebx {
+                p.ebx &= !(1 << bit);
+            } else {
+                p.eax &= !(1 << bit);
+            }
+            assert_eq!(missing_m9_privilege(&p), Some(name), "{name}");
+        }
+        assert_eq!(
+            missing_m9_privilege(&Privileges::default()),
+            Some("AccessSynicRegs")
+        );
+    }
+
+    #[test]
+    fn why_there_is_no_hypervisor_capability() {
+        let lines = [
+            (Unavailable::NoInterface, "no TLFS interface"),
+            (
+                Unavailable::Privilege("PostMessages"),
+                "no PostMessages privilege",
+            ),
+            (
+                Unavailable::Locked {
+                    page: 0xDEAD_B000,
+                    enabled: true,
+                },
+                "the firmware locked the hypercall page at 0xdeadb000, not .hvcall",
+            ),
+            (
+                Unavailable::Locked {
+                    page: 0,
+                    enabled: false,
+                },
+                "the firmware locked the hypercall MSR disabled",
+            ),
+            (
+                Unavailable::NotEnabled {
+                    read_back: HVCALL | 0x8,
+                },
+                "the hypercall MSR read back 0x1234008, not enabled at .hvcall",
+            ),
+        ];
+        for (u, line) in lines {
+            assert_eq!(u.to_string(), line);
+        }
+    }
+
+    #[test]
+    fn synic_registers_keep_their_reserved_bits() {
+        let page = 0x1FE0_3000;
+        assert_eq!(overlay_enable(0, page), page | 1);
+        assert_eq!(overlay_enable(0xFFE, page), page | 0xFFF);
+        // The firmware's old page and enable bit are replaced.
+        assert_eq!(overlay_enable(0xABC0_0001, page), page | 1);
+        assert_eq!(scontrol_enable(0), 1);
+        assert_eq!(
+            scontrol_enable(0xF0F0_0000_0000_0000),
+            0xF0F0_0000_0000_0001
+        );
+        // GetSint: the vector, unmasked, AutoEOI and polling off,
+        // reserved bits 15:8 and 63:19 kept.
+        assert_eq!(sint_issued(SINT_MASKED, 0x30), 0x30);
+        let reserved = 0xFFFF_FFFF_FFF8_FF00;
+        let all = reserved | SINT_POLLING | SINT_AUTO_EOI | SINT_MASKED | 0xFF;
+        assert_eq!(sint_issued(all, 0x31), reserved | 0x31);
+        assert_eq!(sint_issued(SINT_MASKED | SINT_AUTO_EOI | 0x10, 0xEF), 0xEF);
+        // Deletion only sets the mask bit.
+        assert_eq!(sint_deleted(0x31), SINT_MASKED | 0x31);
+        assert_eq!(sint_deleted(reserved | 0x31), reserved | SINT_MASKED | 0x31);
+        assert_eq!(sint_deleted(SINT_MASKED), SINT_MASKED);
+        assert_eq!(
+            (SINT_MASKED, SINT_AUTO_EOI, SINT_POLLING),
+            (1 << 16, 1 << 17, 1 << 18)
+        );
+    }
+
+    #[test]
+    fn hypercall_input_values() {
+        // PostMessage: memory-based, code 0x5C, no rep count, no
+        // variable header; SignalEvent: code 0x5D with the fast bit.
+        assert_eq!(POST_MESSAGE_INPUT, 0x5C);
+        assert_eq!(SIGNAL_EVENT_INPUT, 0x1_005D);
+        for v in [POST_MESSAGE_INPUT, SIGNAL_EVENT_INPUT] {
+            // Variable header size (bits 26:17), rep count (43:32) and rep
+            // start (59:48) are 0.
+            assert_eq!(v & (0x3FF << 17 | 0xFFF << 32 | 0xFFF << 48), 0);
+        }
+        assert_eq!(signal_event_input(0x12_3456, 0xBEEF), 0xBEEF_0012_3456);
+        assert_eq!(signal_event_input(0xFF_FFFF, 0xFFFF) >> 48, 0);
+        assert_eq!(
+            (
+                status::SUCCESS,
+                status::INVALID_PARAMETER,
+                status::INVALID_VP_INDEX,
+                status::INVALID_PORT_ID,
+                status::INVALID_CONNECTION_ID,
+                status::INSUFFICIENT_BUFFERS,
+                status::INVALID_SYNIC_STATE
+            ),
+            (0, 5, 0x0E, 0x11, 0x12, 0x13, 0x18)
+        );
+    }
+
+    #[test]
+    fn the_post_message_block_holds_the_payload_and_zeros_to_its_end() {
+        let words: Vec<u64> = (0..31u64)
+            .map(|i| 0x0101_0101_0101_0101 * (i + 1))
+            .collect();
+        for size in [0, 1, 7, 8, 9, 100, 239, 240] {
+            let block = post_message_block(0x12_3456, 0x7FFF_FFFF, size, &words);
+            let (connection, reserved, ty, got_size, payload) = parse_post_message_block(&block);
+            assert_eq!(
+                (connection, reserved, ty, got_size),
+                (0x12_3456, 0, 0x7FFF_FFFF, size)
+            );
+            for (i, &b) in payload.iter().enumerate() {
+                let want = if (i as u32) < size {
+                    words[i / 8].to_le_bytes()[i % 8]
+                } else {
+                    0
+                };
+                assert_eq!(b, want, "size {size}, byte {i}");
+            }
+        }
+        // Fewer words than the size: the rest is zero; a 31st word is
+        // never read.
+        let block = post_message_block(1, 1, 240, &[u64::MAX]);
+        assert_eq!(block[2], u64::MAX);
+        assert!(block[3..].iter().all(|&w| w == 0));
+        assert_eq!(block.len() * 8, 256);
+        // A size past 240 is 240.
+        assert_eq!(post_message_block(1, 1, 1000, &words)[1] >> 32, 240);
     }
 }

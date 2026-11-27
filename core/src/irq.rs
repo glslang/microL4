@@ -19,16 +19,18 @@
 //!   `docs/abi.md`'s check order: label, length, arguments, resources (the
 //!   source free, a vector free, Remote IRR clear after the kernel tried to
 //!   clear it), then the destination slot. Only the Remote IRR step changes
-//!   anything before every check has passed, as ADR 0027 allows.
+//!   anything before every check has passed, as ADR 0027 allows. From M9
+//!   it also issues one for an MSI (`GetMSI`: the vector reserved, nothing
+//!   programmed, the message address and data returned) and for a SynIC
+//!   SINT (`GetSint`: SINTn written once, after every check, through
+//!   [`Interrupts::sint_action`]).
 //! - [`invoke_handler`] decodes `Ack`, `SetNotification` and `Clear`.
-//! - [`deliver`] is the interrupt path's part for a device vector.
+//! - [`deliver`] is the interrupt path's part for a device vector: an MSI
+//!   or a SINT is never masked, only signalled.
 //! - [`finalise`] and [`after_delete`] are the IRQHandler arms of the
 //!   kernel's hooks: the last capability deletes the IRQ node slot's
-//!   capability, and once its own slot is empty the pin is masked and the
-//!   entry freed.
-//!
-//! MSI and SynIC sources (`GetMSI`, `GetSint`) arrive with M9; until then
-//! their labels are `IllegalOperation`.
+//!   capability, and once its own slot is empty the pin or SINT is masked
+//!   and the entry, and so the vector, freed.
 //!
 //! # Orders the ABI leaves open
 //!
@@ -37,7 +39,8 @@
 //!   `docs/abi.md`'s conventions list them; seL4's `lookupTargetSlot`
 //!   checks the root first.
 //! - Within step 5: the source, then the vector, then Remote IRR, so an
-//!   issued pin is never masked by a refused issue.
+//!   issued pin is never masked by a refused issue. `GetSint` checks its
+//!   SINT, then the vector; `GetMSI` has only the vector.
 //! - `IRQHandler_Ack`, `_SetNotification` and `_Clear` take any number of
 //!   message registers; `SetNotification` ignores extra capabilities past
 //!   the first.
@@ -60,15 +63,17 @@ use crate::window::MAX_IOAPICS;
 pub const IRQS: usize = (DEVICE_LAST - DEVICE_BASE) as usize + 1;
 /// ISA IRQs `GetISA` accepts: 0 to 15.
 pub const ISA_IRQS: usize = 16;
+/// SynIC SINTs `GetSint` accepts: 0 to 15.
+pub const SINTS: usize = 16;
 
 /// IRQControl and IRQHandler invocation labels (`docs/abi.md`,
 /// "Invocation label index"): `0x60` to `0x6F`.
 pub mod label {
     pub const GET_ISA: u64 = 0x60;
     pub const GET_IOAPIC: u64 = 0x61;
-    /// M9; `IllegalOperation` until then.
+    /// M9.
     pub const GET_MSI: u64 = 0x62;
-    /// M9; `IllegalOperation` until then.
+    /// M9.
     pub const GET_SINT: u64 = 0x63;
     pub const ACK: u64 = 0x68;
     pub const SET_NOTIFICATION: u64 = 0x69;
@@ -79,6 +84,21 @@ pub mod label {
 pub const fn vector(irq: u8) -> u8 {
     debug_assert!((irq as usize) < IRQS);
     DEVICE_BASE + irq
+}
+
+/// The x86 MSI message address `GetMSI` returns (`docs/design.md`, "MSI
+/// (M9) and the trust model"): `0xFEE` in bits 31:20, the boot CPU's
+/// xAPIC ID in bits 19:12, redirection hint (bit 3) and destination mode
+/// (bit 2) 0, so physical destination; the upper 32 bits 0.
+pub const fn msi_address(apic_id: u8) -> u64 {
+    0xFEE0_0000 | (apic_id as u64) << 12
+}
+
+/// The MSI message data `GetMSI` returns for IRQ `irq`: its vector in bits
+/// 7:0 and every other bit 0, which is fixed delivery, edge-triggered. It
+/// fits MSI's 16-bit Message Data register and MSI-X's 32-bit one.
+pub const fn msi_data(irq: u8) -> u64 {
+    vector(irq) as u64
 }
 
 /// The IRQ of a device vector, `None` for any other vector.
@@ -205,6 +225,11 @@ pub enum Source {
         level: bool,
         active_low: bool,
     },
+    /// An MSI or MSI-X message (M9): the vector is reserved, and nothing in
+    /// the kernel can mask it or names the device.
+    Msi,
+    /// SynIC SINT `n`, 0 to 15 (M9), unmasked with this IRQ's vector.
+    Sint(u8),
 }
 
 /// One IRQ's state (`docs/design.md`, "The IRQ table").
@@ -263,6 +288,14 @@ impl IrqTable {
         self.entries
             .iter()
             .position(|e| matches!(e.source, Source::IoApic { gsi: g, .. } if g == gsi))
+            .map(|i| i as u8)
+    }
+
+    /// The IRQ issued for SINT `sint`, if any.
+    pub fn sint_holder(&self, sint: u8) -> Option<u8> {
+        self.entries
+            .iter()
+            .position(|e| e.source == Source::Sint(sint))
             .map(|i| i as u8)
     }
 
@@ -399,10 +432,41 @@ impl Action {
     }
 }
 
+/// A SynIC SINT register write the kernel performs for `core::irq` (M9):
+/// it reads SINTn, then writes [`SintAction::value`] of what it read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SintAction {
+    /// `GetSint`: the SINT unmasked with `vector`, AutoEOI and polling off.
+    Issue { sint: u8, vector: u8 },
+    /// The last handler deleted: the mask bit set.
+    Mask(u8),
+}
+
+impl SintAction {
+    /// The SINT it writes, 0 to 15.
+    pub const fn sint(&self) -> u8 {
+        match *self {
+            SintAction::Issue { sint, .. } | SintAction::Mask(sint) => sint,
+        }
+    }
+
+    /// The value it writes to a SINT that reads `old`, every reserved bit
+    /// as read ([`crate::hyperv::sint_issued`],
+    /// [`crate::hyperv::sint_deleted`]).
+    pub const fn value(&self, old: u64) -> u64 {
+        match *self {
+            SintAction::Issue { vector, .. } => crate::hyperv::sint_issued(old, vector),
+            SintAction::Mask(_) => crate::hyperv::sint_deleted(old),
+        }
+    }
+}
+
 /// What `core::irq` needs from the kernel beyond slots, threads and IPC:
-/// the IRQ table, the routes, the IRQ node and the I/O APICs. The kernel
-/// implements it over statics and `arch/x86_64/ioapic.rs`, the host tests
-/// over a model of an I/O APIC.
+/// the IRQ table, the routes, the IRQ node and the I/O APICs; from M9 the
+/// boot CPU's APIC ID, for MSI messages, and the SynIC's SINTs. The kernel
+/// implements it over statics, `arch/x86_64/ioapic.rs` and
+/// `arch/x86_64/hyperv.rs`, the host tests over models of an I/O APIC and
+/// a SynIC.
 pub trait Interrupts {
     /// The IRQ table.
     fn irq_table(&self) -> &IrqTable;
@@ -420,6 +484,19 @@ pub trait Interrupts {
     /// Performs `action` on its pin's I/O APIC. Returns whether Remote IRR
     /// is set for `CheckRemoteIrr`, and false for every other action.
     fn irq_action(&mut self, action: Action) -> bool;
+
+    /// The boot CPU's local APIC ID (bits 31:24 of its ID register): the
+    /// destination of every MSI `GetMSI` describes.
+    fn apic_id(&self) -> u8;
+
+    /// Whether the kernel set the SynIC up at boot, which it does exactly
+    /// when it makes the Hypervisor capability (ADR 0029). Without it
+    /// `GetSint` is `IllegalOperation` and no SINT is touched.
+    fn synic(&self) -> bool;
+
+    /// Performs `action` on its SINT: reads SINTn, writes
+    /// [`SintAction::value`]. Called only when [`Interrupts::synic`] holds.
+    fn sint_action(&mut self, action: SintAction);
 }
 
 /// IRQ `irq`'s slot in the IRQ node.
@@ -442,8 +519,8 @@ pub struct Issued {
 }
 
 /// Decodes and performs the IRQControl invocation `msg` of the capability
-/// in `control`: `GetISA` and `GetIOAPIC` (M7). Results go to the caller's
-/// message registers when it called.
+/// in `control`: `GetISA` and `GetIOAPIC` (M7), `GetMSI` and `GetSint`
+/// (M9). Results go to the caller's message registers when it called.
 pub fn invoke_control<K: Kernel + Threads + Interrupts + ?Sized>(
     k: &mut K,
     control: SlotAddr,
@@ -498,9 +575,67 @@ pub fn invoke_control<K: Kernel + Threads + Interrupts + ?Sized>(
             let issued = issue(k, control, route, pin, io, dest)?;
             Ok(invoke::results(k, &[u64::from(issued.irq)]))
         }
-        // GetMSI and GetSint arrive with M9.
+        label::GET_MSI => {
+            let [index, depth] = msg.args(1)?;
+            let irq = k
+                .irq_table()
+                .lowest_free()
+                .ok_or(SyscallError::RevokeFirst)?;
+            let dst = invoke::destination(k, msg.cap(0), index, depth)?;
+            issue_entry(k, control, dst, irq, Source::Msi);
+            let words = [u64::from(irq), msi_address(k.apic_id()), msi_data(irq)];
+            Ok(invoke::results(k, &words))
+        }
+        label::GET_SINT if !k.synic() => Err(SyscallError::IllegalOperation.into()),
+        label::GET_SINT => {
+            let [sint, index, depth] = msg.args(1)?;
+            if sint >= SINTS as u64 {
+                return Err(SyscallError::RangeError {
+                    min: 0,
+                    max: SINTS as u64 - 1,
+                }
+                .into());
+            }
+            let sint = sint as u8;
+            if k.irq_table().sint_holder(sint).is_some() {
+                return Err(SyscallError::RevokeFirst.into());
+            }
+            let irq = k
+                .irq_table()
+                .lowest_free()
+                .ok_or(SyscallError::RevokeFirst)?;
+            let dst = invoke::destination(k, msg.cap(0), index, depth)?;
+            issue_entry(k, control, dst, irq, Source::Sint(sint));
+            k.sint_action(SintAction::Issue {
+                sint,
+                vector: vector(irq),
+            });
+            Ok(invoke::results(k, &[u64::from(irq)]))
+        }
         _ => Err(SyscallError::IllegalOperation.into()),
     }
+}
+
+/// Once every check of an issue has passed: IRQ `irq`'s entry, with
+/// `pending` and `masked` clear, and its IRQHandler in `dst`, a revocable
+/// child of IRQControl.
+fn issue_entry<K: Kernel + Interrupts + ?Sized>(
+    k: &mut K,
+    control: SlotAddr,
+    dst: SlotAddr,
+    irq: u8,
+    source: Source,
+) {
+    k.irq_table_mut().set(
+        irq,
+        Entry {
+            source,
+            pending: false,
+            masked: false,
+        },
+    );
+    cdt::insert_derived(k, control, dst, handler_cap(irq), true)
+        .expect("IRQControl is a derivation root, which cannot be copied");
 }
 
 /// Steps 5 and 6 of an issue, then the issue itself: the GSI must have no
@@ -537,21 +672,13 @@ fn issue<K: Kernel + Threads + Interrupts + ?Sized>(
         }
     }
     let dst = invoke::destination(k, root, index, depth)?;
-    k.irq_table_mut().set(
-        irq,
-        Entry {
-            source: Source::IoApic {
-                gsi: route.gsi,
-                pin,
-                level: route.level,
-                active_low: route.active_low,
-            },
-            pending: false,
-            masked: false,
-        },
-    );
-    cdt::insert_derived(k, control, dst, handler_cap(irq), true)
-        .expect("IRQControl is a derivation root, which cannot be copied");
+    let source = Source::IoApic {
+        gsi: route.gsi,
+        pin,
+        level: route.level,
+        active_low: route.active_low,
+    };
+    issue_entry(k, control, dst, irq, source);
     k.irq_action(Action::ProgramRte {
         pin,
         vector: vector(irq),
@@ -609,7 +736,7 @@ pub fn invoke_handler<K: Kernel + Interrupts + ?Sized>(
 }
 
 /// `IRQHandler_Ack`: clears `pending` and unmasks the pin if the kernel
-/// masked it.
+/// masked it. Nothing for an MSI or a SINT, which are never masked.
 pub fn ack<E: Interrupts + ?Sized>(e: &mut E, irq: u8) {
     let mut entry = e.irq_table().entry(irq);
     if let Source::IoApic { pin, .. } = entry.source {
@@ -642,24 +769,29 @@ pub enum Delivery {
 /// The interrupt path's work for IRQ `irq`'s vector, with the interrupted
 /// thread's registers saved and before the EOI (`docs/design.md`,
 /// "Delivery"): a level pin is masked; an edge pin is masked if `pending`
-/// is already set, and then `pending` is set; the notification in the IRQ
-/// node slot, if any, is signalled with its capability's badge. Constant
-/// work; reads no user memory. The caller EOIs, then runs the scheduler,
-/// which switches to a thread the signal woke if it outranks the one
-/// interrupted.
+/// is already set, and then `pending` is set; an MSI or a SINT stays as it
+/// is; the notification in the IRQ node slot, if any, is signalled with
+/// its capability's badge. Constant work; reads no user memory. The caller
+/// EOIs, then runs the scheduler, which switches to a thread the signal
+/// woke if it outranks the one interrupted.
 pub fn deliver<E: IpcEnv + Interrupts + ?Sized>(e: &mut E, irq: u8) -> Delivery {
     let mut entry = e.irq_table().entry(irq);
-    let Source::IoApic { pin, level, .. } = entry.source else {
-        e.irq_table_mut().stale += 1;
-        return Delivery::Stale;
-    };
-    let mask = level || entry.pending;
-    if mask && !entry.masked {
-        e.irq_action(Action::MaskRte(pin));
+    match entry.source {
+        Source::Free => {
+            e.irq_table_mut().stale += 1;
+            return Delivery::Stale;
+        }
+        Source::IoApic { pin, level, .. } => {
+            let mask = level || entry.pending;
+            if mask && !entry.masked {
+                e.irq_action(Action::MaskRte(pin));
+            }
+            entry.masked |= mask;
+            entry.pending |= !level;
+            e.irq_table_mut().set(irq, entry);
+        }
+        Source::Msi | Source::Sint(_) => {}
     }
-    entry.masked |= mask;
-    entry.pending |= !level;
-    e.irq_table_mut().set(irq, entry);
     match NotificationCap::from_cap(&e.load(node_slot(e, irq)).cap) {
         Some(n) => {
             ipc::signal(e, n.ntfn, n.badge);
@@ -693,14 +825,19 @@ pub fn finalise<K: Kernel + Interrupts + ?Sized>(k: &mut K, cap: Cap, last: bool
 }
 
 /// The IRQHandler arm of the kernel's `after_delete` hook (seL4's
-/// `deletedIRQHandler`): masks the pin, keeping its vector and trigger, and
-/// frees the entry and its vector.
+/// `deletedIRQHandler`): masks the pin, keeping its vector and trigger, or
+/// the SINT, and frees the entry and its vector. An MSI's device is not
+/// touched: a message it still sends lands on a free entry.
 pub fn after_delete<E: Interrupts + ?Sized>(e: &mut E, cap: Cap) {
     let Some(irq) = handler_irq(&cap) else {
         return;
     };
-    if let Source::IoApic { pin, .. } = e.irq_table().entry(irq).source {
-        e.irq_action(Action::MaskRte(pin));
+    match e.irq_table().entry(irq).source {
+        Source::IoApic { pin, .. } => {
+            e.irq_action(Action::MaskRte(pin));
+        }
+        Source::Sint(sint) => e.sint_action(SintAction::Mask(sint)),
+        Source::Free | Source::Msi => {}
     }
     e.irq_table_mut().set(irq, Entry::FREE);
 }
@@ -713,8 +850,10 @@ pub fn after_delete<E: Interrupts + ?Sized>(e: &mut E, cap: Cap) {
 /// Invariants), as a function for the tests: each GSI has at most one
 /// entry, and its pin is the one the routes give; a free entry has
 /// neither `pending` nor `masked`, and nothing in its IRQ node slot; a
-/// level entry is never `pending`; every IRQ node slot is empty or holds a
-/// notification capability with Write.
+/// level entry is never `pending`; an MSI or SINT entry is never `pending`
+/// or `masked`; a SINT below 16 has at most one entry, and only with a
+/// SynIC; every IRQ node slot is empty or holds a notification capability
+/// with Write.
 pub fn check<E: SlotMemory + Interrupts + ?Sized>(e: &E) -> Result<(), &'static str> {
     let table = e.irq_table();
     for (i, entry) in table.entries().iter().enumerate() {
@@ -742,6 +881,18 @@ pub fn check<E: SlotMemory + Interrupts + ?Sized>(e: &E) -> Result<(), &'static 
                 }
                 if level && entry.pending {
                     return Err("a level entry is pending");
+                }
+            }
+            Source::Msi | Source::Sint(_) if entry.pending || entry.masked => {
+                return Err("an MSI or SINT entry is pending or masked");
+            }
+            Source::Msi => {}
+            Source::Sint(sint) => {
+                if usize::from(sint) >= SINTS || !e.synic() {
+                    return Err("a SINT entry without a SynIC, or past SINT 15");
+                }
+                if table.sint_holder(sint) != Some(i as u8) {
+                    return Err("a SINT has two entries");
                 }
             }
         }

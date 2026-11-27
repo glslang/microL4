@@ -843,7 +843,21 @@ impl World {
                     }
                     n = n.with_data(cnode_data(gs, data >> 6));
                 }
-                CapType::Hypervisor if data != 0 => return Err(SyscallError::IllegalOperation),
+                // `docs/abi.md`, "Mint data word": a connection in bits
+                // 0-23, `post` and `signal` in 24 and 25, nothing above;
+                // a restricted source keeps its connection and may only
+                // drop rights. The narrowed copy is an original.
+                CapType::Hypervisor if data != 0 => {
+                    let fields = 0x3FF_FFFF;
+                    let (conn, rights) = (data & 0xFF_FFFF, data >> 24 & 3);
+                    let widens = c.data != 0
+                        && (c.data & 0xFF_FFFF != conn || rights & !(c.data >> 24 & 3) != 0);
+                    if data & !fields != 0 || widens {
+                        return Err(SyscallError::IllegalOperation);
+                    }
+                    n = n.with_data(crate::hyperv::invocation::RESTRICTED | data);
+                    original = true;
+                }
                 _ => {}
             }
         }

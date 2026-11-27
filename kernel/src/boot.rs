@@ -12,12 +12,15 @@
 //! - Step 10 (M5): the root task runs.
 
 use l4core::boot::image::{RootImage, RootMapping, root_mappings};
-use l4core::boot::{self as l4boot, BootInput, BootPlan, FramebufferStatus, UntypedSummary};
+use l4core::boot::{
+    self as l4boot, BootInput, BootPlan, FramebufferStatus, RootNeeds, UntypedSummary,
+};
 use l4core::bootinfo::{
     BootInfo, CAP_INIT_CNODE, CAP_INIT_IPC_BUFFER, CAP_INIT_TCB, CAP_INIT_VSPACE, InterruptInfo,
 };
 use l4core::cap::{Cap, TCB_SLOT_CSPACE, TCB_SLOT_IPC_BUFFER, TCB_SLOT_REPLY, TCB_SLOT_VSPACE};
 use l4core::handoff::{Handoff, MemoryRegion};
+use l4core::hyperv;
 use l4core::kernel::Kernel;
 use l4core::sched;
 use l4core::slot::SlotMemory;
@@ -181,8 +184,13 @@ pub fn make_root_space(
             window: facts.device_window,
             locked_hypercall_page: facts.locked_hypercall_page,
             framebuffer: h.framebuffer,
-            // M9 adds the Hypervisor capability on Hyper-V.
-            root: image.needs(),
+            // The Hypervisor capability and its two SynIC frames, only
+            // once the hypercall page reads back enabled at `.hvcall`
+            // (M9, ADR 0029).
+            root: RootNeeds {
+                hypervisor: arch::hypercalls_enabled().then(hyperv::hypervisor_cap),
+                ..image.needs()
+            },
         };
         // Step 6.
         let plan = match l4boot::plan(input) {
@@ -191,6 +199,15 @@ pub fn make_root_space(
         };
         let l = plan.layout;
         k.zero(l.region.start, l.region.end - l.region.start);
+        // The SynIC on the zeroed frames, before any untyped is made.
+        if let Some(s) = l.synic {
+            arch::set_up_synic(s.message, s.event);
+            kprintln!(
+                "boot: SynIC message page at {:#x} (slot 13), event-flag page at {:#x} (slot 14)",
+                s.message,
+                s.event
+            );
+        }
         // Step 9: the untyped, the slot regions and BootInfo.
         let bi = arch::bootinfo_frames(l.bootinfo);
         let bi_facts = l4boot::BootFacts {

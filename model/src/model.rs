@@ -43,6 +43,7 @@ use l4core::cap::{
 };
 use l4core::cdt::DepthExceeded;
 use l4core::error::{LookupFailure, SyscallError};
+use l4core::hyperv::HypervisorCap;
 use l4core::slot::SlotAddr;
 use l4core::testing::Event;
 use l4core::untyped::RetypeArgs;
@@ -236,10 +237,34 @@ fn mint_data(cap: Cap, data: u64) -> Result<(Cap, bool), SyscallError> {
             }
         }
         CapType::CNode => Ok((with_guard(cap, data)?, false)),
-        // Narrowing a Hypervisor capability is M9 (`docs/design.md`,
-        // Derivation tracking, "Built when"); until then only data 0, a
-        // Copy, is defined.
-        CapType::Hypervisor if data != 0 => Err(SyscallError::IllegalOperation),
+        // Narrowing a Hypervisor capability (M9, `docs/abi.md`, "Mint data
+        // word"): data 0 is a Copy; otherwise bits 26-63 are 0, and an
+        // unrestricted source takes the word's connection (bits 0-23) and
+        // rights (`post` 24, `signal` 25), a restricted one only a subset
+        // of its rights on its own connection; the copy is an original.
+        CapType::Hypervisor if data != 0 => {
+            let narrowed = HypervisorCap::from_cap(&cap).expect("a Hypervisor capability");
+            let (conn, post, signal) = (data & 0xFF_FFFF, data >> 24 & 1 == 1, data >> 25 & 1 == 1);
+            let allowed = data >> 26 == 0
+                && match narrowed {
+                    HypervisorCap::Unrestricted => true,
+                    HypervisorCap::Restricted {
+                        connection,
+                        post: p,
+                        signal: s,
+                    } => u64::from(connection) == conn && (p || !post) && (s || !signal),
+                };
+            if !allowed {
+                return Err(SyscallError::IllegalOperation);
+            }
+            let cap = HypervisorCap::Restricted {
+                connection: conn as u32,
+                post,
+                signal,
+            }
+            .cap();
+            Ok((cap, true))
+        }
         _ => Ok((cap, false)),
     }
 }
