@@ -1,0 +1,35 @@
+# release.scenario with uart's burst capped at 1 (M9; docs/design.md,
+# "Transmit and receive"): the kernel command line's uart.burst=1, which
+# root reads, says so in its summary and passes to uart in rdi at spawn, so
+# uart writes one byte per THRE seen, though QEMU's 16550 has working
+# FIFOs. uart's Stats then report burst 1 (MR8), and the run is otherwise
+# release's: no kernel output, the probe's faults, the typed line read
+# whole, and TEST PASS through isa-debug-exit. QEMU's transmitter takes
+# each byte at once and raises THRE again, so one service routine empties
+# the queue a byte at a time. The M9 Hyper-V check runs the same with
+# burst 1 and 15 (tools/hyperv/m9-burst1.scenario, m9-burst15.scenario).
+kernel: release
+cmdline: test=release uart.burst=1
+exit: success
+expect: loader: microL4 loader
+expect: entering kernel
+next: root: microL4 root task
+expect: root: cmdline "test=release uart.burst=1"
+next: root: uart.burst=1: uart's burst capped at 1
+expect: root: image frames: slots
+expect: root: empty: slots
+expect: release: watch (priority 255), uart (priority 200) with the COM1 IOPort and IRQ 4, console (priority 150); exit port 0xf4-0xf7
+expect: release: a probe thread's DebugPutChar, DebugHalt, DebugDumpScheduler and reserved numbers 19 and 31 each raised UnknownSyscall with the number in MR18
+expect: release: type a line
+send: release input\r
+expect: release: read "release input"
+expect: release: uart:
+expect: , 14 bytes received,
+expect: , 0 overruns, 0 line errors,
+expect: , burst 1, 0 stale THREs
+expect: TEST PASS
+forbid: microL4 kernel
+forbid: bootinfo:
+forbid: DEBUG HALT
+forbid: KERNEL PANIC
+forbid: ignored: not a number
