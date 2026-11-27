@@ -1,0 +1,20 @@
+# M9: Frame_GetAddress (kernel/src/arch/x86_64/m9test.rs), made through
+# l4core::invoke on the root task's capabilities as the root task would
+# make it: the root task's IPC buffer, BootInfo's two frames and its first
+# image frame, all mapped, at the boot plan's addresses; a 4 KiB device
+# frame and a 2 MiB RAM frame retyped from untyped, unmapped, at their
+# untyped's bases; a copy with no rights, at the same address; and the
+# label refused on a CNode.
+cmdline: test=frame_address
+exit: success
+expect: microL4 kernel
+expect: frame_address: ok   the IPC buffer, mapped (root slot 10)
+expect: frame_address: ok   BootInfo's first frame, mapped (root slot 9)
+expect: frame_address: ok   BootInfo's second frame, mapped (root slot 16)
+expect: frame_address: ok   the first image frame, mapped
+expect: frame_address: ok   a 4 KiB device frame, unmapped
+expect: frame_address: ok   a 2 MiB RAM frame, unmapped
+expect: frame_address: ok   a copy of the 2 MiB frame with no rights
+expect: frame_address: ok   the root CNode refuses the label: IllegalOperation
+expect: TEST PASS
+forbid: TEST FAIL

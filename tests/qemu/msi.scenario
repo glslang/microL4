@@ -1,0 +1,27 @@
+# M9: IRQControl_GetMSI and an MSI from a device
+# (kernel/src/arch/x86_64/m9test.rs). Under TCG there is no Hypervisor
+# capability, so slots 12 to 14 are null and GetSint is IllegalOperation.
+# GetMSI, made through l4core::invoke on the root task's IRQControl as the
+# root task would make it, gives IRQ 0 with the boot CPU's physical, fixed,
+# edge message; then all 192 vectors in order, RevokeFirst for GetMSI and
+# GetIOAPIC once none is free, and a deleted handler's vector reissued.
+# The HPET's last comparator, with FSB delivery (QEMU's hpet.msi), then
+# writes GetMSI's data to its address as a device's MSI does: the bound
+# notification is signalled, a second message with no Ack signals again,
+# and after the handler's deletion a third signals nothing.
+cmdline: test=msi
+qemu_args: -global hpet.msi=on
+exit: success
+expect: microL4 kernel
+expect: hyperv: no Hypervisor capability, slots 12 to 14 null: no TLFS interface
+expect: msi: ok   no Hypervisor capability under TCG
+expect: msi: ok   GetSint(2) is IllegalOperation without a SynIC
+expect: msi: ok   GetMSI: IRQ 0, address 0xfee00000 (APIC ID 0), data 0x30
+expect: msi: ok   GetMSI 192 times gave IRQs 0 to 191 in order
+expect: msi: ok   deleting IRQ 100's handler freed its vector, and GetMSI reissued it
+expect: msi: ok   deleting the 191 other handlers freed IRQs 1 to 191
+expect: msi: ok   the HPET's FSB message signalled the notification
+expect: msi: ok   a second message, with no Ack, signalled again
+expect: msi: ok   after the handler's deletion the device's next message landed on a free entry
+expect: TEST PASS
+forbid: TEST FAIL

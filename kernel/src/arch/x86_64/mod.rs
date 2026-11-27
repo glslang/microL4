@@ -18,6 +18,8 @@ mod ioapic;
 mod irq;
 #[cfg(feature = "selftest")]
 mod irq_stale;
+#[cfg(feature = "selftest")]
+mod m9test;
 mod objects;
 mod paging;
 mod pic;
@@ -58,6 +60,8 @@ pub use trap::idle;
 pub use apic::test_nmi_stack;
 #[cfg(feature = "selftest")]
 pub use irq_stale::test_irq_stale;
+#[cfg(feature = "selftest")]
+pub use m9test::{test_frame_address, test_msi};
 #[cfg(feature = "selftest")]
 pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]

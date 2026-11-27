@@ -122,6 +122,9 @@ fn run_test(
         "vspace" => arch::test_vspace(root, bi),
         // Interrupts (M7).
         "irq_stale" => arch::test_irq_stale(root, bi),
+        // MSI and Frame_GetAddress (M9).
+        "msi" => arch::test_msi(root, bi),
+        "frame_address" => arch::test_frame_address(root, bi),
         other => {
             kprintln!("test={other}: not a kernel self-test; the root task runs it");
             boot::start_root_task(root)
