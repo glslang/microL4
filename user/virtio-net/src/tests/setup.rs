@@ -269,6 +269,28 @@ fn the_limits_are_exact() {
 }
 
 #[test]
+fn of_every_feature_offered_only_three_are_accepted() {
+    // A device offering all 64 bits, the packed ring, ACCESS_PLATFORM and
+    // MTU among them, which the driver SHOULD accept and does not: the
+    // stack needs none, and an IOMMU it does not have (the model takes
+    // the set, as 2.2.2 lets a device).
+    for offered in [
+        u64::MAX,
+        f::QEMU | f::MTU | f::ACCESS_PLATFORM | f::RING_PACKED,
+    ] {
+        let mem = Mem::new();
+        let cfg = Config {
+            features: offered,
+            ..Config::qemu()
+        };
+        let dev = Device::new(&mem.dma, BASE, cfg);
+        let w = World::up(&dev, &mem);
+        assert_eq!(dev.accepted(), FEATURES);
+        assert_eq!(w.driver.features(), FEATURES);
+    }
+}
+
+#[test]
 fn a_torn_configuration_is_read_again() {
     let mem = Mem::new();
     let cfg = Config {
@@ -466,13 +488,7 @@ fn the_entry_stub_refuses_bad_words() {
         w[i] = v;
         Start::from_words(w)
     };
-    for dma in [
-        0,
-        0x1000,
-        0x1_2340_1000,
-        crate::PHYS_LIMIT,
-        u64::MAX & !0x1F_FFFF,
-    ] {
+    for dma in [0, 0x1000, 0x1_2340_1000, crate::PHYS_LIMIT, !0x1F_FFFF] {
         assert_eq!(with(0, dma), Err(StartError::Dma(dma)));
     }
     let r = |offset: u16, len: u16| u64::from(Region { offset, len }.word());
