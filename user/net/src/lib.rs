@@ -76,12 +76,11 @@ pub trait Tx {
 
 /// The bit `net`'s driver signals NN with, and the one `net` signals its
 /// driver's notification with (`docs/design.md`, "Where the network
-/// servers run"); `libsys::proto`'s `FRAMES` once it has it.
-pub const FRAMES: u64 = 1 << 33;
+/// servers run").
+pub use libsys::proto::FRAMES;
 /// The label of root's `Stats` request on endpoint NE, answered with
-/// [`Stats::to_words`]; `libsys::proto::label`'s `NET_STATS` once it has
-/// it.
-pub const NET_STATS: u64 = 0x180;
+/// [`Stats::to_words`].
+pub use libsys::proto::label::NET_STATS;
 
 /// net's CSpace: a 16-slot CNode with guard 0 of size 60, so `CPtr` `n`
 /// is slot `n` (`docs/design.md`, "Capabilities" under "Networking").
