@@ -4,18 +4,21 @@
 //! "`net::run`"). It blocks only in its receive on NE; it signals only its
 //! driver and answers only root's `Stats`.
 //!
-//! The queues come in as a [`Queues`]: root's entry stub makes it over
-//! `libsys::frames`' window, which net reaches only through it.
+//! The queues come in as a `libsys::frames::Net`: root's entry stub makes
+//! it over a `Shared` window on `WINDOW`, which net reaches only through
+//! it.
 
 use core::fmt::{Display, Write};
 
 use libsys::console::{Buffered, Client};
+use libsys::frames::Net;
+use libsys::mem::Memory;
 use libsys::notification::Event as Wake;
 use libsys::proto::MAX_BYTES;
 use libsys::{Ipc, Message, MessageInfo, Received, recv, reply_recv, signal};
 
-use crate::link::{self, Queues, Up};
-use crate::{Config, FRAMES, Stack, Stats, echo, slot};
+use crate::link::{self, Report, Up};
+use crate::{Config, FRAMES, Stack, echo, slot};
 
 /// One line through console.
 fn say(console: &Client, line: impl Display) {
@@ -26,16 +29,16 @@ fn say(console: &Client, line: impl Display) {
 }
 
 /// The answer to a message on NE.
-fn answer(ipc: Ipc, m: Received, stats: &Stats) -> Message {
+fn answer(ipc: Ipc, m: Received, report: &Report) -> Message {
     let info = m.msg.info;
     match link::request(info.label(), info.length() as usize) {
-        Ok(()) => ipc.compose(0, &stats.to_words(), &[]),
+        Ok(()) => ipc.compose(0, &report.to_words(), &[]),
         Err(r) => Message::new(MessageInfo::new(r.label(), 0, 0, 0), [0; 4]),
     }
 }
 
 /// Prints the stack's new lines, each once in a run.
-fn report(console: &Client, stack: &mut Stack) {
+fn print_events(console: &Client, stack: &mut Stack) {
     while let Some(e) = stack.event() {
         say(console, e);
     }
@@ -43,7 +46,7 @@ fn report(console: &Client, stack: &mut Stack) {
 
 /// net's thread: its slots are [`slot`]'s; `config` is its arguments'
 /// ([`Config::from_words`]). It never returns.
-pub fn run<Q: Queues>(config: Config, mut queues: Q) -> ! {
+pub fn run<M: Memory>(config: Config, mut queues: Net<M>) -> ! {
     // The statics are a copy of the root task's, which name its slots.
     libsys::output::reset();
     let ipc = Ipc::root();
@@ -54,15 +57,15 @@ pub fn run<Q: Queues>(config: Config, mut queues: Q) -> ! {
     // Until the driver's first signal there is no stack: a Stats is all 0.
     let mut r = recv(slot::ENDPOINT);
     while let Wake::Message(m) = Wake::classify(r, FRAMES) {
-        r = reply_recv(slot::ENDPOINT, &answer(ipc, m, &Stats::default()));
+        r = reply_recv(slot::ENDPOINT, &answer(ipc, m, &Report::default()));
     }
-    let mut stack = link::start(config, &mut queues).unwrap_or_else(|e| panic!("{e}"));
-    if queues.take_pushed() {
+    let mut stack = link::start(config, &mut queues).unwrap_or_else(|e| panic!("net: {e}"));
+    if queues.end_batch() {
         signal(slot::DRIVER);
     }
     say(&console, Up(config, stack.mac()));
     say(&console, echo::LISTENING);
-    report(&console, &mut stack);
+    print_events(&console, &mut stack);
     r = recv(slot::ENDPOINT);
     loop {
         r = match Wake::classify(r, FRAMES) {
@@ -70,10 +73,16 @@ pub fn run<Q: Queues>(config: Config, mut queues: Q) -> ! {
                 if link::pump(&mut stack, &mut queues) {
                     signal(slot::DRIVER);
                 }
-                report(&console, &mut stack);
+                print_events(&console, &mut stack);
                 recv(slot::ENDPOINT)
             }
-            Wake::Message(m) => reply_recv(slot::ENDPOINT, &answer(ipc, m, stack.stats())),
+            Wake::Message(m) => {
+                let report = Report {
+                    stack: *stack.stats(),
+                    queues: queues.counters(),
+                };
+                reply_recv(slot::ENDPOINT, &answer(ipc, m, &report))
+            }
         };
     }
 }

@@ -87,7 +87,7 @@ impl V4 {
 
     /// The packet, with its header checksum.
     pub fn packet(&self, payload: &[u8]) -> Vec<u8> {
-        assert!(self.options.len() % 4 == 0 && self.options.len() <= 40);
+        assert!(self.options.len().is_multiple_of(4) && self.options.len() <= 40);
         let hl = 20 + self.options.len();
         let mut p = vec![0u8; hl];
         p[0] = 0x40 | (hl / 4) as u8;
@@ -329,7 +329,7 @@ pub fn describe(frame: &[u8]) -> String {
 /// pairs.
 pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
     let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if digits.len() % 2 != 0 {
+    if !digits.len().is_multiple_of(2) {
         return Err(format!("an odd number of hex digits in {text:?}"));
     }
     let mut out = Vec::with_capacity(digits.len() / 2);

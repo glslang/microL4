@@ -11,12 +11,14 @@
 //! it a transmit buffer per frame; every frame it takes is counted once,
 //! as handled or as one drop reason ([`Stats`]), one input sends at most
 //! three frames, and nothing it does loops on what the network sends.
-//! Everything here is pure, uses nothing but `core`, and is host-tested
+//! The stack is pure, uses nothing but `core` and the frame queues' `Mac`
+//! ([`ethernet::Mac`] is `libsys::frames::Mac`), and is host-tested
 //! against golden frames (`user/net/golden/`) and proptests.
 //!
-//! [`link`] is net's side of the frame queues it shares with its driver:
-//! [`link::Queues`] is what [`link::pump`] needs of them, one signal's
-//! work, host-tested against a model of the queues. [`run`], the loop,
+//! [`link`] is net's side of the frame queues it shares with its driver,
+//! `libsys::frames::Net`: [`link::start`] and [`link::pump`], one
+//! signal's work, host-tested against the driver's side of the same
+//! queues, and [`link::Report`], its answer to root. [`run`], the loop,
 //! exists only on the user target, where the root task starts it in a
 //! VSpace and CSpace of its own with the capabilities [`slot`] lists,
 //! bound to notification NN, which its driver signals with `FRAMES`.

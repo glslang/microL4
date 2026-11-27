@@ -8,7 +8,7 @@
 //! is resolved or pending; with no timer nothing expires, and the least
 //! recently used entry is replaced first.
 
-use crate::ethernet::Mac;
+use crate::ethernet::{Mac, mac_at};
 use crate::ipv4::Ip;
 
 /// The body for Ethernet and IPv4: 8 bytes of header, two MACs and two
@@ -52,9 +52,9 @@ impl Packet {
             && (op == REQUEST || op == REPLY);
         ok.then(|| Packet {
             op,
-            sha: Mac::read(&body[8..14]),
+            sha: mac_at(&body[8..14]),
             spa: Ip::read(&body[14..18]),
-            tha: Mac::read(&body[18..24]),
+            tha: mac_at(&body[18..24]),
             tpa: Ip::read(&body[24..28]),
         })
     }

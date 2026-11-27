@@ -18,8 +18,8 @@
 //!   a ones' complement sum makes impossible;
 //! - the ARP cache against a model of its replacement and merge rules.
 
+use std::vec;
 use std::vec::Vec;
-use std::{format, vec};
 
 use proptest::prelude::*;
 use proptest::sample::select;
@@ -516,8 +516,7 @@ proptest! {
         let mut wire = Wire::new();
         stack.input(&learn, &mut wire);
         wire.take();
-        let mut ident = 1u16;
-        for d in &datagrams {
+        for (ident, d) in (1u16..).zip(&datagrams) {
             let mut l4 = udp(src, US, d.sport, 7, &d.payload, d.checksum);
             l4.extend_from_slice(&d.trailer);
             let v4 = V4 { ident: d.ident, options: d.options.clone(), ..V4::new(src, US, 17) };
@@ -536,7 +535,6 @@ proptest! {
                 .packet(&udp(US, src, 7, d.sport, &d.payload, true));
             let expect = padded(eth(peer_mac, MAC, 0x0800, &reply));
             prop_assert_eq!(sent, vec![expect]);
-            ident += 1;
         }
         let s = stack.stats();
         prop_assert_eq!(s.udp_received, datagrams.len() as u64);
@@ -602,8 +600,7 @@ fn a_changed_header_byte_is_never_answered() {
                 let valid = header_valid(&p, p.len());
                 assert!(
                     !valid,
-                    "byte {at} = {v:#04x} left a header that verifies: {}",
-                    format!("{p:02x?}")
+                    "byte {at} = {v:#04x} left a header that verifies: {p:02x?}"
                 );
                 let mut s = base.clone();
                 s.input(&eth(MAC, GW_MAC, 0x0800, &p), &mut wire);

@@ -3,7 +3,6 @@
 //! scenarios match, the echo service's reply, and `link`'s start and pump
 //! over a model of the frame queues.
 
-use std::collections::VecDeque;
 use std::string::ToString;
 use std::vec::Vec;
 use std::{format, vec};
@@ -12,7 +11,10 @@ use proptest::prelude::*;
 
 use super::wire::{arp, eth, ones_sum};
 use crate::checksum::{self, Sum};
-use crate::link::{self, Link, LinkError, Queues, Up};
+use libsys::frames::{self, Driver, LinkError, Net};
+use libsys::mem::Ram;
+
+use crate::link::{self, Report, Up};
 use crate::{
     Config, ConfigError, Echo, Endpoint, Event, Ip, MAX_FRAME, Mac, NET_STATS, Reply, Service,
     Stack, Stats, echo,
@@ -315,7 +317,7 @@ fn the_texts_root_and_the_scenarios_match() {
         assert!(!Stats::NAMES[i + 1..].contains(a), "{a} twice");
         assert!(!Stats::TEXTS[i].contains(','), "{}", Stats::TEXTS[i]);
     }
-    assert!(Stats::WORDS < libsys::proto::MAX_WORDS);
+    const { assert!(Stats::WORDS < libsys::proto::MAX_WORDS) };
     assert_eq!(
         Event::Gateway {
             ip: Ip::new(10, 0, 2, 2),
@@ -340,10 +342,6 @@ fn the_texts_root_and_the_scenarios_match() {
     assert_eq!(
         echo::LISTENING,
         format!("echo: listening on UDP port {}", echo::PORT)
-    );
-    assert_eq!(
-        LinkError::Mac(Mac::BROADCAST).to_string(),
-        "net: the driver's MAC ff:ff:ff:ff:ff:ff is not unicast"
     );
 }
 
@@ -389,140 +387,87 @@ fn a_reply_is_one_datagram_of_at_most_1472_bytes() {
     assert_eq!(<Echo as Service>::PORT, 7);
 }
 
-/// The frame queues as net sees them, with the driver's side done by the
-/// test.
-#[derive(Default)]
-struct Model {
-    link: Option<Link>,
-    /// Receive buffers net has given the driver.
-    rx_given: usize,
-    /// `RX_FILLED`.
-    rx: VecDeque<Vec<u8>>,
-    /// Transmit buffers net owns, and those on `TX_FREE`.
-    tx_owned: usize,
-    tx_returned: usize,
-    /// `TX_FILLED`.
-    tx: Vec<Vec<u8>>,
-    pushed: bool,
+/// Zeroed memory for the queues: what their layout uses.
+fn ram() -> Ram {
+    Ram::new(frames::layout::END)
 }
 
-impl Queues for Model {
-    fn link(&mut self) -> Option<Link> {
-        self.link
-    }
-
-    fn give_receive_buffers(&mut self) {
-        assert_eq!(self.rx_given, 0, "the receive buffers given twice");
-        self.rx_given = 128;
-        self.pushed = true;
-    }
-
-    fn reclaim(&mut self) {
-        self.tx_owned += core::mem::take(&mut self.tx_returned);
-    }
-
-    fn receive(&mut self, frame: &mut [u8; MAX_FRAME]) -> Option<usize> {
-        let f = self.rx.pop_front()?;
-        frame[..f.len()].copy_from_slice(&f);
-        self.rx_given += 1;
-        self.pushed = true;
-        Some(f.len())
-    }
-
-    fn can_transmit(&self) -> bool {
-        self.tx_owned > 0
-    }
-
-    fn transmit(&mut self, frame: &[u8]) -> bool {
-        if self.tx_owned == 0 {
-            return false;
-        }
-        self.tx_owned -= 1;
-        self.tx.push(frame.to_vec());
-        self.pushed = true;
-        true
-    }
-
-    fn take_pushed(&mut self) -> bool {
-        core::mem::take(&mut self.pushed)
-    }
-}
-
-fn link_up() -> Model {
-    Model {
-        link: Some(Link {
-            mac: MAC,
-            mtu: 1500,
-            up: true,
-        }),
-        tx_returned: 128,
-        ..Model::default()
-    }
+/// The driver's side, started with `mac`.
+fn driver(ram: &Ram, mac: Mac) -> Driver<&Ram> {
+    let mut d = Driver::new(ram);
+    d.start(frames::Link::new(mac, true));
+    assert!(d.end_batch());
+    d
 }
 
 #[test]
-fn start_checks_the_link_and_asks_for_the_gateway() {
-    let mut q = Model::default();
+fn start_reads_the_link_and_asks_for_the_gateway() {
+    let r = ram();
+    let mut n = Net::new(&r);
     assert_eq!(
-        link::start(Config::QEMU, &mut q).err(),
-        Some(LinkError::NotReady)
+        link::start(Config::QEMU, &mut n).err(),
+        Some(LinkError::NotReady(0))
     );
     for bad in [Mac::ZERO, Mac::BROADCAST, Mac([0x33, 0x33, 0, 0, 0, 1])] {
-        let mut q = link_up();
-        q.link.as_mut().unwrap().mac = bad;
+        let r = ram();
+        let _d = driver(&r, bad);
+        let mut n = Net::new(&r);
         assert_eq!(
-            link::start(Config::QEMU, &mut q).err(),
-            Some(LinkError::Mac(bad))
+            link::start(Config::QEMU, &mut n).err(),
+            Some(LinkError::BadMac(bad))
         );
-        assert_eq!(q.rx_given, 0);
     }
-    // Before net takes back the transmit buffers it owns none: start's
-    // request is dropped and counted, and no frame is lost silently.
-    let mut q = link_up();
-    let stack = link::start(Config::QEMU, &mut q).unwrap();
-    assert_eq!(q.rx_given, 128);
-    assert!(q.tx.is_empty());
-    assert_eq!(stack.stats().tx_full, 1);
-    // With them, the request goes out.
-    let mut q = link_up();
-    q.reclaim();
-    let stack = link::start(Config::QEMU, &mut q).unwrap();
-    assert_eq!(q.tx.len(), 1);
-    assert_eq!(&q.tx[0][..6], &[0xFF; 6]);
+    let r = ram();
+    let mut d = driver(&r, MAC);
+    let mut n = Net::new(&r);
+    let stack = link::start(Config::QEMU, &mut n).unwrap();
+    assert_eq!(stack.mac(), MAC);
+    assert!(n.end_batch());
+    // The driver has every receive buffer, and the request for the
+    // gateway, padded to 60 bytes.
+    assert_eq!(d.reclaim(), 128);
+    let mut out = [0u8; MAX_FRAME];
+    assert_eq!(d.take_tx(&mut out), Some(60));
+    assert_eq!(&out[..6], &[0xFF; 6]);
+    assert_eq!(&out[38..42], &[10, 0, 2, 2]);
+    assert_eq!(d.take_tx(&mut out), None);
     assert_eq!(stack.stats().arp_sent, 1);
-    assert!(q.take_pushed());
 }
 
 #[test]
-fn a_pump_takes_a_batch_and_answers_it() {
-    let mut q = link_up();
-    q.reclaim();
-    let mut stack = link::start(Config::QEMU, &mut q).unwrap();
-    q.tx.clear();
-    q.tx_returned = 1;
-    q.take_pushed();
-    // The gateway's reply, then 200 requests from it for the stack.
+fn a_pump_answers_a_full_queue() {
+    let r = ram();
+    let mut d = driver(&r, MAC);
+    let mut n = Net::new(&r);
+    let mut stack = link::start(Config::QEMU, &mut n).unwrap();
+    n.end_batch();
+    let mut out = [0u8; MAX_FRAME];
+    assert!(d.take_tx(&mut out).is_some());
+    // The gateway's reply, then 127 requests from it for the stack: every
+    // receive buffer.
     let us = [10, 0, 2, 15];
     let gw = [10, 0, 2, 2];
-    q.rx.push_back(eth(MAC.0, GW_MAC, 0x0806, &arp(2, GW_MAC, gw, MAC.0, us)));
+    d.deliver(&eth(MAC.0, GW_MAC, 0x0806, &arp(2, GW_MAC, gw, MAC.0, us)))
+        .unwrap();
     let request = eth([0xFF; 6], GW_MAC, 0x0806, &arp(1, GW_MAC, gw, [0; 6], us));
-    for _ in 0..200 {
-        q.rx.push_back(request.clone());
+    for _ in 0..127 {
+        d.deliver(&request).unwrap();
     }
-    assert!(link::pump(&mut stack, &mut q));
-    // 128 frames: the ping, then 127 replies.
-    assert_eq!(q.rx.len(), 73);
+    assert!(d.end_batch());
+    assert!(link::pump(&mut stack, &mut n));
     assert_eq!(stack.stats().frames_in, 128);
-    assert_eq!(q.tx.len(), 128);
+    // The ping, then 127 ARP replies: every transmit buffer.
+    let mut sent = Vec::new();
+    while let Some(len) = d.take_tx(&mut out) {
+        sent.push(out[..len].to_vec());
+    }
+    assert_eq!(sent.len(), 128);
+    assert_eq!(&sent[0][12..14], &[8, 0]);
+    assert!(sent[1..].iter().all(|f| f[12..14] == [8, 6] && f[21] == 2));
     assert_eq!(stack.stats().ping_sent, 1);
     assert_eq!(stack.stats().arp_answered, 127);
-    // The driver returns nothing: the next batch has no buffers.
-    q.tx_owned = 0;
-    assert!(link::pump(&mut stack, &mut q));
-    assert_eq!(q.rx.len(), 0);
-    assert_eq!(stack.stats().tx_full, 73);
     // An empty pump pushes nothing.
-    assert!(!link::pump(&mut stack, &mut q));
+    assert!(!link::pump(&mut stack, &mut n));
     assert_eq!(
         stack.event(),
         Some(Event::Gateway {
@@ -531,6 +476,66 @@ fn a_pump_takes_a_batch_and_answers_it() {
         })
     );
     assert_eq!(stack.event(), None);
+    let q = n.counters();
+    assert_eq!((q.received, q.sent, q.bad, q.dropped), (128, 129, 0, 0));
+}
+
+#[test]
+fn with_no_transmit_buffer_the_stack_drops_and_counts() {
+    let r = ram();
+    let mut d = driver(&r, MAC);
+    let mut n = Net::new(&r);
+    let mut stack = link::start(Config::QEMU, &mut n).unwrap();
+    n.end_batch();
+    let us = [10, 0, 2, 15];
+    let gw = [10, 0, 2, 2];
+    // The driver takes no frame to send, so it returns no transmit buffer:
+    // net's 128 go to the request at the start, the ping once the first
+    // request resolves the gateway, and 126 replies; the last is dropped.
+    let request = eth([0xFF; 6], GW_MAC, 0x0806, &arp(1, GW_MAC, gw, [0; 6], us));
+    for _ in 0..127 {
+        d.deliver(&request).unwrap();
+    }
+    assert!(link::pump(&mut stack, &mut n));
+    assert_eq!(stack.stats().ping_sent, 1);
+    assert_eq!(stack.stats().tx_full, 1);
+    for _ in 0..10 {
+        d.deliver(&request).unwrap();
+    }
+    assert!(
+        link::pump(&mut stack, &mut n),
+        "the receive buffers go back"
+    );
+    assert_eq!(stack.stats().tx_full, 11);
+    assert_eq!(stack.stats().frames_out, 128);
+    assert_eq!(stack.stats().arp_answered, 137);
+    assert_eq!(
+        n.counters().dropped,
+        0,
+        "net never asks for a buffer it lacks"
+    );
+}
+
+#[test]
+fn nets_report() {
+    let mut w = [0u64; Report::WORDS];
+    for (i, x) in w.iter_mut().enumerate() {
+        *x = 7 + i as u64;
+    }
+    let r = Report::from_words(w);
+    assert_eq!(r.to_words(), w);
+    assert_eq!(r.stack.frames_in, 7);
+    assert_eq!(r.queues.signals, 7 + 40);
+    assert_eq!(Report::WORDS, 41);
+    const { assert!(Report::WORDS <= libsys::proto::MAX_WORDS) };
+    let text = Report::default().to_string();
+    assert!(text.contains(", 0 datagrams echoed,"), "{text}");
+    assert!(
+        text.ends_with(
+            "; queues: 0 frames sent, 0 received, 0 buffers reclaimed, 0 frames dropped, 0 bad entries, 0 signals"
+        ),
+        "{text}"
+    );
 }
 
 #[test]
