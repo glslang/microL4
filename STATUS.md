@@ -1,5 +1,5 @@
 # Status
-Current milestone: M8 · Framebuffer, terminal emulator and TUI, done on QEMU: the golden-screen host tests pass and the `tui` scenario's three screendumps match their goldens pixel for pixel; both fresh reviewers signed off, a third re-checked the fix round, and the red team's one low finding is fixed. The owner's M8 Hyper-V check passed all three runs (2026-11-27): the TUI drawn and driven through the named pipe, its screens equal to the goldens at RGB 565, and write-combining about 360 times faster than uncached. It also found COM1 output lost on Hyper-V: a few bytes of one root line in each of two `m8-release` runs. The first diagnosis, a stale THRE interrupt, was refuted by the re-run (0 stale THREs, 5 bytes still lost), so the cause is open (see Open issues). Next: decide whether to chase that in M8 or in M9's Hyper-V check, then merge PR #9 and start M9.
+Current milestone: M8 · Framebuffer, terminal emulator and TUI, done on QEMU: the golden-screen host tests pass and the `tui` scenario's three screendumps match their goldens pixel for pixel; both fresh reviewers signed off, a third re-checked the fix round, and the red team's one low finding is fixed. The owner's M8 Hyper-V check passed all three runs (2026-11-27): the TUI drawn and driven through the named pipe, its screens equal to the goldens at RGB 565, and write-combining about 360 times faster than uncached. It also found COM1 output lost on Hyper-V: a few bytes of one root line in each of two `m8-release` runs. The first diagnosis, a stale THRE interrupt, was refuted by the re-run (0 stale THREs, 5 bytes still lost), so the cause is open (see Open issues). The owner chose to merge M8 and chase the loss in M9. Next: merge PR #9, then M9.
 
 ## Done
 - [x] M0 · Bootstrap and tooling (PR #1, merged 2026-10-29)
@@ -36,8 +36,7 @@ Current milestone: M8 · Framebuffer, terminal emulator and TUI, done on QEMU: t
 ## Next
 - [x] The M8 Hyper-V check (owner, 2026-11-27): all three runs reached `TEST PASS`; the results are under "Hyper-V checks".
 - [x] Re-run `m8-release` on Hyper-V (owner, 2026-11-27): `TEST PASS`, `0 stale THREs`, and 5 bytes lost from `root: extra BootInfo frames: slots 16-16, 1` (it read `sl6-16, 1`). The loss is not a stale THRE.
-- [ ] COM1 output loss on Hyper-V: tell Hyper-V's FIFO depth from the named pipe, for example with a run whose `uart` writes 1-byte bursts (see Open issues).
-- [ ] M9 · Networking (PLAN.md), with a Hyper-V check.
+- [ ] M9 · Networking (PLAN.md), with a Hyper-V check. First, the COM1 output loss on Hyper-V (see Open issues), as the owner decided on 2026-11-27: add a command-line option that caps `uart`'s burst (for example `uart.burst=1`), with host tests, and have M9's Hyper-V check run `test=release` with burst 1 and burst 15, two runs each. Lines whole with burst 1 but cut with 15 means Hyper-V's FIFO holds fewer bytes after THRE than `uart` writes; cut either way points at the named pipe.
 
 ## Open issues
 - **Never run anywhere:** the x2APIC-to-xAPIC handover. Both firmwares hand over in xAPIC mode, so only a host test covers it.
