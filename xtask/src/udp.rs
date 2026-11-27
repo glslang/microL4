@@ -40,13 +40,17 @@ pub struct Limits {
     pub idle: Duration,
     /// It ends after this long in all.
     pub total: Duration,
+    /// Once every datagram is answered, it listens this much longer, so a
+    /// duplicate of the last echo still fails it.
+    pub grace: Duration,
 }
 
 impl Limits {
-    /// A scenario's: 5 s with no echo, 30 s in all.
+    /// A scenario's: 5 s with no echo, 30 s in all, then 500 ms more.
     pub const SCENARIO: Limits = Limits {
         idle: Duration::from_secs(5),
         total: Duration::from_secs(30),
+        grace: Duration::from_millis(500),
     };
 }
 
@@ -249,6 +253,21 @@ pub fn exchange(
             report.sent += 1;
         }
         if report.echoed == count {
+            // Every datagram answered: listen `grace` longer, so an echo
+            // that trails the last one (a duplicate) is still checked.
+            let until = (Instant::now() + limits.grace).min(deadline);
+            loop {
+                let now = Instant::now();
+                if now >= until {
+                    break;
+                }
+                socket.set_read_timeout(Some(until - now))?;
+                match socket.recv_from(&mut buf) {
+                    Ok((n, from)) => report.take(&buf[..n], from),
+                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    Err(e) => return Err(e),
+                }
+            }
             report.end = End::Answered;
             return Ok(report);
         }
@@ -425,6 +444,7 @@ mod tests {
     const SHORT: Limits = Limits {
         idle: Duration::from_millis(800),
         total: Duration::from_secs(20),
+        grace: Duration::from_millis(300),
     };
 
     fn far() -> Instant {
@@ -526,6 +546,23 @@ mod tests {
         );
     }
 
+    /// A duplicate of the last outstanding echo arrives after every
+    /// datagram is answered; the grace period still sees it.
+    #[test]
+    fn a_duplicate_of_the_last_echo_fails() {
+        for count in [1, 8, 20] {
+            let (r, _) = run(Peer::Twice(count - 1), count, Limits::SCENARIO);
+            assert_eq!((r.echoed, r.end), (count, End::Answered), "{count}");
+            let want = format!("a second echo of datagram {}", count - 1);
+            assert_eq!(r.problems(), [want.as_str()], "{count}");
+            assert_eq!(
+                r.failure().unwrap(),
+                format!("udp_echo {count}: {want}"),
+                "{count}"
+            );
+        }
+    }
+
     #[test]
     fn a_duplicate_fails() {
         let (r, _) = run(Peer::Twice(7), 20, Limits::SCENARIO);
@@ -593,6 +630,7 @@ mod tests {
         let limits = Limits {
             idle: Duration::from_millis(300),
             total: Duration::from_secs(20),
+            grace: Duration::from_millis(300),
         };
         let start = Instant::now();
         let fake = Fake::start(Peer::Slow(1000), 2);
@@ -613,6 +651,7 @@ mod tests {
         let limits = Limits {
             idle: Duration::from_secs(5),
             total: Duration::from_millis(700),
+            grace: Duration::from_millis(300),
         };
         let fake = Fake::start(Peer::Slow(100), 1000);
         let r = exchange(fake.addr, 1000, limits, far()).unwrap();

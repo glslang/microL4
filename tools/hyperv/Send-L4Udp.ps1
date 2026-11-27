@@ -116,18 +116,28 @@ try {
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     # When the last datagram came back, or the start, in milliseconds.
     $last = 0
+    # Once every datagram is answered: when listening for a trailing echo
+    # (a duplicate of the last one) ends.
+    $graceEnd = $null
     while ($true) {
         while ($sent -lt $Count -and $sent - $echoed -lt 8) {
             [void] $client.Send($payloads[$sent], $payloads[$sent].Length, $target)
             $sent++
         }
-        if ($echoed -eq $Count) { break }
-        $now = $clock.ElapsedMilliseconds
-        $idle = $last + 5000 - $now
-        $total = 30000 - $now
-        if ($idle -le 0) { $end = 'after 5 s with no echo'; break }
-        if ($total -le 0) { $end = 'after 30 s in all'; break }
-        $wait = [Math]::Min($idle, $total)
+        if ($echoed -eq $Count) {
+            # Every datagram answered: listen 500 ms more, so a duplicate of
+            # the last echo is still seen.
+            if ($null -eq $graceEnd) { $graceEnd = $clock.ElapsedMilliseconds + 500 }
+            $wait = $graceEnd - $clock.ElapsedMilliseconds
+            if ($wait -le 0) { break }
+        } else {
+            $now = $clock.ElapsedMilliseconds
+            $idle = $last + 5000 - $now
+            $total = 30000 - $now
+            if ($idle -le 0) { $end = 'after 5 s with no echo'; break }
+            if ($total -le 0) { $end = 'after 30 s in all'; break }
+            $wait = [Math]::Min($idle, $total)
+        }
         if (-not $client.Client.Poll([int] ($wait * 1000), [System.Net.Sockets.SelectMode]::SelectRead)) { continue }
         $from = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
         $echo = $client.Receive([ref] $from)
