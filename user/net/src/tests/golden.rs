@@ -285,7 +285,12 @@ fn bless(case: &Case, result: &Run) {
 fn compare(case: &Case, result: &Run) -> String {
     let mut report = String::new();
     for (i, step) in case.steps.iter().enumerate() {
-        let what = step.head.last().map_or("", String::as_str).trim();
+        let what = step
+            .head
+            .iter()
+            .find(|l| !value(l).is_empty())
+            .map_or("", String::as_str)
+            .trim();
         if step.outs != result.outs[i] {
             let _ = writeln!(report, "  step {} `{what}`: frames differ", i + 1);
             let _ = writeln!(report, "    expected:");

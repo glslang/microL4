@@ -1,0 +1,4 @@
+# 13 bytes are one short of an Ethernet header.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 52540012 34565255 0a000202 08  # 13 bytes
+stats: frames_in=1 eth_short=1

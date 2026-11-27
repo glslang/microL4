@@ -1,0 +1,6 @@
+# A body one byte short.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: ffffffffffff 020000000003 0806  # EtherType 0x0806; 41 bytes
+    00010800 06040001 02000000 00030a00
+    02030000 00000000 0a0002
+stats: frames_in=1 arp_malformed=1

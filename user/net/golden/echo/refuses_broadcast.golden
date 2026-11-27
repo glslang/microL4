@@ -1,0 +1,10 @@
+# No echo to 255.255.255.255: no amplification.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: ffffffffffff 52550a000202 0800  # 10.0.2.2 > 255.255.255.255, id 4660: UDP 40000 > 7, 7 bytes; 49 bytes
+    45 00 0023 1234 4000 40 11 1c95 0a000202 ffffffff
+    9c40 0007 000f a346
+    616d706c 696679
+stats: frames_in=2 arp_learnt=1 udp_refused=1

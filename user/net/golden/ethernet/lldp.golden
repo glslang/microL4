@@ -1,0 +1,9 @@
+# LLDP (0x88CC) to its multicast MAC is another destination first.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 0180c200000e 52550a000202 88cc  # EtherType 0x88cc; 44 bytes
+    00000000 00000000 00000000 00000000
+    00000000 00000000 00000000 0000
+stats: frames_in=2 arp_learnt=1 eth_not_ours=1

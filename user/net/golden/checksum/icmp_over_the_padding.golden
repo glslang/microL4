@@ -1,0 +1,12 @@
+# ICMP's checksum covers the message, not the frame's padding: one
+# computed over a padding byte too fails.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 525400123456 52550a000202 0800  # 10.0.2.2 > 10.0.2.15, id 4660: ICMP echo request, id 0x1234 seq 1, 1 bytes; 44 bytes
+    45 00 001d 1234 4000 40 01 109c 0a000202 0a00020f
+    08 00 c4c9 1234 0001
+    21
+    01
+stats: frames_in=2 arp_learnt=1 icmp_checksum=1

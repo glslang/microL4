@@ -1,0 +1,20 @@
+# 64 bytes of 0xff: every word carries.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 525400123456 52550a000202 0800  # 10.0.2.2 > 10.0.2.15, id 4660: UDP 40000 > 7, 64 bytes; 106 bytes
+    45 00 005c 1234 4000 40 11 104d 0a000202 0a00020f
+    9c40 0007 0048 4b06
+    ffffffff ffffffff ffffffff ffffffff
+    ffffffff ffffffff ffffffff ffffffff
+    ffffffff ffffffff ffffffff ffffffff
+    ffffffff ffffffff ffffffff ffffffff
+out: 52550a000202 525400123456 0800  # 10.0.2.15 > 10.0.2.2, id 1: UDP 7 > 40000, 64 bytes; 106 bytes
+     45 00 005c 0001 4000 40 11 2280 0a00020f 0a000202
+     0007 9c40 0048 4b06
+     ffffffff ffffffff ffffffff ffffffff
+     ffffffff ffffffff ffffffff ffffffff
+     ffffffff ffffffff ffffffff ffffffff
+     ffffffff ffffffff ffffffff ffffffff
+stats: frames_in=2 frames_out=1 arp_learnt=1 udp_received=1 udp_echoed=1

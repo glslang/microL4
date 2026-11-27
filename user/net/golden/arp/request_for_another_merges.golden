@@ -1,0 +1,20 @@
+# RFC 826's merge: a sender already in the cache, here pending with an
+# echo reply waiting, is updated by any ARP packet, one for another
+# address included, and the waiting packet goes out.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 020000000003 0800  # 10.0.2.3 > 10.0.2.15, id 4660: ICMP echo request, id 0x1234 seq 1, 16 bytes; 58 bytes
+    45 00 002c 1234 4000 40 01 108c 0a000203 0a00020f
+    08 00 a27f 1234 0001
+    61626364 65666768 696a6b6c 6d6e6f70
+out: ffffffffffff 525400123456 0806  # ARP request: who has 10.0.2.3? tell 10.0.2.15; 60 bytes
+     0001 0800 06 04 0001 525400123456 0a00020f 000000000000 0a000203
+     00000000 00000000 00000000 00000000
+     0000
+in: ffffffffffff 020000000003 0806  # ARP request: who has 10.0.2.4? tell 10.0.2.3; 42 bytes
+    0001 0800 06 04 0001 020000000003 0a000203 000000000000 0a000204
+out: 020000000003 525400123456 0800  # 10.0.2.15 > 10.0.2.3, id 1: ICMP echo reply, id 0x1234 seq 1, 16 bytes; 60 bytes
+     45 00 002c 0001 4000 40 01 22bf 0a00020f 0a000203
+     00 00 aa7f 1234 0001
+     61626364 65666768 696a6b6c 6d6e6f70
+     0000
+stats: frames_in=2 frames_out=2 arp_sent=1 icmp_answered=1 arp_not_ours=1

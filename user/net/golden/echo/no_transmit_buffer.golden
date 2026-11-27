@@ -1,0 +1,21 @@
+# With no transmit buffer free the echo is dropped and counted.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+tx: 0
+in: 525400123456 52550a000202 0800  # 10.0.2.2 > 10.0.2.15, id 4660: UDP 40000 > 7, 4 bytes; 46 bytes
+    45 00 0020 1234 4000 40 11 1089 0a000202 0a00020f
+    9c40 0007 000c 6b9a
+    6c6f7374
+tx: any
+in: 525400123456 52550a000202 0800  # 10.0.2.2 > 10.0.2.15, id 4660: UDP 40000 > 7, 5 bytes; 47 bytes
+    45 00 0021 1234 4000 40 11 1088 0a000202 0a00020f
+    9c40 0007 000d 0b9e
+    666f756e 64
+out: 52550a000202 525400123456 0800  # 10.0.2.15 > 10.0.2.2, id 2: UDP 7 > 40000, 5 bytes; 60 bytes
+     45 00 0021 0002 4000 40 11 22ba 0a00020f 0a000202
+     0007 9c40 000d 0b9e
+     666f756e 64
+     00000000 00000000 00000000 00
+stats: frames_in=3 frames_out=1 arp_learnt=1 udp_received=2 udp_echoed=1 tx_full=1
