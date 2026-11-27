@@ -577,12 +577,43 @@ word:
 mapping, with the same checks, and flushes the page. An ELF loader maps a
 segment writable, fills it, then remaps it read-execute. `Frame_Unmap`
 removes the mapping and flushes the page; on an unmapped capability it does
-nothing. `Frame_GetAddress` returns the physical address, for DMA; any
-frame capability may ask, as in seL4. It is built in M9; until then its
-label returns `IllegalOperation`. A table's `Unmap` detaches it and then
+nothing. A table's `Unmap` detaches it and then
 empties it: every child capability becomes unmapped and every entry and
 back-reference is cleared; then CR3 is reloaded. On an unmapped, empty
 structure it does nothing.
+
+`Frame_GetAddress` returns the physical address of the frame's first byte,
+for DMA. Any Frame capability may ask, RAM or device, 4 KiB or 2 MiB, mapped
+or not and whatever its rights, as seL4's `X86PageGetAddress`
+(`performPageGetAddress`, `src/arch/x86/kernel/vspace.c`); it reads the
+capability, never the frame. It is built in M9; until then its label returns
+`IllegalOperation`. What DMA needs from it:
+
+- **The address a device uses.** Without an IOMMU, a guest physical address
+  is the bus address: a virtio device that has not negotiated
+  `VIRTIO_F_ACCESS_PLATFORM` takes it as is, and a VMBus GPADL lists guest
+  page numbers, the address shifted right by 12.
+- **No other cache type.** DMA buffers are RAM frames mapped `WriteBack`, the
+  only type a RAM frame takes: a PCI device's DMA on x86 snoops the caches,
+  and Hyper-V's host reads and writes guest RAM coherently (both from
+  memory), so no flush invocation and no uncached RAM mapping is needed.
+  Ordering between the driver's stores and the device is the driver's, with
+  ordinary fences.
+- **Contiguity.** A 2 MiB frame is physically contiguous, for a driver that
+  needs more than 4 KiB in one piece. M9's do not: each part of a split
+  virtqueue at QEMU's default queue size, 256, fits a 4 KiB frame
+  (descriptors 4,096 bytes, driver ring 518, device ring 2,054; virtio 1.2,
+  from memory), and a GPADL lists any pages, so a 2 MiB frame only saves
+  slots and calls for netvsc's receive and send buffers.
+- **No revocation of DMA.** A frame's rights bound only CPU mappings: a
+  driver can give its device the address of a frame it may map read-only.
+  Nothing the kernel does, deleting a frame's last capability or revoking
+  its untyped included, stops a device or the host writing the page, which
+  may by then hold a kernel object. A driver stops its device's DMA
+  (virtio's reset; VMBus's channel close and GPADL teardown) before it lets
+  frames go, and root revokes a driver's memory only after that, or after
+  the run has ended; this is the trust model of [MSI (M9) and the trust
+  model](#msi-m9-and-the-trust-model).
 
 ### Deletion
 
@@ -730,6 +761,7 @@ hides both (PLAN.md), so the host model below checks them.
 | PCID on by default, ASID = PCID (`KernelSupportPCID`, `makeCR3`) | PCID off | no ASIDs to tag with; correctness first on one core ([ADR 0005](adr/0005-paging-back-references.md)) |
 | Page 0 may be mapped (no lower bound in `decodeX86FrameInvocation`) | `USER_MIN` = `0x1000` | null pointers always fault |
 | Deleting a VSpace invalidates its ASID and calls `setVMRoot` (`deleteASID`); the PML4's entries stay, and every capability mapped under it keeps its stale (ASID, vaddr) until it is unmapped or deleted | switches CR3 to the kernel PML4 directly if it is loaded, and marks the PDPT capabilities named by back-references 0 to 255 unmapped; lower levels keep their entries, as orphans | no ASIDs; L3 |
+| `X86PageGetAddress` returns the physical address of any frame, device or RAM, in MR0 (`performPageGetAddress`, `src/arch/x86/kernel/vspace.c`) | `Frame_GetAddress` the same | DMA needs it; without an IOMMU no narrower rule could be enforced ([Open questions](#open-questions)) |
 | IOMMU and VT-x mappings: `X86PageMapIO`, `X86PageMapEPT`, IO page tables and EPT structures (`CONFIG_IOMMU`, `CONFIG_VTX`; `object-api-arch.xml`) | none | no IOMMU or VT-x in v0 ([Kernel objects](#kernel-objects)); device DMA is unchecked, recorded for M10 brief 7 (PLAN.md) |
 
 ## Boot
@@ -953,7 +985,9 @@ so CPtr `n` names slot `n` (seL4 `create_root_cnode`). Slots 0 to 15 are fixed
 same object, null where microL4 has none, and on Hyper-V the Hypervisor
 capability in slot 12 and the SynIC message and event-flag frames in slots 13
 and 14. All three are null elsewhere, before M9, when an M9 privilege is missing,
-and when the firmware locked the hypercall MSR to a page outside `.hvcall`; the kernel then prints why. From
+when the firmware locked the hypercall MSR to a page outside `.hvcall`, and
+when the hypercall MSR does not read back enabled at `.hvcall` ([Hypercalls
+(M9)](#hypercalls-m9)); the kernel then prints why. From
 slot 16 come the second BootInfo frame, the paging structures, the image
 frames and the untyped, then empty slots. An 8 MiB span plus the three pages
 after it needs at most 2 PDPTs, 2 PDs and 6 PTs, and 16 + 1 + 10 + 2048 + 448
@@ -3862,18 +3896,65 @@ an ancestor (its untyped, say) deletes that capability as a descendant first.
 
 ### MSI (M9) and the trust model
 
-`GetMSI` returns address `0xFEE0_0000 | (boot APIC ID << 12)` and data =
-vector, fixed delivery, edge (from memory; check in M9 against the SDM), which
-the driver writes into its MSI capability or MSI-X entry. One vector per call:
-multi-message MSI is not offered; MSI-X covers virtio-net. No PCI identity is
-recorded: without an IOMMU nothing could check it.
+`GetMSI` takes the lowest free device vector, as every issue does, and
+returns its IRQ, the message address `0xFEE0_0000 | (boot APIC ID << 12)` and
+the message data `0x30 + irq`, the vector. That is the SDM's x86 message
+format ("Message Signalled Interrupts", from memory) as FreeBSD's
+`INTEL_ADDR` and `INTEL_DATA` build it (`sys/x86/x86/msi.c`): address bits
+31:20 `0xFEE`, bits 19:12 the destination's xAPIC ID (bits 31:24 of the
+boot CPU's local APIC ID register), bit 3 (redirection hint) and bit 2
+(destination mode) 0, so physical destination to the boot CPU, the upper 32
+bits 0; data bits 7:0 the vector, bits 10:8 000 (fixed delivery), bit 14
+(level) 0, which an edge message ignores, and bit 15 (trigger mode) 0, edge.
+The data fits MSI's 16-bit Message Data register as well as MSI-X's 32-bit
+one. Being edge-triggered, its EOI broadcasts nothing to the I/O APICs, and a
+second message before the first is taken merges into its IRR bit, so the
+local APIC holds at most one pending and one in service per vector.
+
+The driver writes the pair into its device unchanged (FreeBSD's
+`pci_write_msix_entry` and `pci_enable_msi_method`, `sys/dev/pci/pci.c`, for
+the PCI Local Bus specification's MSI and MSI-X capabilities, whose fields
+FreeBSD's `pcireg.h` names; the specification itself was not read):
+
+- MSI-X: the table lies in the memory BAR that the low 3 bits of the
+  capability's Table Offset/BIR dword (offset 4) name, at the offset its
+  bits 31:3 give. Entry `i`, 16 bytes at `table + 16 * i`, is the address's
+  low dword, its high dword (0), the data and the vector control word, whose
+  bit 0 masks the entry. The driver maps the BAR page that holds its entries
+  `Uncached`, writes the three dwords with 32-bit stores, clears the entry's
+  mask bit, and sets MSI-X Enable (Message Control bit 15) with Function Mask
+  (bit 14) clear.
+- MSI: Message Address at capability offset 4; with the 64-bit bit (Message
+  Control bit 7) the upper address at 8 and the data at 12, else the data at
+  8; Multiple Message Enable (bits 6:4) left 0; then MSI Enable (bit 0).
+- Either way the function needs Bus Master (Command bit 2), since a message
+  is a memory write by the device, and enabling MSI or MSI-X turns its INTx
+  off. The kernel routes no INTx anyway ([Tables and
+  validation](#tables-and-validation)).
+
+One vector per call: multi-message MSI is not offered. MSI-X covers
+virtio-net, which can take one vector for configuration changes and one per
+queue: its common configuration's `msix_config` and `queue_msix_vector` hold
+an MSI-X table index, not a CPU vector, and read back `0xFFFF` (`NO_VECTOR`)
+when the device could not take it (virtio 1.2, the PCI transport, from
+memory). `GetMSI`, `GetISA`, `GetIOAPIC` and `GetSint` draw from the same 192
+vectors; when none is free an issue fails with `RevokeFirst` and changes
+nothing, and the vector comes back when the last handler capability is
+deleted. Root holds IRQControl, so only root can run them out. No PCI
+identity is recorded: without an IOMMU nothing could check it. The kernel
+never masks an MSI; a driver can set its own MSI-X entry's mask bit, and the
+device holds a message raised meanwhile in its pending-bit array until the
+entry is unmasked (PCI, from memory).
 
 Trust model: DMA is as strong as the kernel, since a driver that programs a
 device's DMA can read and write all memory. MSI is no weaker: an
 MSI is a DMA write to `0xFEEx_xxxx`, so a driver that can program MSI can send
 any vector with any delivery mode, including NMI, INIT and `#MC`'s vector, and
-stop the machine. Both are accepted for drivers the root task trusts, and
-recorded for M10 brief 7.
+stop the machine. Write access to a function's configuration space is no
+weaker either: it sets Bus Master and moves the function's BARs, so giving a
+driver only its own function's 4 KiB keeps it from other devices' registers,
+not from the machine. All three are accepted for drivers the root task
+trusts, and recorded for M10 brief 7.
 
 ### Where the code lives
 
@@ -3923,6 +4004,7 @@ both Remote IRR paths, with QEMU's I/O APIC at version `0x20` and, in the
 | Each vector in `0x30`-`0xEF` belongs to at most one source; no other vector is issued | an entry's vector is its index plus `0x30` (`irq::vector`, host test `irq_n_is_vector_0x30_plus_n`), and an issue takes the lowest free entry (`IrqTable::lowest_free`) or fails with `RevokeFirst` (host test `with_every_vector_taken_an_issue_is_revoke_first`); the IRQ table's proptest, whose model allocates the same way | M7 |
 | An IRQ node slot holds only a notification capability with the Write right and never names a deleted notification | `SetNotification`'s checks before any change (host test `irq_handler_errors_in_order`); `irq::check` at every kernel exit of the host tests and the proptest; the bound capability is a derivation-list child or sibling like any copy (host test `set_notification_copies_the_capability_into_the_irq_node_as_cnode_copy_would`), so it keeps its notification alive and goes with the handler (host tests `rebinding_the_last_capability_to_a_notification_finalises_it`, `deleting_the_handler_deletes_the_irq_nodes_capability_and_may_finalise_its_notification`); host test `revoking_a_bound_notifications_original_empties_the_irq_node_slot`, where a revoke of the bound capability's original deletes the IRQ node's copy and the next interrupt is lost; `test=redteam-irq`, where revoking the untyped of the bound notification N deletes N and the IRQ node's copy, and a notification N2 retyped at N's address gets no signal in 200 ms of the PIT's interrupts and Acks until the handler is bound to it | M7 |
 | Deleting the last IRQHandler masks its source, empties its IRQ node slot and frees its vector | `irq::finalise` and `irq::after_delete` through the kernel's hooks; host tests `deleting_the_last_handler_unbinds_masks_keeping_vector_and_trigger_and_frees_the_irq`, `revoking_irq_control_deletes_every_handler` and `a_freed_vector_reissued_elsewhere_never_hears_the_old_pin`; the IRQ table's proptest, which checks after every step that every pin without an entry is masked; `test=irq`, where a deleted ISA IRQ 4 is issued again as IRQ 0, a copy keeps it issued and revoking IRQControl deletes both handlers | M7 |
+| A SINT is unmasked only while an IRQHandler for it exists, with the vector of that handler's IRQ, AutoEOI and polling off; an MSI's vector is reserved exactly while its handler exists, and the kernel writes nothing to any PCI device | `GetSint` writes SINTn once, after every check has passed, the destination slot's included, and `after_delete` sets its mask bit; `GetMSI` programs nothing; `core::irq`'s host tests with a model SynIC that counts SINT writes, and the IRQ table's proptest extended to SINTs and MSIs | M9 |
 | Between two Acks an I/O APIC pin delivers at most three interrupts: two, plus one the local APIC already holds when the mask lands | `irq::deliver`'s `pending` and `masked`; host tests `an_edge_pin_stays_open_for_the_first_edge_and_masks_on_the_second_before_ack`, `the_local_apic_may_hold_a_third_interrupt_when_the_mask_lands` and `a_level_pin_is_masked_on_delivery_and_refires_at_ack_while_asserted`; the IRQ table's proptest, which fails an edge pin's fourth interrupt or a level pin's second between two Acks (its random sequences reach two; the third only in the host test); `test=irq`, where a fourth edge with no Ack signals nothing; `test=redteam-irq`'s PIT storm, about 18.6 kHz of edges on GSI 2, whose polls may find at most three signals in 200 ms with no Ack and in 20 ms after each of ten Acks (runs have found 1, and 1 or 2 per Ack). The PIT at its highest rate is not driven | M7 |
 | No pin is unmasked with Remote IRR set | Two writes unmask a pin. Issue's `ProgramRte` comes only after `l4core::irq`'s `MaskRte`, then `CheckRemoteIrr` (`ioapic::perform` reads the entry and answers from its Remote IRR bit), `ClearRemoteIrr` if it is set and `CheckRemoteIrr` again, which refuses the issue with `RevokeFirst` if it is still set; from `MaskRte` on the I/O APIC sends nothing on the pin, so nothing sets Remote IRR between. Ack's `UnmaskRte` does not look at Remote IRR: it relies on the interrupt path, `arch::irq::handle`, which EOIs every device vector after `deliver` and before the kernel exits, with EOI-broadcast suppression off (`apic::SVR_VALUE`, host test `svr_error_and_timer_values`), so a level delivery's Remote IRR is clear before any Ack can run; a level pin deleted with a delivery pending keeps its vector, so that delivery's EOI clears it too. Tested: `FakeIoApic` counts every write that unmasks a level entry with Remote IRR set, which must stay 0 after every step of the host tests and the proptest, whose sequences strand Remote IRRs; host tests `issue_clears_a_stale_remote_irr_through_the_eoi_register_from_version_0x20`, `below_version_0x20_issue_clears_a_stale_remote_irr_by_toggling_the_trigger`, `a_remote_irr_that_stays_set_is_revoke_first_and_the_pin_stays_masked`, `a_level_pin_is_masked_on_delivery_and_refires_at_ack_while_asserted` and `a_level_interrupt_pending_at_deletion_is_dropped_and_its_eoi_clears_remote_irr`, the only test with a delivery pending at the deletion; `test=irq`, where an Ack with the level line high signals again (so the Ack found Remote IRR clear), and a level handler deleted after its delivery and EOI, the line still high, is issued again; `test=irq_stale`, which strands a level pin's Remote IRR (its entry's vector changed between delivery and EOI) and then issues the pin, with QEMU's I/O APIC at version `0x20` and, in the `irq_stale_0x11` scenario, at `0x11` (`-global ioapic.version=0x11` through `qemu_args:`; QEMU accepts only those two, from memory). The EOI register is written only on an I/O APIC whose version, read and kept by `ioapic.rs`'s `IoApic`, is `0x20` or later | M7 |
 | Every fixed interrupt is EOI'd exactly once: `0x30`-`0xFE` always, `0x20`-`0x2F` only when its ISR bit is set, `0xFF` never | `l4core::apic::needs_eoi` (host test `every_fixed_interrupt_is_eoied_once`), asked once per interrupt by `arch::irq::handle`, after `deliver` for a device vector, which writes no EOI itself; the `ticks` scenario and, from M7, `irq` and `console`, whose device interrupts keep arriving | M3, M7 |
@@ -3944,8 +4026,8 @@ both Remote IRR paths, with QEMU's I/O APIC at version `0x20` and, in the
 | The destination slot is looked up before `GetIOAPIC`'s I/O APIC, pin, level and polarity are checked (`Arch_decodeIRQControlInvocation`) | Arguments, then the source and vector, then the destination slot | One order for every invocation in the range ([Conventions](abi.md#conventions-1)) |
 | `lookupTargetSlot` checks the destination's root before its depth (`lookupSlotForCNodeOp`, `src/kernel/cspace.c`), so a root that is not a CNode with a depth of 0 is `FailedLookup` (`InvalidRoot`) | The depth first: that case is `RangeError(1, 64)` (`l4core::invoke::destination`, for IRQControl and IOPortControl alike; host test `irq_control_errors_in_order`, its case "depth 0, a root that is no CNode") | The order [Conventions](abi.md#conventions-1) lists, as `Untyped_Retype` checks `node_depth` before the root ([Memory and retype](#memory-and-retype)) |
 | PIC mode with `IRQControl_Get` for ISA IRQs (`Arch_checkIRQ`) | I/O APIC only; PIC always masked | Both platforms have an I/O APIC |
-| `GetMSI` takes PCI bus, device, function and handle | Takes no source; returns address and data | Unchecked without an IOMMU; spares drivers the APIC ID |
-| IOSpace and IOPageTable objects drive the VT-d IOMMU, with a master IOSpace capability minted per PCI device (`io.tex`, "I/O Space") | No IOMMU objects; a driver that can program DMA or MSI is trusted with the machine | Neither target gives the guest an IOMMU by default (q35 without `intel-iommu`; Hyper-V, from memory); PLAN.md records DMA as a known limitation (M10 brief 7) |
+| `GetMSI` takes PCI bus, device, function and handle and a user-chosen vector, records the first four unchecked ("until we support msi interrupt remapping through vt-d we ignore the vector and trust the user", `Arch_decodeIRQControlInvocation`) and returns nothing, so the user composes the message | Takes no source; picks the vector and returns the address and data | Unchecked without an IOMMU; spares drivers the APIC ID and the vector map |
+| IOSpace and IOPageTable objects drive the VT-d IOMMU, with a master IOSpace capability minted per PCI device (`io.tex`, "I/O Space"); with no DMAR table, or `disable_iommu`, boot finds no IOMMU unit (`num_drhu` 0, `try_boot_sys` in `src/arch/x86/kernel/boot_sys.c`) and DMA goes unchecked there too (`intel-vtd.c`, from memory) | No IOMMU objects; a driver that can program DMA or MSI is trusted with the machine | Neither target gives the guest an IOMMU by default (q35 without `intel-iommu`; Hyper-V, from memory); PLAN.md records DMA as a known limitation (M10 brief 7) |
 | xAPIC or x2APIC at build time (`KernelLAPICMode`, `src/arch/x86/config.cmake`); an xAPIC kernel refuses to boot if the firmware left x2APIC on (`apic_enable`, `src/arch/x86/kernel/xapic.c`) | xAPIC only; x2APIC left on is turned off through the disabled state | One path, run on every boot; a firmware that hands over in x2APIC still boots ([Open questions](#open-questions)) |
 | DPL 3 interrupt gates for `#BP` and for vectors `int_trap_min` (158, or 160 with SMP) to 255 (`init_idt_entry`, `src/arch/x86/64/kernel/vspace.c`); 158/160-254 become unknown system calls (`c_handle_interrupt`, `src/arch/x86/c_traps.c`) | Only `#BP` is DPL 3 | `syscall` is the only entry for system calls |
 | Every exception vector from ring 3, 17, 21, 29 and 30 included, becomes a user fault (`handleUserLevelFault`, `c_traps.c`) | 9, 15, 17 and 20 to 31 panic from either ring | They cannot occur here; only an injected MSI reaches them, and such a driver can already stop the machine with an NMI |
@@ -4066,7 +4148,7 @@ with neither, the kernel panics. The same windows measure the TSC.
 | RSDP, XSDT (RSDT) | table addresses | panic: no MADT |
 | MADT | LAPIC address (the header's, or the first Local APIC Address Override's), `PCAT_COMPAT`, I/O APICs, interrupt source overrides | panic |
 | HPET | MMIO base (system-memory address space only) | no HPET, as on q35 with `hpet=off` and on Hyper-V (checked at the M3 Hyper-V check); also when the base is 0 or the 1 KiB register block crosses a page |
-| MCFG | ECAM ranges for M9 | no PCI for user space, as on Hyper-V; also when the entry area is not a whole number of 16-byte entries |
+| MCFG | ECAM ranges for M9: each entry's base (bus 0's, even when its start bus is higher), segment and bus range, into BootInfo's `InterruptInfo.ecam`; an entry with a reversed bus range or a region past `2^64` is dropped with a warning | no PCI for user space, as on Hyper-V; also when the entry area is not a whole number of 16-byte entries |
 
 The FADT and AML are not read: no ACPI shutdown and no PCI INTx routing
 (`_PRT`), so PCI drivers use MSI, as virtio-net can.
@@ -4127,8 +4209,48 @@ whole MSI window `0xFEE0_0000`-`0xFEEF_FFFF`, each I/O APIC page and the HPET
 page never become device untyped (M4) and are reached only through the device
 window: a user LAPIC could EOI, send INIT to its own CPU or retune the timer,
 and a user HPET could send FSB interrupt messages anywhere. ECAM stays device
-untyped; root should give each driver only its own function's 4 KiB of
-configuration space.
+untyped, and so do the BARs the firmware assigned, wherever they lie below
+`2^phys_addr_bits`, above the direct map included, unless a rule of [What
+each physical page becomes](#what-each-physical-page-becomes) keeps a page
+out; the kernel assigns no BAR.
+
+How root reaches PCI (M9), with nothing more from the kernel than BootInfo
+and device untyped:
+
+1. An `Ecam` entry gives function `(bus, device, function)`'s 4 KiB of
+   configuration space at `base + (bus << 20 | device << 15 | function <<
+   12)`, for buses `start_bus` to `end_bus`.
+2. Root finds the device untyped in `untyped_list` that cover that range.
+   The kernel checks nothing about PCI, so a range no device untyped covers
+   whole (one sharing a 2 MiB page with RAM, say) is unusable, and root
+   checks before it enumerates.
+3. Retype takes memory from an untyped's watermark up
+   ([Retype](#retype)), so root reaches an offset by first retyping what lies
+   below it into child device untyped, as seL4's users do, then retypes 4 KiB
+   frames; a 2 MiB frame maps two buses at once for enumeration. Device
+   memory is never cleared, so this writes nothing to the devices.
+4. It maps them `Uncached`: the PAT's strong UC (index 3), which overrides
+   whatever the MTRRs say, so a 64-bit BAR that the firmware's MTRRs leave
+   write-back is still reached uncached (SDM, "Memory Types", from memory).
+   No other attribute is needed: configuration space, virtio's registers and
+   the MSI-X table are uncached MMIO, and `WriteCombining` stays the
+   framebuffer's. A device frame cannot be mapped `WriteBack`.
+5. Root gives each driver only its own function's 4 KiB of configuration
+   space and the pages of its BARs, which keeps it from other devices, not
+   from the machine ([MSI (M9) and the trust
+   model](#msi-m9-and-the-trust-model)).
+
+| | QEMU q35 | Hyper-V Generation 2 |
+| --- | --- | --- |
+| PCI | one ECAM range, `0xe0000000`, buses 0 to 255 (the q35 dump) | no MCFG, so `ecam_count` is 0 and there is no PCI (the M3 Hyper-V check) |
+| Device interrupts for M9 | MSI-X through `GetMSI`; no INTx, since nothing reads `_PRT` | SINT 2 through `GetSint` |
+| Hypervisor capability, slots 12 to 14 | null: TCG never reports `Hv#1` | present with the five privileges and an enabled hypercall page |
+| DMA addresses | `Frame_GetAddress` of RAM frames; no IOMMU | the same, as GPADL page numbers |
+
+Hyper-V's virtual PCI for assigned devices, a PCI bus offered over VMBus,
+would need its own VMBus protocol and interrupt hypercalls the Hypervisor
+capability does not offer (Linux's `pci-hyperv`, from memory); nothing
+planned uses it.
 
 ### The timer
 
@@ -4228,7 +4350,8 @@ before reading them); `AccessSynicRegs` (EAX 2), `AccessHypercallMsrs` (EAX 5),
 `AccessVpIndex` (EAX 6), `PostMessages` (EBX 4) and `SignalEvents` (EBX 5) for
 M9. The kernel touches a synthetic MSR only if its privilege bit is set, so no
 request can make it fault on one. The Hypervisor capability exists only if all
-five M9 bits are set and the hypercall page can be `.hvcall`. Otherwise
+five M9 bits are set and the hypercall page enables at `.hvcall`, which the
+kernel reads back ([Hypercalls (M9)](#hypercalls-m9)). Otherwise
 slots 12, 13 and 14 are null, no SynIC is set up, `GetSint` returns
 `IllegalOperation`, and the boot log says why.
 
@@ -4259,19 +4382,73 @@ nor locked.
 
 ### Hypercalls (M9)
 
-The kernel writes `HV_X64_MSR_GUEST_OS_ID` (`0x4000_0000`), replacing any value
-the firmware left, then
-enables the hypercall page (TLFS `hypercall-interface.md`): the 4 KiB
-page-aligned `.hvcall` section in the kernel's text, mapped read-execute,
-never mapped for user space and named by no capability. Hypercall
-input lives in a page-aligned kernel BSS page, ordinary RAM as the TLFS
-requires. `PostMessage` (code `0x005C`) builds its 256-byte block there:
-connection ID, reserved zero, message type, payload size, 240 payload bytes
-(`HvCallPostMessage.md`). `SignalEvent` (code `0x005D`) is a fast hypercall
-with `rdx` = `connection | flag << 32` (`HvCallSignalEvent.md`). `arch/` calls
-the page with `rcx` = input value, `rdx` = input address or fast input, `r8`
-= 0, declares `rax`, `rcx`, `rdx` and `r8` clobbered, uses no XMM register,
-and returns `rax` bits 0-15 to the caller in MR0 with label `NoError`.
+With the five M9 privileges, once step 5 has turned the firmware's leftovers
+off and before the SynIC frames are laid out, the kernel sets hypercalls up
+as the TLFS's "Establishing the Hypercall Interface" lists
+(`hypercall-interface.md`) and as FreeBSD's `hyperv_init` and
+`hypercall_page_setup` do (`sys/dev/hyperv/vmbus/hyperv.c`,
+`x86/hyperv_x86.c`):
+
+1. It writes `HV_X64_MSR_GUEST_OS_ID` (`0x4000_0000`) =
+   `0x8000_0000_0000_0000`, replacing any value the firmware left. The
+   TLFS's step 3 writes it only if it is zero, but the firmware's identity
+   is stale once it has exited, and FreeBSD (and Linux, from memory) write
+   theirs unconditionally. The value follows the TLFS's encoding for open
+   source systems: bit 63 set; bits 62:56 the OS type, which Microsoft
+   allocates (Linux 1, FreeBSD 2, Xen 3, Illumos 4) and has allocated no
+   value for microL4, so 0; the OS ID (55:48), version (47:16) and build
+   (15:0) 0, since the kernel has no release numbers. The TLFS needs only a
+   non-zero value before the page will enable ([ADR
+   0029](adr/0029-hypercall-page-read-back.md)).
+2. It writes `HV_X64_MSR_HYPERCALL` with the physical page number of
+   `.hvcall` in bits 63:12, the enable bit, and bits 11:2 as read (RsvdP:
+   "preserved on writes"). `.hvcall` is the 4 KiB page-aligned section in
+   the kernel's text, mapped read-execute, never mapped for user space and
+   named by no capability; it holds `int3`s until the hypervisor overlays
+   it, and nothing writes it (a write to the overlay is `#GP`).
+3. It reads the MSR back. If the enable bit reads 0, as the TLFS says it
+   does when no guest OS identity was accepted, nothing calls the page:
+   there is no Hypervisor capability and no SynIC, slots 12 to 14 are null,
+   and the boot log says why ([ADR 0029](adr/0029-hypercall-page-read-back.md)).
+
+Hypercall input lives in a page-aligned kernel BSS page, ordinary RAM and
+not an overlay page, as the TLFS requires, and the kernel passes its guest
+physical address (the image's physical base plus the page's offset), so the
+block is 8-byte aligned and crosses no page. `PostMessage` (input value
+`0x005C`: memory-based, no rep count, no variable header) writes its whole
+256-byte block there on every call: connection ID, reserved zero, message
+type, payload size, the payload, and zeros to the end of the 240 payload
+bytes (`HvCallPostMessage.md`). `SignalEvent` (input value `0x1_005D`, the
+fast bit 16 set) passes its 8 bytes in `rdx` = `connection | flag << 32`,
+whose reserved bits 48 to 63 are 0 (`HvCallSignalEvent.md`): the TLFS
+allows the register convention for a call with at most two input
+parameters and no output, and Linux makes this one fast (from memory), while
+FreeBSD passes the same 8 bytes in memory (`hypercall_signal_event`). `arch/`
+calls the page with `rcx` = input value, `rdx` = input GPA or fast input,
+`r8` = 0 (neither call has output), on the kernel stack, since the page ends
+in a near return; the `asm!` claims neither `nostack` nor `nomem`, since the
+hypervisor reads the input page. For a call that is neither rep nor fast
+output the TLFS changes only `rax` ("Volatile Registers"); `arch/` declares
+`rax`, `rcx`, `rdx` and `r8` clobbered all the same, uses no XMM register,
+and returns `rax` bits 0-15, the `HV_STATUS`, to the caller in MR0 with label
+`NoError`.
+
+The kernel's checks leave the hypervisor only these statuses to return
+(`HvCallPostMessage.md`, `HvCallSignalEvent.md`, `hv_status.md`): from both
+calls `HV_STATUS_INVALID_CONNECTION_ID` (`0x12`), `HV_STATUS_INVALID_PORT_ID`
+(`0x11`), `HV_STATUS_INVALID_VP_INDEX` (`0x0E`) and
+`HV_STATUS_INVALID_SYNIC_STATE` (`0x18`: the target's SynIC, SIM or SIEF is
+off, or for an event its SINT is masked); from `PostMessage`
+`HV_STATUS_INSUFFICIENT_BUFFERS` (`0x13`: the port's 16 guest message
+buffers are in use, so retry); from `SignalEvent` `HV_STATUS_INVALID_PARAMETER`
+(`0x05`: a flag at or above the port's flag count). `HV_STATUS_ACCESS_DENIED`
+cannot come back, since boot checked both privileges, nor
+`PostMessage`'s `INVALID_PARAMETER` (the kernel checks type and size) or the
+common input, alignment and code errors, since the kernel builds the input
+value and block. Linux retries `INVALID_CONNECTION_ID`, except on an
+`INITIATE_CONTACT`, where it means the host wants an older message
+connection, and the buffer errors (`hv_post_message`, from memory); that is
+`vmbus`'s policy, not the kernel's.
 
 ### SynIC (M9)
 
@@ -4289,15 +4466,48 @@ copy leaks 8 KiB and the pages stay enabled. After boot the kernel never reads
 or writes them: `TCB_SetIPCBuffer` refuses either frame with
 `InvalidCapability` ([Creation and
 configuration](#creation-and-configuration)), and no other kernel path reads a
-frame through a capability. SINTs stay masked until `GetSint(n)` writes SINTn =
-vector, unmasked, AutoEOI off (the TLFS recommends against it: CPUID
-`0x4000_0004` EAX bit 9), polling off, reserved bits preserved.
+frame through a capability. SINTs stay masked until `GetSint(n)` writes SINTn
+once: vector (`0x30`-`0xEF`, inside the 16 to 255 the TLFS accepts; any other
+is `#GP`), unmasked, AutoEOI off, polling off, reserved bits preserved. The
+TLFS advises against changing an unmasked SINT while interrupts may be in
+flight, and nothing does: deletion only sets the mask bit. AutoEOI stays off
+because the interrupt path EOIs every device vector exactly once
+(`l4core::apic::needs_eoi`, [Delivery](#delivery-1)), which AutoEOI would
+double; where Hyper-V sets CPUID `0x4000_0004` EAX bit 9 ("Recommend
+deprecating AutoEOI") it asks the same. FreeBSD sets AutoEOI
+(`vmbus_synic_setup`), and Linux does unless that bit is set (from memory).
 
-`vmbus` then works as FreeBSD's `vmbus.c` does on SINT 2: clear event flags
-atomically, copy the message, set its type to 0, fence, then `Eom` if
-`MessagePending` is set when read after the fence (TLFS `hv_message.md`;
-`vmbus_msg_task`). Delivery throttles itself: one message slot per SINT, and
-an event interrupt only on a clear-to-set change
+How a SynIC interrupt reaches `vmbus` without the kernel reading either page:
+the hypervisor copies a message into SINTn's slot only when the slot's type
+is 0, then raises an edge on SINTn's vector; while the slot is full, later
+messages stay queued in the hypervisor and raise nothing. An event flag set
+from clear raises the same edge. Delivery takes the IRQ table entry for that
+vector, `Sint(n)`, signals the bound notification and EOIs: the vector alone
+names the source. The TLFS lists three events after which the hypervisor
+tries to deliver the next queued message: another message queued, an EOI of
+the local APIC, and a write to EOM (`inter-partition-communication.md`). Its
+recommended handler empties the slot before the EOI, so that the EOI moves
+the queue on. microL4's interrupt path EOIs before `vmbus` runs, while the
+slot is still full, so that EOI never delivers a message, and `Eom` is what
+moves the queue: `vmbus` empties the slot, fences, and invokes `Eom` if
+`MessagePending` then reads set (TLFS `hv_message.md`: the flag may be set
+"upon message delivery or at any time afterwards"). Linux, whose interrupt
+handler EOIs before its message tasklet runs (from memory), and FreeBSD, with
+AutoEOI, rely on the same test. An edge that reaches a
+masked SINT is lost (TLFS), and one before `SetNotification` signals nothing,
+so after binding `vmbus` reads its slot and its event flags once, as every
+driver services its device once ([IRQControl and
+IRQHandler](#irqcontrol-and-irqhandler)).
+
+`vmbus` then works as FreeBSD's `vmbus.c` does on SINT 2: on each signal,
+clear event flags atomically (each 64-bit word with one locked exchange, then
+service the channels whose bits were set), then, while the slot holds a
+message, copy it, set its type to 0, fence, and `Eom` if `MessagePending` is
+set when read after the fence (`vmbus_handle_intr1`, `vmbus_msg_task`, which
+reads the slot again after each `Eom`, since the write may already have
+delivered the next message; the interrupt that delivery raises leaves a
+signal that at worst finds the slot empty). Delivery throttles itself: one
+message slot per SINT, and an event interrupt only on a clear-to-set change
 (`inter-partition-communication.md`).
 
 ### The Hypervisor capability (M9)
@@ -4326,6 +4536,21 @@ version after WS2008, which sends every channel's events on connection 2
 (`vmbus_chan.c`), and channel drivers that signal with `SignalEvent` rather
 than the shared monitor pages; `vmbus` refuses older versions.
 
+What `vmbus` and `netvsc` get from the kernel, and nothing more: the
+Hypervisor capability (slot 12) and its narrowed copies; the SIM and SIEF
+frames (slots 13 and 14), mapped write-back; an IRQHandler for SINT 2 from
+`GetSint`, bound to a notification; `Frame_GetAddress` for the guest page
+numbers of every page they share with the host (GPADLs, ring buffers,
+`INITIATE_CONTACT`'s interrupt and monitor pages); and `VpIndex` for the
+target processor those messages name. The kernel parses no VMBus message.
+
+The release kernel runs all of this unchanged: hypercalls, the SynIC,
+`GetSint`, `GetMSI` and `Frame_GetAddress` print nothing and need no UART
+code, and the disassembly check sees `.hvcall`'s `int3` filler, never the
+hypervisor's code. Only the reason for a missing Hypervisor capability is
+lost, since a release kernel prints nothing: root sees `hypervisor_vendor` 3
+with slot 12 null, and a debug kernel on the same VM says which check failed.
+
 ### Attack surface
 
 | Attack | Defence | Milestone |
@@ -4334,6 +4559,8 @@ than the shared monitor pages; `vmbus` refuses older versions.
 | A hypercall from ring 3 | The page is never mapped for user space; below CPL 0 a hypercall raises `#UD` (TLFS) | M9, M10 |
 | A channel driver posting or signalling on another channel | Restricted capabilities checked in `core::hyperv`; mint never widens; `vmbus` revokes its narrowed originals | M9 |
 | `vmbus` naming any guest page in a VMBus message (a GPADL, or `CONNECT`'s event-flag and monitor pages, FreeBSD `vmbus_reg.h`), which the host then reads and writes | Not defended: the message connection is as strong as DMA, and so is any restricted capability with `post` on it; accepted, recorded for M10 brief 8 | M10 |
+| The host writing a GPADL's pages after their frames are deleted and the memory retyped, a CNode say | Not defended in the kernel, which tracks no GPADL: `vmbus` tears a GPADL down, and a channel closes, before the frames under it go, as a DMA driver stops its device first ([`Frame_GetAddress`](#mapping)); recorded for M10 brief 8 | M9, M10 |
+| A hypercall to a page that did not enable, which would run the `int3` filler in ring 0 | The kernel reads the hypercall MSR back and makes no Hypervisor capability unless it is enabled at `.hvcall` | M9 |
 | Making the kernel read or write a SynIC page, for example as an IPC buffer | Physical addresses recorded at boot; `TCB_SetIPCBuffer` refuses them; no other path reads a frame through a capability | M9 |
 | Malformed SynIC messages | The kernel never reads the SIM or SIEF page; `vmbus` validates and is fuzzed against a mock host | M9, M10 |
 | A SynIC interrupt flood | Self-throttling delivery; constant work per interrupt | M9 |
@@ -4343,7 +4570,10 @@ than the shared monitor pages; `vmbus` refuses older versions.
 
 `core/src/hyperv.rs` holds CPUID and privilege decoding and the table of
 firmware leftovers, each with its MSR, enable bit and privilege (M3), and
-from M9 the MSR values, hypercall input value, `PostMessage` block encoder,
+from M9 the guest OS ID, the MSR values (the hypercall MSR's from its old
+value and the page, keeping bits 11:2, and whether a read-back is enabled at
+that page; SIMP, SIEFP, SCONTROL and SINTn keeping their reserved bits),
+hypercall input values, `PostMessage` block encoder,
 capability data word, permission check and message decoding; `vmbus`'s mock-host tests
 reuse the encoders. `arch/x86_64/hyperv.rs` does `rdmsr`, `wrmsr`, the
 overlay reset and the hypercall `call`.
@@ -4353,9 +4583,10 @@ overlay reset and the hypercall `call`.
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
 | No hypervisor overlay page covers untyped memory or any kernel object but its own page | overlay reset before memory reuse; a Locked hypercall page kept out of untyped and the boot region; SynIC frames outside every untyped; hypercall page in the image | M3, M4, M9 |
-| On a user's behalf the hypervisor reads or writes only the kernel's input page and the two SynIC frames | two fixed hypercalls with kernel-built input; red-team brief 8 | M9, M10 |
+| On a user's behalf the hypervisor reads or writes only the kernel's input page and the two SynIC frames, apart from the guest pages a VMBus message names, which the attack surface above accepts | two fixed hypercalls with kernel-built input; red-team brief 8 | M9, M10 |
 | A restricted Hypervisor capability acts only on its own connection and rights; mint never widens | `core::hyperv` check, host tests; capabilities model test of Mint | M9 |
 | User code can neither execute a hypercall nor touch a synthetic MSR | kernel-only hypercall page; `rdmsr`/`wrmsr` fault at CPL 3; red-team brief 8 | M9, M10 |
+| The kernel calls the hypercall page only once the hypercall MSR reads back enabled at `.hvcall`, after a non-zero guest OS ID | the set-up order in `arch/x86_64/hyperv.rs`; `core::hyperv`'s read-back decision and its host tests; no Hypervisor capability otherwise, so no invocation reaches the page | M9 |
 | The kernel never reads or writes the SIM or SIEF page after boot | recorded physical addresses; `TCB_SetIPCBuffer` refusal ([Creation and configuration](#creation-and-configuration)) and its host test; no other path reads a frame through a capability; red-team brief 8 | M9, M10 |
 | The kernel touches a synthetic MSR only with its privilege bit | `core::hyperv` feature gate, host tests | M3, M9 |
 
@@ -6456,10 +6687,10 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Does a write-combining mapping of the framebuffer take effect on Hyper-V [H10]? | A UC framebuffer works but every frame is slower | M8 Hyper-V check | Answered by the M8 Hyper-V check: yes. `fb: full clear: uncached 33276 us, write-combining 93 us`, about 360 times faster, so the PAT's WC type wins over the firmware's MTRR type for the framebuffer [H10] |
 | Can the Hyper-V check compare the screen exactly? | The QEMU check is exact; the owner's is by eye | M8 Hyper-V check | Answered by the M8 Hyper-V check: yes, at RGB 565. With the API's 4-byte header skipped, the three thumbnails taken at the native 1024×768 equal `tools/hyperv/golden/` reduced to RGB 565 at every pixel compared (all but the last two, which the first PNGs left out), so the layout is as the script assumes and nothing is scaled. The session makes the comparison from the attached screens; the script does not ([The Hyper-V check](#the-hyper-v-check)) |
 | Must `vmbus` send VMBus `UNLOAD` before `INITIATE_CONTACT` because the firmware left a connection open? | Contact fails or channels are stale if the host still sees the firmware's session | M9 | Yes, as other guests do after kexec; confirm against FreeBSD's `vmbus.c` |
-| Which value goes into `HV_X64_MSR_GUEST_OS_ID`? | The TLFS asks open-source guests for an OS type Microsoft allocates; microL4 has none | M9 | Bit 63 (open source) set, OS type 0, version 0, build = the kernel's build number |
-| Should an MSI vector be quarantined after its handler is deleted? | A device that keeps sending gives the vector's next owner spurious signals | M9 | No: drivers treat signals as hints, and an MSI-capable driver is trusted with the machine anyway |
+| Which value goes into `HV_X64_MSR_GUEST_OS_ID`? | The TLFS asks open-source guests for an OS type Microsoft allocates; microL4 has none | M9 (decided by the spec check); the M9 Hyper-V check confirms | Decided by the M9 spec check ([ADR 0029](adr/0029-hypercall-page-read-back.md)): `0x8000_0000_0000_0000`, bit 63 (open source) and every other field 0. The TLFS's open-source layout is bits 62:56 OS type (Linux 1, FreeBSD 2, Xen 3, Illumos 4 are allocated), 55:48 OS ID, 47:16 version and 15:0 build (`hypercall-interface.md`); FreeBSD writes build 0 and its `__FreeBSD_version` (`hyperv.c`). microL4 has no build number, so the old default's "build = the kernel's build number" named nothing. Any non-zero value lets the hypercall page enable, which the kernel reads back; whether Hyper-V treats OS type 0 differently in any other way is unknown, and the M9 Hyper-V check shows the page enabling with it |
+| Should an MSI vector be quarantined after its handler is deleted? | A device that keeps sending gives the vector's next owner spurious signals | M9 (answered) | Answered by the M9 spec check: no, as seL4, which makes a deleted handler's IRQ inactive at once (`deletedIRQHandler`, `src/object/interrupt.c`) and cannot mask an MSI (`maskInterrupt`, `include/plat/pc99/plat/machine/interrupt.h`). Drivers treat signals as hints, and an MSI-capable driver is trusted with the machine anyway; a driver that disables its device's MSI before deleting the handler sends none |
 | Should a narrowed Hypervisor capability cover a range of connections? | A driver with several channels needs one capability per connection | M9 | One connection per capability; mint several |
-| Should `Frame_GetAddress` need a right, or refuse device frames? | Physical addresses help Rowhammer-style attacks on real hardware, a non-goal | M9 | No, as seL4: any Frame capability |
+| Should `Frame_GetAddress` need a right, or refuse device frames? | Physical addresses help Rowhammer-style attacks on real hardware, a non-goal | M9 (answered) | Answered by the M9 spec check: no, as seL4, whose `X86PageGetAddress` answers for any frame capability, device or not (`performPageGetAddress`, `src/arch/x86/kernel/vspace.c`). A driver's own BAR frames need it no more than its RAM, but refusing them would protect nothing: the BAR addresses are in configuration space ([Mapping](#mapping)) |
 | Should the kernel check the GPADL page numbers `vmbus` posts? | Without it, posting on the VMBus message connection is as strong as DMA | M10, brief 8 | No: it would put VMBus parsing in the kernel; recorded as an accepted risk |
 | Should slice accounting be finer than a tick? | A thread that blocks just before each tick is never charged and can starve its equal-priority peers | M10, brief 9 | Accept it, as seL4's non-MCS scheduler does; the fix is a one-shot timer re-armed with the remaining slice |
 | Priority inversion | Without priority inheritance a server below its client's priority can be starved by middle-priority threads | M10, brief 9 | Accept it, as seL4 does; `root` gives every server a priority at or above all of its clients' |
