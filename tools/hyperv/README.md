@@ -161,11 +161,12 @@ At each `screendump:` the script saves the VM's screen, through Hyper-V's
 returned as `l4-<name>.rgb565`. Its documentation says only that they are
 "raw RGB 565"; the script reads them as Windows' 16-bit RGB 565 bitmaps
 are laid out (two bytes a pixel, little-endian, red in the top five bits,
-rows from the top). The pixels are the first 2 × 1024 × 768 bytes, as
-Microsoft's samples copy them; on the first M8 run the API returned 4
-bytes more, and the log line says how many came past the pixels. If a
-PNG looks scrambled, shifted sideways or its colours swapped, that guess
-is wrong: say so in the PR, and keep the `.rgb565` files. A screen
+rows from the top), which the M8 check confirmed. The buffer starts with
+a 4-byte header, so the pixels are its last 2 × 1024 × 768 bytes; the log
+line says how many header bytes it skipped. With the header skipped, the
+M8 check's three screens equal `golden/tui-*.png` reduced to RGB 565 pixel
+for pixel. If a PNG looks scrambled, shifted sideways or its colours
+swapped, say so in the PR and keep the `.rgb565` files. A screen
 the script cannot save fails the run, which still goes on to the end so
 the log is whole.
 `-ConnectAfterSeconds 20` starts the VM and opens the pipe only 20 seconds
@@ -188,9 +189,10 @@ limit starts when the reader starts, after the 20-second wait, so in
 practice when the pipe connects.
 
 Paste the three logs into the PR and attach the three screens. The screens
-must match `m8-check\golden\tui-*.png` by eye: RGB 565 keeps 5 or 6 bits a
-channel, so the colours differ slightly, but every cell's glyph and colour
-must be the golden's.
+must match `m8-check\golden\tui-*.png`: RGB 565 keeps 5 or 6 bits a
+channel, so the colours differ slightly by eye, but reduced to RGB 565 the
+two are equal pixel for pixel, which the session checks from the attached
+screens.
 
 | Run | The log must show | It settles |
 | --- | --- | --- |

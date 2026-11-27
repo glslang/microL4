@@ -178,12 +178,15 @@ function Save-L4Screen([string] $VMName, [string] $Path, [int] $Width = 1024, [i
         throw "GetVirtualSystemThumbnailImage returned $($out.ReturnValue)"
     }
     # Every byte the API returned is kept, before any check. The pixels are
-    # its first 2 x width x height bytes, as Microsoft's samples copy them;
-    # on the owner's host the API returned 4 bytes more (1,572,868 for
-    # 1024x768), which the PNG leaves out.
+    # its last 2 x width x height bytes: on the owner's host the buffer
+    # starts with a 4-byte header (1,572,868 bytes for 1024x768), and with
+    # it skipped the three M8 screens equal the goldens reduced to RGB 565
+    # pixel for pixel. Microsoft's samples, which copy from the start, are
+    # 2 pixels off.
     $data = [byte[]] $out.ImageData
     [System.IO.File]::WriteAllBytes([System.IO.Path]::ChangeExtension($Path, '.rgb565'), $data)
-    if ($data.Length -lt 2 * $Width * $Height) {
+    $skip = $data.Length - 2 * $Width * $Height
+    if ($skip -lt 0) {
         throw "GetVirtualSystemThumbnailImage gave $($data.Length) bytes, fewer than $(2 * $Width * $Height) for ${Width}x${Height} at 2 bytes a pixel"
     }
 
@@ -195,7 +198,7 @@ function Save-L4Screen([string] $VMName, [string] $Path, [int] $Width = 1024, [i
         try {
             for ($y = 0; $y -lt $Height; $y++) {
                 [System.Runtime.InteropServices.Marshal]::Copy(
-                    [byte[]] $data, [int] (2 * $Width * $y), [IntPtr]::Add($bits.Scan0, $bits.Stride * $y), [int] (2 * $Width))
+                    [byte[]] $data, [int] ($skip + 2 * $Width * $y), [IntPtr]::Add($bits.Scan0, $bits.Stride * $y), [int] (2 * $Width))
             }
         } finally {
             $bmp.UnlockBits($bits)
@@ -253,7 +256,7 @@ if ($Scenario) {
             Save-L4Screen -VMName $VMName -Path $png
             $raw = [System.IO.Path]::ChangeExtension($png, '.rgb565')
             $extra = (Get-Item -LiteralPath $raw).Length - 2 * 1024 * 768
-            "l4: screendump $($step.Text) saved as $png ($extra bytes past the pixels, kept in $raw)"
+            "l4: screendump $($step.Text) saved as $png ($extra header bytes before the pixels, kept in $raw)"
         } catch {
             if ($null -eq $scn.Unsaved) { $scn.Unsaved = "could not save screendump $($step.Text): $_" }
             "l4: screendump $($step.Text) failed: $_"
