@@ -322,9 +322,9 @@ impl Uart {
                 }
                 // A THRE interrupt is taken only if LSR still says THRE, as
                 // Linux's 8250 driver does: a device that reports THRE while
-                // the FIFO still holds bytes (Hyper-V's appears to, after a
-                // THR write) would otherwise bring a burst onto it, or
-                // release a Drain early. Stats MR9 counts them.
+                // the FIFO still holds bytes would otherwise bring a burst
+                // onto it, or release a Drain early. Stats MR9 counts them
+                // (0 on QEMU, and 0 on Hyper-V in the M8 check's re-run).
                 IIR_THRI if self.lsr(port) & LSR_THRE == 0 => {
                     self.stats.stale_thre += 1;
                     false

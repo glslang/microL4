@@ -205,7 +205,7 @@ pub struct UartStats {
     pub burst: u64,
     /// MR9 (M8): THRE interrupts found stale, IIR naming THRE while LSR
     /// said the FIFO still held bytes, which uart then ignores; for the
-    /// Hyper-V check, where one cost 6 bytes before uart checked LSR.
+    /// Hyper-V check of its 16550.
     pub stale_thre: u64,
 }
 
