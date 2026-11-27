@@ -26,8 +26,8 @@ mod net;
 
 pub use crate::frames::Mac;
 pub use net::{
-    NdisVersion, NetStats, NetvscStats, NvspVersion, VirtioFeatures, VirtioNetStats, VmbusAttach,
-    VmbusStats, VmbusVersion, virtio_feature,
+    NdisVersion, NetvscStats, NvspVersion, VirtioFeatures, VirtioNetStats, VmbusAttach, VmbusStats,
+    VmbusVersion, virtio_feature,
 };
 
 /// The most bytes one message carries.
@@ -90,7 +90,8 @@ pub mod label {
     pub const VMBUS_STATS: u64 = 0x161;
     /// `netvsc`: the counters ([`super::NetvscStats`]) (M9).
     pub const NETVSC_STATS: u64 = 0x170;
-    /// `net`: the counters ([`super::NetStats`]) (M9).
+    /// `net`: the counters, which `net` defines and words itself
+    /// (`net::link::Report`) (M9).
     pub const NET_STATS: u64 = 0x180;
 }
 

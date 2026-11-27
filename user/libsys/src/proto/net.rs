@@ -1,8 +1,8 @@
-//! The network servers' `Stats` replies and texts, and `vmbus`'s `Attach`
+//! The network drivers' `Stats` replies and texts, and `vmbus`'s `Attach`
 //! reply (`docs/design.md`, "Networking"): each reply's words, MR0 first,
 //! and the text root prints after `<server>: stats: `, which gives each
-//! counter as `<n> <what>` between commas, as `UartStats`'s does, so a
-//! scenario can match `, 100 datagrams echoed,`.
+//! counter as `<n> <what>` between commas, as `UartStats`'s does. `net`'s
+//! counters are its own (`net::link::Report`); only its label is here.
 
 use core::fmt;
 
@@ -296,128 +296,6 @@ impl fmt::Display for NetvscStats {
     }
 }
 
-stats! {
-    /// `net`'s counters, the reply to `Stats` (`0x180`): frames and what
-    /// the stack did with them, then each drop by its reason, as the
-    /// tables of `docs/design.md`, "`net`", give them. Every frame
-    /// `Stack::input` takes counts once in `frames_in` and, if it is
-    /// dropped, once under one reason.
-    pub struct NetStats {
-        /// MR0: frames `Stack::input` took.
-        frames_in,
-        /// MR1: frames the stack sent.
-        frames_out,
-        /// MR2: ARP requests for its address answered.
-        arp_answered,
-        /// MR3: ARP requests it sent.
-        arp_requests,
-        /// MR4: ARP replies it learnt from.
-        arp_learnt,
-        /// MR5: ICMP echo requests answered.
-        icmp_answered,
-        /// MR6: ICMP echo replies to its own request.
-        icmp_replies,
-        /// MR7: UDP datagrams to port 7 taken.
-        udp_received,
-        /// MR8: datagrams echoed.
-        udp_echoed,
-        /// MR9, Ethernet: frames under 14 bytes.
-        eth_short,
-        /// MR10: frames to another destination, multicast among them.
-        eth_not_ours,
-        /// MR11: frames of another EtherType, VLAN and IPv6 among them.
-        eth_type,
-        /// MR12, ARP: anything but Ethernet and IPv4, lengths 6 and 4, a
-        /// request or a reply.
-        arp_malformed,
-        /// MR13: a sender address of 0, broadcast or its own.
-        arp_sender,
-        /// MR14, IPv4: a bad version, IHL or total length.
-        ip_malformed,
-        /// MR15: a header checksum that does not verify.
-        ip_checksum,
-        /// MR16: a destination neither its address nor broadcast.
-        ip_not_ours,
-        /// MR17: a protocol neither 1 nor 17.
-        ip_protocol,
-        /// MR18: fragments, which it does not reassemble.
-        ip_fragments,
-        /// MR19: a source of 0, broadcast, multicast, its own or its
-        /// subnet's broadcast.
-        ip_source,
-        /// MR20, ICMP: other types, and echo replies it did not ask for.
-        icmp_other,
-        /// MR21: a checksum that does not verify.
-        icmp_checksum,
-        /// MR22: an echo request sent to broadcast.
-        icmp_broadcast,
-        /// MR23, UDP: a length under 8 or past the IP payload.
-        udp_malformed,
-        /// MR24: a checksum that does not verify.
-        udp_checksum,
-        /// MR25: datagrams to another port, dropped silently.
-        udp_port,
-        /// MR26: datagrams to port 7 from port 0 or 7, or to broadcast.
-        udp_refused,
-        /// MR27, resolving: waiting packets replaced by a later one to the
-        /// same address.
-        held_replaced,
-        /// MR28: packets dropped because 4 already waited.
-        held_dropped,
-        /// MR29, sending: frames dropped with no transmit buffer free.
-        tx_dropped,
-        /// MR30: bad frame-queue entries ([`crate::frames::Counters::bad`]).
-        bad_entries,
-    }
-}
-
-/// What root's `net: stats:` line shows; the `net` scenario matches `, 100
-/// datagrams echoed,` and the Hyper-V check `, 4 ICMP echo requests
-/// answered,`.
-impl fmt::Display for NetStats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = self;
-        let items: [(u64, &str); NetStats::WORDS] = [
-            (s.frames_in, "frames in"),
-            (s.frames_out, "frames out"),
-            (s.arp_answered, "ARP requests answered"),
-            (s.arp_requests, "ARP requests sent"),
-            (s.arp_learnt, "ARP replies learnt"),
-            (s.icmp_answered, "ICMP echo requests answered"),
-            (s.icmp_replies, "ICMP echo replies received"),
-            (s.udp_received, "UDP datagrams received"),
-            (s.udp_echoed, "datagrams echoed"),
-            (s.eth_short, "frames too short"),
-            (s.eth_not_ours, "frames for other addresses"),
-            (s.eth_type, "frames of other EtherTypes"),
-            (s.arp_malformed, "ARP packets malformed"),
-            (s.arp_sender, "ARP packets from bad senders"),
-            (s.ip_malformed, "IPv4 headers malformed"),
-            (s.ip_checksum, "IPv4 checksum errors"),
-            (s.ip_not_ours, "IPv4 packets for other addresses"),
-            (s.ip_protocol, "IPv4 packets of other protocols"),
-            (s.ip_fragments, "IPv4 fragments"),
-            (s.ip_source, "IPv4 packets from bad sources"),
-            (s.icmp_other, "ICMP messages ignored"),
-            (s.icmp_checksum, "ICMP checksum errors"),
-            (s.icmp_broadcast, "ICMP echo requests to broadcast"),
-            (s.udp_malformed, "UDP lengths bad"),
-            (s.udp_checksum, "UDP checksum errors"),
-            (s.udp_port, "datagrams to other ports"),
-            (s.udp_refused, "datagrams refused"),
-            (s.held_replaced, "waiting packets replaced"),
-            (s.held_dropped, "packets dropped with 4 waiting"),
-            (s.tx_dropped, "frames dropped for no buffer"),
-            (s.bad_entries, "bad queue entries"),
-        ];
-        for (i, (n, what)) in items.into_iter().enumerate() {
-            let sep = if i == 0 { "" } else { ", " };
-            write!(f, "{sep}{n} {what}")?;
-        }
-        Ok(())
-    }
-}
-
 /// `vmbus`'s reply to `Attach` (`0x160`), once `netvsc`'s channel is open:
 /// MR0 to MR7, and with it the restricted Hypervisor capability in the
 /// caller's receive slot.
@@ -500,7 +378,6 @@ impl VmbusAttach {
 mod tests {
     use super::*;
     use std::format;
-    use std::string::String;
 
     /// Distinct words, so that a field moved or dropped shows.
     fn counting<const N: usize>() -> [u64; N] {
@@ -521,22 +398,16 @@ mod tests {
         let s = NetvscStats::from_words(w);
         assert_eq!((s.nvsp, s.bad_entries), (100, 114));
         assert_eq!(s.to_words(), w);
-        let w = counting::<{ NetStats::WORDS }>();
-        let s = NetStats::from_words(w);
-        assert_eq!((s.frames_in, s.udp_echoed, s.bad_entries), (100, 108, 130));
-        assert_eq!(s.to_words(), w);
         // Every reply fits one message, past MR3 in the IPC buffers.
         assert_eq!(
             [
                 VirtioNetStats::WORDS,
                 VmbusStats::WORDS,
                 NetvscStats::WORDS,
-                NetStats::WORDS,
                 VmbusAttach::WORDS
             ],
-            [9, 9, 15, 31, 8]
+            [9, 9, 15, 8]
         );
-        const { assert!(NetStats::WORDS <= super::super::MAX_WORDS) };
     }
 
     #[test]
@@ -625,49 +496,6 @@ mod tests {
         assert!(t.starts_with("NVSP 5, NDIS 6.30, 0 receive-buffer packets, 104 frames received,"));
         assert!(t.ends_with(", 0 ignored messages, 0 bad queue entries"));
         assert!(t.contains(", 103 frames sent,"));
-    }
-
-    /// What the `net` scenario and the Hyper-V check match, each between
-    /// commas, and every counter once.
-    #[test]
-    fn net_stats_text() {
-        let s = NetStats {
-            frames_in: 108,
-            frames_out: 106,
-            icmp_answered: 4,
-            udp_received: 100,
-            udp_echoed: 100,
-            ..NetStats::default()
-        };
-        let t = format!("net: stats: {s}");
-        assert!(
-            t.starts_with("net: stats: 108 frames in, 106 frames out, 0 ARP requests answered,")
-        );
-        assert!(t.contains(", 100 datagrams echoed,"), "{t}");
-        assert!(t.contains(", 4 ICMP echo requests answered,"), "{t}");
-        assert!(t.contains(", 0 IPv4 checksum errors,"), "{t}");
-        assert!(t.ends_with(", 0 bad queue entries"));
-        // One item a word, each a number then words.
-        let items: std::vec::Vec<String> = t["net: stats: ".len()..]
-            .split(", ")
-            .map(String::from)
-            .collect();
-        assert_eq!(items.len(), NetStats::WORDS);
-        let n = NetStats::from_words(core::array::from_fn(|i| i as u64 + 1));
-        let t = format!("{n}");
-        for (i, item) in t.split(", ").enumerate() {
-            let (num, what) = item.split_once(' ').unwrap();
-            assert_eq!(num, format!("{}", i + 1), "{item}");
-            assert!(!what.is_empty() && !what.contains(','));
-        }
-        // No item's text is another's.
-        let whats: std::vec::Vec<&str> = t
-            .split(", ")
-            .map(|i| i.split_once(' ').unwrap().1)
-            .collect();
-        for (i, a) in whats.iter().enumerate() {
-            assert!(whats[i + 1..].iter().all(|b| b != a), "{a}");
-        }
     }
 
     #[test]
