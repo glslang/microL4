@@ -43,9 +43,9 @@ pub struct Counters {
     pub waits: u64,
 }
 
-/// Why the device was refused at setup. Each but [`Refused::Window`] is
-/// reported to the device with FAILED first; `virtio_net::run` panics with
-/// the reason.
+/// Why the device was refused at setup. Each but [`Refused::Window`] and
+/// [`Refused::NoReset`] is reported to the device with FAILED first;
+/// `virtio_net::run` panics with the reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
     /// A window shorter than the driver uses: a region, or the DMA frame.
@@ -156,7 +156,8 @@ impl<R: Regs, M: Memory> Driver<R, M> {
     /// 0's notify; then the frame queues' start, `TX_FREE` and the link
     /// block. Signal `net` after, if `queues.end_batch()` says so.
     ///
-    /// A device it refuses gets FAILED, and the reason is returned.
+    /// A device it refuses after its reset gets FAILED, and the reason is
+    /// returned.
     pub fn start<Q: Memory>(
         start: &Start,
         regions: Regions<R>,
@@ -191,7 +192,11 @@ impl<R: Regs, M: Memory> Driver<R, M> {
             counters: Counters::default(),
         };
         if let Err(e) = d.setup(start) {
-            d.set_status(status::FAILED);
+            // A device whose reset never showed may not be written again
+            // (4.1.4.3.2); any other is told the driver gave up (3.1.1).
+            if !matches!(e, Refused::NoReset(_)) {
+                d.set_status(status::FAILED);
+            }
             return Err(e);
         }
         queues.start(Link::new(d.mac, d.link_up));

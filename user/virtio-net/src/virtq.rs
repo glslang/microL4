@@ -7,8 +7,8 @@
 //! reaches a ring. The driver keeps its own copy of every index it writes
 //! and a map of the descriptors the device holds ([`Virtq::posted`]), and
 //! reads the device's used ring without trusting it: an element is taken
-//! only if its `id` names a descriptor the device holds, which then is the
-//! driver's again; any other is counted as bad and passed, and a used
+//! only if its `id` names a descriptor the device holds and could have
+//! seen, which then is the driver's again; any other is counted as bad and passed, and a used
 //! index more than 64 ahead of the driver's is taken as no elements and
 //! counted. So the device can make the driver neither read outside the
 //! ring nor post a descriptor twice, whatever it writes.
@@ -95,6 +95,9 @@ pub struct Virtq {
     /// Bit `i`: descriptor `i` is the device's, posted and not yet given
     /// back.
     posted: u64,
+    /// Bit `i`: descriptor `i` is posted but not yet published, so the
+    /// device cannot have seen it.
+    unpublished: u64,
     /// Whether `VIRTQ_AVAIL_F_NO_INTERRUPT` is clear.
     interrupts: bool,
     /// Where its notifications go in the notify region.
@@ -119,6 +122,7 @@ impl Virtq {
             used: 0,
             ready: 0,
             posted: 0,
+            unpublished: 0,
             interrupts: true,
             notify: 0,
         }
@@ -206,6 +210,7 @@ impl Virtq {
         mem.store16(self.ring + off::avail_entry(self.avail), id, Relaxed);
         self.avail = self.avail.wrapping_add(1);
         self.posted |= 1 << id;
+        self.unpublished |= 1 << id;
     }
 
     /// Writes the available index if anything was posted since the last
@@ -217,6 +222,7 @@ impl Virtq {
         }
         mem.store16(self.ring + off::AVAIL_IDX, self.avail, Release);
         self.published = self.avail;
+        self.unpublished = 0;
         true
     }
 
@@ -266,8 +272,11 @@ impl Virtq {
 
     /// Takes the next element [`Virtq::poll`] made ready, whatever it
     /// holds, and returns it if its `id` names a descriptor the device
-    /// holds, which is then the driver's again; any other element is
-    /// counted in `bad` and passed. `None` too once none is ready.
+    /// holds, published, which is then the driver's again; any other
+    /// element is counted in `bad` and passed, one naming a descriptor the
+    /// device never held or has given back already, or one posted again
+    /// but not yet published, as a descriptor given back twice in one
+    /// batch is. `None` too once none is ready.
     pub fn take(&mut self, mem: &impl Memory, bad: &mut u64) -> Option<Used> {
         while self.ready > 0 {
             let e = self.ring + off::used_elem(self.used);
@@ -275,7 +284,7 @@ impl Virtq {
             let len = mem.load32(e + off::USED_LEN, Relaxed);
             self.used = self.used.wrapping_add(1);
             self.ready -= 1;
-            if id < u32::from(QUEUE_SIZE) && self.posted & 1 << id != 0 {
+            if id < u32::from(QUEUE_SIZE) && (self.posted & !self.unpublished) & 1 << id != 0 {
                 self.posted &= !(1 << id);
                 return Some(Used { id: id as u16, len });
             }
