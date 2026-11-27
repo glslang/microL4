@@ -3,6 +3,7 @@
 //! Built for `cargo test` and with the `testing` feature, which `model/`
 //! uses. The kernel never enables it.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -756,7 +757,7 @@ pub enum Hypercall {
     /// `HvCallPostMessage`: the input value and the whole input block.
     Post {
         input: u64,
-        block: [u64; BLOCK_WORDS],
+        block: Box<[u64; BLOCK_WORDS]>,
     },
     /// `HvCallSignalEvent`: the input value and the fast input.
     Signal {
@@ -1057,7 +1058,7 @@ impl Hypercalls for TestKernel {
     fn post_message(&mut self, call: PostMessage) -> u16 {
         self.dev.hypercalls.push(Hypercall::Post {
             input: call.input_value(),
-            block: *call.block(),
+            block: Box::new(*call.block()),
         });
         self.dev.hv_status
     }

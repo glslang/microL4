@@ -337,7 +337,6 @@ pub fn test_msi(root: &'static RootSpace, bi: &BootInfo) -> ! {
     STEP.store(1, Ordering::Relaxed);
     set_resume_hook(msi_step);
     ctx.source.fire_fsb(address, data, TICKS);
-    drop(k);
     idle()
 }
 
@@ -413,7 +412,6 @@ fn msi_step() -> ! {
         }
         _ => {}
     }
-    drop(k);
     idle()
 }
 

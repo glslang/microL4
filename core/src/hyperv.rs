@@ -425,11 +425,14 @@ pub const SINT_POLLING: u64 = 1 << 18;
 /// is `#GP` (TLFS).
 pub const SINT_MIN_VECTOR: u8 = 16;
 
+/// A privilege's TLFS name and its test.
+pub type Privilege = (&'static str, fn(&Privileges) -> bool);
+
 /// The privileges the Hypervisor capability needs, each with its TLFS
 /// name, in the order the kernel checks them (`docs/design.md`,
 /// "Detection (M3)"): the SynIC registers, the hypercall MSRs, the VP
 /// index, and the two hypercalls.
-pub const M9_PRIVILEGES: [(&str, fn(&Privileges) -> bool); 5] = [
+pub const M9_PRIVILEGES: [Privilege; 5] = [
     ("AccessSynicRegs", Privileges::synic),
     ("AccessHypercallMsrs", Privileges::hypercall_msrs),
     ("AccessVpIndex", Privileges::vp_index),
@@ -631,11 +634,9 @@ pub fn post_message_block(
 /// mock host's tests.
 pub fn parse_post_message_block(block: &[u64; BLOCK_WORDS]) -> (u32, u32, u32, u32, [u8; 240]) {
     let mut payload = [0u8; 240];
-    for (chunk, w) in payload
-        .chunks_exact_mut(8)
-        .zip(&block[BLOCK_HEADER_WORDS..])
-    {
-        chunk.copy_from_slice(&w.to_le_bytes());
+    let chunks = payload.as_chunks_mut::<8>().0;
+    for (chunk, w) in chunks.iter_mut().zip(&block[BLOCK_HEADER_WORDS..]) {
+        *chunk = w.to_le_bytes();
     }
     (
         block[0] as u32,
@@ -935,7 +936,7 @@ mod tests {
         assert!(!hypercall_enabled_at(HVCALL, HVCALL));
         assert!(!hypercall_enabled_at(0, HVCALL));
         assert!(!hypercall_enabled_at(0xDEAD_B001, HVCALL));
-        assert!(!hypercall_enabled_at(HVCALL + 0x1000 | 1, HVCALL));
+        assert!(!hypercall_enabled_at((HVCALL + 0x1000) | 1, HVCALL));
     }
 
     #[test]
