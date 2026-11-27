@@ -7430,8 +7430,8 @@ Two directives (`xtask/src/scenario.rs`, with the exchange in
 
 | Directive | Meaning |
 | --- | --- |
-| `nic: virtio-net` | the machine gets `-netdev user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:<port>-:7` and `-device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=`, and so no default NIC. `<port>` is a free loopback UDP port xtask finds by binding and releasing it, since two scenarios may run at once; another program that takes it first fails the boot with QEMU's error. `serial.log` gets `xtask: nic virtio-net, udp 127.0.0.1:<port> to the guest's port 7`. `ipv6=off` keeps libslirp's IPv6 traffic, router advertisements among it, off the wire; `romfile=` leaves the NIC to OVMF's own `VirtioNetDxe`, which resets it at `ExitBootServices` (both from memory). `cargo xtask run --nic` adds the same with PLAN.md's port 5555, for `nc -u 127.0.0.1 5555` by hand |
-| `udp_echo: <count>` | right after an `expect:` or `next:` (a parse error otherwise), in a scenario with `nic:`; `count` from 1 to 1,000. Once that step has matched, and before any later step, xtask sends `count` datagrams from one loopback socket to the forwarded port, at most 8 unanswered at a time, the next as each echo arrives, with no retransmission, and waits for every echo: each must come from the forwarded port, equal an unanswered datagram's payload byte for byte, and answer it once. An echo of nothing outstanding, a duplicate, an altered payload or another source fails the scenario. The exchange ends when all are answered, after 5 s with no echo, after 30 s in all, or at the scenario's deadline; `serial.log` gets `xtask: udp_echo <count> to 127.0.0.1:<port>: <k> echoed`, with the missing indices when `k` is short, and a short `k` fails the scenario. Serial lines that arrive meanwhile are matched when it ends, as during a screendump |
+| `nic: virtio-net` | the machine gets `-netdev user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:<port>-:7` and `-device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=`, and so no default NIC; another value, or a second `nic:`, is a parse error. `<port>` is a free loopback UDP port xtask finds by binding and releasing it, never one the same xtask gave out before, since two scenarios may run at once (`qemu::free_udp_port`); another program that takes it first fails the boot with QEMU's error. `serial.log`'s first line is `xtask: nic virtio-net, udp 127.0.0.1:<port> to the guest's port 7`. `ipv6=off` keeps libslirp's IPv6 traffic, router advertisements among it, off the wire; `romfile=` leaves the NIC to OVMF's own `VirtioNetDxe`, which resets it at `ExitBootServices` (both from memory). With the NIC, `hello` still boots the disk first, as fast as without it (1.3 s against 1.4 s under TCG). `cargo xtask run --nic` adds the same with PLAN.md's port 5555, for `nc -u 127.0.0.1 5555` by hand; every other command refuses `--nic` |
+| `udp_echo: <count>` | right after an `expect:` or `next:` (a parse error otherwise), in a scenario with `nic:`; `count` decimal from 1 to 1,000. Once that step has matched, and before any later step, xtask sends `count` datagrams from one loopback socket to the forwarded port, at most 8 unanswered at a time, the next as each echo arrives, with no retransmission, and waits for every echo: each must come from the forwarded port, equal an unanswered datagram's payload byte for byte, and answer it once (`udp::exchange`). An echo from another source, of nothing outstanding (a datagram not sent, or bytes that begin as none does), altered (a byte or the length) or a second one fails the scenario, each logged as `xtask: udp_echo: <what>`, the first eight one by one. The exchange ends when all are answered, after 5 s with no echo, after 30 s in all, or at the scenario's deadline; `serial.log` gets `xtask: udp_echo <count> to 127.0.0.1:<port>: <k> echoed`, and when `k` is short `; missing <indices> (<n> sent; ended after 5 s with no echo)` or the other end, the indices as ranges, and a short `k` fails the scenario. A failed exchange does not end the boot: the steps after it run, so the guest's counters reach the log. Like a `send:`, it changes what the guest does, so the steps after it match from the next line on; serial lines that arrive meanwhile are matched when it ends, as during a screendump |
 
 Datagram `k`'s payload is `LENGTHS[k mod 13]` bytes, with `LENGTHS` = 8, 9,
 17, 18, 19, 64, 255, 256, 512, 952, 953, 1,471 and 1,472: bytes 0 to 3
@@ -7447,10 +7447,15 @@ OVMF lists disks before network boot options when QEMU gives no boot order
 (from memory of `BmEnumerateBootOptions`), and every scenario has booted
 with QEMU's default NIC since M0, so a NIC does not slow the boot. xtask's
 host tests: `nic:` and `udp_echo:` parsing, placement, the count's range and
-`nic:`'s requirement; and `udp.rs` against an echo thread on loopback: all
-answered, reordered (passes), one lost, one duplicated, one altered, one
-from another port, a server slower than the 5 s limit, and the payloads'
-lengths and bytes.
+`nic:`'s requirement; the matcher releasing a `udp_echo:` as it does a
+`send:`; the NIC's arguments and free ports; and `udp.rs` against a fake
+echo peer on loopback, with shorter limits where a test waits for one:
+all answered, reordered (passes), at most 8 unanswered, one lost, one
+duplicated, one altered, one cut short, one from another port, strays, a
+server slower than the idle limit, the total limit and the deadline, and
+the payloads' lengths and bytes. `Test-L4Vhdx.ps1 -Scenario` follows the
+Hyper-V scenarios, so each must parse here too (`hyperv_scenarios_parse`):
+one with `udp_echo:` carries `nic: virtio-net`, which the script ignores.
 
 ### Network scenarios
 
@@ -7546,10 +7551,15 @@ with the four scenarios it follows:
 | `release-burst1` | release | `test=release uart.burst=1 release.flood=32` | `m9-release-burst1.scenario` |
 | `release-burst15` | release | `test=release uart.burst=15 release.flood=32` | `m9-release-burst15.scenario` |
 
-The two burst images, and their scenarios, should go to the owner first, in
-a smaller artifact (`microl4-vhdx-m9-com1`), as soon as uart's cap is built:
-a lost byte can break any later check's `expect:`, and they need no M9
-kernel piece ([Order of work](#order-of-work)).
+The two burst images, and their scenarios, go to the owner first, in a
+smaller artifact of their own, `microl4-vhdx-m9-com1`, which CI builds
+from wave 0: a lost byte can break any later check's `expect:`, and they
+need no M9 kernel piece ([Order of work](#order-of-work)).
+`microl4-vhdx-m9-check` holds the networking images, `net` and `net-mnf`.
+xtask's `the_com1_runs_are_release_with_the_cap_and_the_flood` checks the
+burst scenarios, and QEMU's `release_burst1` and `release_burst15`, which
+boot the same command lines, against `m8-release` and `release` step by
+step, and CI's command lines against theirs.
 
 **The network.** The VM's adapter goes on an internal switch with a fixed
 subnet, not the Default Switch, whose NAT subnet changes when the host
@@ -7557,10 +7567,11 @@ restarts:
 
 | Script | Does |
 | --- | --- |
-| `New-L4Switch.ps1 [-SwitchName l4-net] [-Subnet 192.168.77]` | once: an internal switch, the host's `vEthernet (l4-net)` at `<subnet>.1/24`, and the VM's network adapter on it (one added if it has none) |
-| `Send-L4Udp.ps1 -Address <ip> [-Count 100]` | pings the guest 4 times (`Test-Connection`) and prints the replies; sends `Count` datagrams to `<ip>:7` with .NET's `System.Net.Sockets.UdpClient` from the host's address on the switch, with xtask's payloads, window of 8 and limits; prints `udp_echo: <n> sent, <k> echoed`, and the missing indices; prints the guest's MAC as the host's neighbour table has it (`Get-NetNeighbor`) beside the VM adapter's (`Get-VMNetworkAdapter`) |
-| `Test-L4Vhdx.ps1 -Scenario` | learns `udp_echo: <n>`: at that step, once the line above it has matched, it runs `Send-L4Udp` against the `net.ip` of the scenario's `cmdline:`, logs its lines as `l4:` lines, and fails the run if a datagram is missing |
-| `Set-L4Cmdline.ps1 -VhdxPath <vhdx> -Cmdline <text>` | for an owner whose network already uses `192.168.77.0/24`: mounts the VHDX (`Mount-VHD`), writes `\cmdline.txt` on its ESP and dismounts it, after `New-L4Switch.ps1 -Subnet` with another subnet (the Storage module's cmdlets, from memory; first run in this check) |
+| `New-L4Switch.ps1 [-SwitchName l4-net] [-Subnet 192.168.77.0/24]` | once: an internal switch, the host's `vEthernet (l4-net)` at the subnet's first address with DHCP off and no other IPv4 address, and the VM's one network adapter on it (one added, with the VM off, if it has none). `-Subnet` takes a prefix of 8 to 30; one that another of the host's networks overlaps is refused, and for a subnet other than the default the script prints the `net.ip=` and `net.gw=` words to give the images |
+| `Send-L4Udp.ps1 -Address <ip> [-Count 100]` | pings the guest 4 times (.NET's `System.Net.NetworkInformation.Ping`, the same in Windows PowerShell 5.1 and PowerShell 7, where `Test-Connection` differs) and prints the replies; sends `Count` datagrams to `<ip>:7` with .NET's `System.Net.Sockets.UdpClient` bound to the host's address on the switch, with `SIO_UDP_CONNRESET` off so an ICMP port unreachable cannot fail a receive, and xtask's payloads, window of 8, limits and checks of each echo; prints `udp_echo: <n> sent, <k> echoed`, the missing indices and each bad echo; prints the guest's MAC as the host's neighbour table has it (`Get-NetNeighbor`) beside the VM adapter's (`Get-VMNetworkAdapter`). `-Quiet` and `-PassThru` return the counts and lines instead of printing them |
+| `Test-L4Vhdx.ps1 -Scenario` | learns `udp_echo: <n>`: at that step, once the line above it has matched, it runs `Send-L4Udp` against the `net.ip` of the scenario's `cmdline:`, logs its lines as `l4:` lines, and fails the run if a datagram is missing or an echo is bad; it ignores `nic:`. A `next:` that fails fails the run, but, unlike xtask, the script goes on from the next step that is not a `next:`, so a cut flood line still leaves uart's line and `TEST PASS` in the log. `-Raw <file>` is `Read-L4Com1.ps1`'s |
+| `Read-L4Com1.ps1 -Raw <file>` | copies COM1's bytes into `<file>` as they come with .NET's `Stream.CopyToAsync`, through a 1 MiB buffer on .NET's I/O threads, with no work per line and never waiting on the script, which reads the lines back from the file as it grows and handles them as the normal reader does. The normal reader reads a line at a time, so nothing reads the pipe while it shows a line or runs a callback |
+| `Set-L4Cmdline.ps1 -VhdxPath <vhdx> -Cmdline <text>` | for an owner whose network already uses `192.168.77.0/24`: mounts the VHDX (`Mount-VHD`), gives its ESP a drive letter (`Add-PartitionAccessPath`), writes `\cmdline.txt` there as one ASCII line and dismounts it, after `New-L4Switch.ps1 -Subnet` with another subnet; the scenario's `cmdline:` and the `expect:` lines naming the addresses change to match (the Storage module's cmdlets, from memory; first run in this check) |
 
 Windows answers the guest's ARP request for `192.168.77.1`, so `net`
 learns the host's MAC; whether its firewall answers the guest's ping does
@@ -7572,21 +7583,28 @@ host's own requests.
 | --- | --- | --- | --- |
 | `net` | `-Scenario m9-net.scenario` | `cpu: hypervisor Hyper-V`; root's `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130)`; `vmbus: version 4.0` (or 3.0 or 2.4); every `vmbus: offer`, netvsc's among them; `vmbus: netvsc channel <id> open, connection <c>`; `netvsc: up: NVSP <v>, NDIS <v>, MAC 00:15:5d:...`; `net: up: 192.168.77.2/24 via 192.168.77.1`; `echo: listening on UDP port 7`; `net: gateway 192.168.77.1 is at <mac>`; the script's four ping replies and `udp_echo: 100 sent, 100 echoed`; root's stats with `, 100 datagrams echoed,` and `, 4 ICMP echo requests answered,`; `TEST PASS` | the done-when on Hyper-V; contact with no UNLOAD first; `SignalEvent` on a channel the host may monitor; the buffer sizes; the MAC Hyper-V assigned, against `Get-VMNetworkAdapter` |
 | `net-mnf` | `-Scenario m9-net-mnf.scenario` | the same | FreeBSD's monitor-page signalling; with `net`, which of the two the host takes |
-| `release-burst1` | `-Scenario m9-release-burst1.scenario`, twice | `, burst 1,`; the 32 flood lines, each whole and right after the one before | with `release-burst15`, where COM1's bytes are lost (STATUS.md's plan) |
-| `release-burst15` | `-Scenario m9-release-burst15.scenario`, twice | `, burst 15,`; the same | |
+| `release-burst1` | `-Scenario m9-release-burst1.scenario`, twice, then once more with `-Raw` | `, burst 1,`; the 32 flood lines, each whole and right after the one before | with `release-burst15`, where COM1's bytes are lost (STATUS.md's plan) |
+| `release-burst15` | `-Scenario m9-release-burst15.scenario`, twice, then once more with `-Raw` | `, burst 15,`; the same; uart's `Writes held` above 0, so the flood filled its queue | |
 
 **The flood.** With `release.flood=<n>`, 1 to 64, root prints, right after
 its summary and back to back, `n` lines `release: flood <i>/<n> ` followed
 by 52 characters, the string `0`-`9`, `a`-`z`, `A`-`P` rotated left by
-`i`: 75 bytes with CR LF, 2,400 for 32 lines, more than uart's 2,048-byte
-queue, so uart holds console's writes and keeps the FIFO fed, as root's
-summary did when M8's runs lost bytes.
+`i`, with `i` zero-padded to `n`'s width (`01/32`), so that every line of a
+flood has one length: 75 bytes with CR LF, 2,400 for 32 lines, more than
+uart's 2,048-byte queue, so uart holds console's writes and keeps the FIFO
+fed, as root's summary did when M8's runs lost bytes (`root::flood`). Any
+other value prints `release: release.flood="<v>" ignored: not a number
+from 1 to 64`, which the scenarios forbid, and no flood. The scenarios
+expect the first line and the other 31 with `next:`, each the whole line,
+and release's own line `next:` after the last, so a lost byte, a lost
+CR LF or a line between fails them.
 
-| Burst 1, two runs | Burst 15, two runs | Means | Then |
-| --- | --- | --- | --- |
-| whole | a line cut in either | Hyper-V's 16550 takes fewer than 15 bytes after it reports THRE | lower uart's burst on Hyper-V, to the largest that stays whole under `uart.burst` |
-| a line cut | any | the named pipe drops what its client has not read in time | the reader, not uart: `Read-L4Com1.ps1` reads in larger blocks or on a thread |
-| whole | whole | the flood did not bring the loss back | the M8 loss stays open; a longer flood next |
+| Burst 1, two runs | Burst 15, two runs | With `-Raw` | Means | Then |
+| --- | --- | --- | --- | --- |
+| whole | a line cut in either | burst 15 cut too | Hyper-V's 16550 takes fewer than 15 bytes after it reports THRE | lower uart's burst on Hyper-V, to the largest that stays whole under `uart.burst` |
+| any | a line cut | whole, both bursts | the normal reader fell behind, and the named pipe drops what its client has not read in time | the reader, not uart: `Read-L4Com1.ps1` reads as `-Raw` does |
+| a line cut | any | cut too | the named pipe, or Hyper-V's COM1 itself, loses bytes even with a reader that keeps up | the `.com1` files show which bytes; uart cannot help it |
+| whole | whole | whole | the flood did not bring the loss back | the M8 loss stays open; a longer flood next |
 
 ### Order of work
 
