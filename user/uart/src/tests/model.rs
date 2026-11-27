@@ -1,7 +1,7 @@
 //! A 16550 and an I/O APIC pin, as uart's host tests need them
 //! (`docs/design.md`, "Code and tests"): IIR priorities; THRE cleared by an
 //! IIR read that reports it or a THR write (with `stale_thre`, only by the
-//! IIR read, as Hyper-V's 16550 appears to behave); 16-byte FIFOs, the receive
+//! IIR read, a device some 16550 emulations may be); 16-byte FIFOs, the receive
 //! trigger and the character timeout; OE; OUT2 gating the line; a
 //! transmitter that takes a byte time per byte or empties at once as
 //! QEMU's does; a receiver that overruns as hardware does or, as QEMU's,

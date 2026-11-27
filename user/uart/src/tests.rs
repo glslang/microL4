@@ -669,11 +669,11 @@ fn random_interleavings_lose_nothing_and_never_strand_uart() {
     }
 }
 
-/// A THRE interrupt left pending by a THR write (`Dev::stale_thre`, which
-/// Hyper-V's 16550 appears to do: the M8 Hyper-V check lost 6 bytes of a
-/// line uart had written) must not bring a burst onto a FIFO that still
-/// holds bytes: uart writes one only when LSR says THRE, and counts the
-/// others (Stats MR9). The slow transmitter, since QEMU's instant one
+/// A THRE interrupt left pending by a THR write (`Dev::stale_thre`; the M8
+/// Hyper-V check first suspected Hyper-V's 16550 of it, but its re-run
+/// counted none) must not bring a burst onto a FIFO that still holds
+/// bytes: uart writes one only when LSR says THRE, and counts the others
+/// (Stats MR9). The slow transmitter, since QEMU's instant one
 /// empties the FIFO before any interrupt can go stale.
 #[test]
 fn a_stale_thre_interrupt_never_overflows_the_fifo() {
