@@ -179,7 +179,7 @@ pub fn decode(
     Ok(n)
 }
 
-/// `uart`'s counters, the reply to `Stats` as MR0 to MR8.
+/// `uart`'s counters, the reply to `Stats` as MR0 to MR9.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UartStats {
     /// MR0: interrupt signals handled.
@@ -203,11 +203,15 @@ pub struct UartStats {
     /// MR8 (M8): the transmit burst setup chose, 15 with working FIFOs
     /// and 1 without, for the Hyper-V check of its 16550.
     pub burst: u64,
+    /// MR9 (M8): THRE interrupts found stale, IIR naming THRE while LSR
+    /// said the FIFO still held bytes, which uart then ignores; for the
+    /// Hyper-V check, where one cost 6 bytes before uart checked LSR.
+    pub stale_thre: u64,
 }
 
 impl UartStats {
     /// The reply's words.
-    pub const WORDS: usize = 9;
+    pub const WORDS: usize = 10;
 
     pub const fn to_words(&self) -> [u64; Self::WORDS] {
         [
@@ -220,6 +224,7 @@ impl UartStats {
             self.writes_held,
             self.cut_short,
             self.burst,
+            self.stale_thre,
         ]
     }
 
@@ -234,17 +239,18 @@ impl UartStats {
             writes_held: w[6],
             cut_short: w[7],
             burst: w[8],
+            stale_thre: w[9],
         }
     }
 }
 
 /// What root's uart lines show; `release` expects `, burst 15` (working
-/// FIFOs) at their end.
+/// FIFOs) near their end.
 impl fmt::Display for UartStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} signals, {} bytes received, {} sent, {} THRE bursts, {} overruns, {} line errors, {} Writes held, {} routines cut short, burst {}",
+            "{} signals, {} bytes received, {} sent, {} THRE bursts, {} overruns, {} line errors, {} Writes held, {} routines cut short, burst {}, {} stale THREs",
             self.signals,
             self.received,
             self.sent,
@@ -253,7 +259,8 @@ impl fmt::Display for UartStats {
             self.line_errors,
             self.writes_held,
             self.cut_short,
-            self.burst
+            self.burst,
+            self.stale_thre
         )
     }
 }
@@ -524,12 +531,13 @@ mod tests {
             writes_held: 7,
             cut_short: 8,
             burst: 15,
+            stale_thre: 9,
         };
-        assert_eq!(s.to_words(), [1, 2, 3, 4, 5, 6, 7, 8, 15]);
+        assert_eq!(s.to_words(), [1, 2, 3, 4, 5, 6, 7, 8, 15, 9]);
         assert_eq!(UartStats::from_words(s.to_words()), s);
         assert_eq!(
             std::format!("{s}"),
-            "1 signals, 2 bytes received, 3 sent, 4 THRE bursts, 5 overruns, 6 line errors, 7 Writes held, 8 routines cut short, burst 15"
+            "1 signals, 2 bytes received, 3 sent, 4 THRE bursts, 5 overruns, 6 line errors, 7 Writes held, 8 routines cut short, burst 15, 9 stale THREs"
         );
         let t = TermStats {
             written: 1,

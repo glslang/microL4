@@ -321,11 +321,14 @@ impl Uart {
                     n > 0
                 }
                 // A THRE interrupt is taken only if LSR still says THRE, as
-                // Linux's 8250 driver does: a device that leaves the
-                // interrupt pending after a THR write (Hyper-V's appears to)
-                // would otherwise bring a burst onto a FIFO that still holds
-                // a refill's bytes, or release a Drain early.
-                IIR_THRI if self.lsr(port) & LSR_THRE == 0 => false,
+                // Linux's 8250 driver does: a device that reports THRE while
+                // the FIFO still holds bytes (Hyper-V's appears to, after a
+                // THR write) would otherwise bring a burst onto it, or
+                // release a Drain early. Stats MR9 counts them.
+                IIR_THRI if self.lsr(port) & LSR_THRE == 0 => {
+                    self.stats.stale_thre += 1;
+                    false
+                }
                 IIR_THRI if self.tx.is_empty() => {
                     if self.held == Some(Held::Drain) {
                         self.held = None;
