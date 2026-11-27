@@ -226,6 +226,8 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "--package",
             "tui",
             "--package",
+            "net",
+            "--package",
             "root",
             "--lib",
         ])
