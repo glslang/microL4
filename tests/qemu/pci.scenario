@@ -1,0 +1,27 @@
+# PCI on QEMU (M9; user/root/src/pci.rs; docs/design.md, "PCI on QEMU" and
+# "Network scenarios"). Root carves the 2 MiB device frame over bus 0's
+# ECAM out of device untyped and maps it uncached, scans q35 (the host
+# bridge, the std VGA, the NIC and ICH9's LPC, AHCI and SMBus, printed for
+# the record), finds virtio-net-pci at 00:02.0, sizes its BARs with
+# decode off, checks its modern regions and MSI-X against them, carves
+# their pages and the MSI-X table's, maps the table page and reads entry
+# 0, maps the region pages and reads num_queues and the MAC without
+# touching the device's status, prints the function's first 256 bytes as
+# OVMF left them (user/pci/tests/q35-virtio-net.cfg), unmaps
+# configuration space and the table, and prints the root CNode's slots.
+cmdline: test=pci
+exit: success
+nic: virtio-net
+expect: root: cmdline "test=pci"
+expect: pci: ecam 0xe0000000, segment 0, buses 0-255
+expect: pci: 00:02.0 1af4:1000 class 020000
+expect: pci: virtio-net at 00:02.0: 1af4:1000, subsystem 1af4:0001;
+expect: pci: virtio-net: common at BAR4+0x0, 4 KiB; notify at BAR4+0x3000, 4 KiB, notify_off_multiplier 4; device at BAR4+0x2000, 4 KiB
+expect: pci: virtio-net: MSI-X 4 vectors, table at BAR1+0x0
+expect: pci: virtio-net: MSI-X entry 0 at
+expect: pci: virtio-net: 3 queues, MAC 52:54:00:12:34:56
+expect: pci: cfg 00: f4 1a 00 10
+expect: pci: configuration space and the MSI-X table unmapped
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
+forbid: TEST FAIL

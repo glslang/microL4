@@ -46,7 +46,11 @@
 //!   through `watch` or through root's report of tui's fault on D
 //!   ([`tui`]);
 //! - `test=nofb`: with no display, root starts no terminal and still
-//!   reads its line ([`nofb`]).
+//!   reads its line ([`nofb`]);
+//! - `test=pci`: root reaches ECAM through device frames it carves,
+//!   enumerates PCI, finds the virtio-net function, sizes its BARs, checks
+//!   its regions and MSI-X, reads its MAC through the region pages it
+//!   carved, and unmaps configuration space ([`pci`]).
 //!
 //! Every test ends the run with `libsys::exit`: status 0 after `TEST
 //! PASS`, 1 after a `TEST FAIL` line, through `DebugHalt` unless the test
@@ -65,6 +69,7 @@ mod ipcntfn;
 mod irq;
 mod isolation;
 mod nofb;
+mod pci;
 mod pingpong;
 mod redteam;
 mod release;
@@ -127,6 +132,7 @@ fn main(bi: &'static BootInfo) -> ! {
         Some("term_fault") => tui::fault(bi, tui::Victim::Term),
         Some("tui_fault") => tui::fault(bi, tui::Victim::Tui),
         Some("nofb") => nofb::run(bi),
+        Some("pci") => pci::run(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
     }

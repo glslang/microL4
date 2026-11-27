@@ -9,6 +9,7 @@ members = [
     "user/fb",
     "user/libsys",
     "user/net",
+    "user/pci",
     "user/root",
     "user/term",
     "user/tui",

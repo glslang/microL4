@@ -218,6 +218,8 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "--package",
             "fb",
             "--package",
+            "pci",
+            "--package",
             "uart",
             "--package",
             "console",

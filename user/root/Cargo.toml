@@ -23,6 +23,7 @@ bench = false
 console = { path = "../console" }
 fb = { path = "../fb" }
 libsys = { path = "../libsys" }
+pci = { path = "../pci" }
 term = { path = "../term" }
 tui = { path = "../tui" }
 uart = { path = "../uart" }
