@@ -27,7 +27,8 @@ gh run download --repo glslang/microL4 --name microl4-vhdx --dir microl4-vhdx <r
 Then create the VM. It is a Generation 2 VM named `l4` with 512 MB, one vCPU
 with processor compatibility mode off, Secure Boot off, COM1 on
 `\\.\pipe\l4-com1`, and no automatic checkpoints. Pass `-SwitchName ''` if
-you have no `Default Switch`; networking is not needed until M9.
+you have no `Default Switch`; networking is not needed until M9, whose
+`New-L4Switch.ps1` moves the adapter to a switch of its own.
 
 ```powershell
 .\New-L4Vm.ps1 -VhdxPath .\microl4-vhdx\disk.vhdx
@@ -206,38 +207,104 @@ paste its error into the PR with the log, which is written all the same.
 
 ## At the M9 check
 
-First, COM1's lost bytes: each M8 `m8-release` run lost a few bytes of one
-of root's lines while root's summary flooded `uart`, though `uart` wrote
-every burst after an LSR that said THRE (`docs/design.md`, Open
-questions). The kernel command line's `uart.burst=<n>`, `n` from 1 to 15,
-caps `uart`'s burst; root prints `root: uart.burst=<n>: uart's burst capped
-at <n>` after its `root: cmdline` line, and `uart`'s line ends `burst <n>,
-<m> stale THREs`. CI builds `microl4-vhdx-m9-check`:
+### First: COM1's lost bytes
+
+Each M8 `m8-release` run lost a few bytes of one of root's lines while
+root's summary flooded `uart`, though `uart` wrote every burst after an LSR
+that said THRE (`docs/design.md`, Open questions). CI builds
+`microl4-vhdx-m9-com1` for this alone, so it can come first:
 `release-burst1/disk.vhdx` and `release-burst15/disk.vhdx` boot
-`test=release` on the release kernel with `uart.burst=1` and
-`uart.burst=15`, and beside them are `m9-burst1.scenario` and
-`m9-burst15.scenario`, `m8-release.scenario`'s steps with the cap. Run each
-twice:
+`test=release` on the release kernel with `uart.burst=1` or `uart.burst=15`
+and `release.flood=32`, and beside them are `m9-release-burst1.scenario`
+and `m9-release-burst15.scenario`. `uart.burst=<n>` caps `uart`'s burst:
+root prints `root: uart.burst=<n>: uart's burst capped at <n>` after its
+`root: cmdline` line, and `uart`'s line ends `burst <n>, <m> stale THREs`.
+`release.flood=32` makes root print, right after its summary, 32 lines
+from `release: flood 01/32 123456789abc...` to `release: flood 32/32
+wxyz...`, 75 bytes each with CR LF: 2,400 bytes, more than `uart`'s
+2,048-byte queue, so `uart` holds console's writes and keeps its FIFO fed,
+as root's summary did in M8. The scenarios expect the first flood line and
+the other 31 with `next:`, each whole, and release's own line right after
+the last; a cut line fails the run, and the script goes on from the next
+`expect:`, so the log still reaches `uart`'s line and `TEST PASS`.
+
+Run each image three times: twice with the normal reader, and once with
+`-Raw`, which copies the pipe's bytes into a file as they come, through a
+1 MiB buffer and off the script's thread, so COM1 never waits on the
+script's work per line, and reads the lines back from that file:
 
 ```powershell
-gh run download --repo glslang/microL4 --name microl4-vhdx-m9-check --dir m9-check <run-id>
+gh run download --repo glslang/microL4 --name microl4-vhdx-m9-com1 --dir m9-com1 <run-id>
 
 foreach ($burst in 1, 15) {
+    $vhdx = ".\m9-com1\release-burst$burst\disk.vhdx"
+    $scenario = ".\m9-com1\m9-release-burst$burst.scenario"
     foreach ($run in 'a', 'b') {
-        .\Test-L4Vhdx.ps1 -VhdxPath ".\m9-check\release-burst$burst\disk.vhdx" `
-            -Scenario ".\m9-check\m9-burst$burst.scenario" -LogPath "m9-burst$burst-$run.log"
+        .\Test-L4Vhdx.ps1 -VhdxPath $vhdx -Scenario $scenario -LogPath "m9-burst$burst-$run.log"
     }
+    .\Test-L4Vhdx.ps1 -VhdxPath $vhdx -Scenario $scenario -LogPath "m9-burst$burst-raw.log" `
+        -Raw "m9-burst$burst-raw.com1"
 }
 ```
 
-Paste the four logs into the PR. A scenario sees only the lines it
-expects, so a run can pass with another line cut; the session reads every
-line for missing bytes.
+Paste the six logs into the PR and attach the two `.com1` files, which
+hold every byte as it came, CR LF and escape sequences included. A scenario
+sees only the lines it expects, so a run can pass with another line cut;
+the session reads every line for missing bytes.
 
 | Run | The log must show | It settles |
 | --- | --- | --- |
-| `m9-burst1`, twice | `root: uart.burst=1: uart's burst capped at 1`; `uart`'s line with `, burst 1,`; the rest as `m8-release`; whether every line is whole | lines whole with burst 1 but cut with 15: Hyper-V's FIFO takes fewer bytes after it reports THRE than `uart` writes; cut either way: the named pipe drops what its reader has not taken. Burst 1 also writes more slowly, a THRE interrupt a byte, so whole lines with burst 1 alone do not clear a pipe that drops bytes only when its reader falls behind |
-| `m9-burst15`, twice | `root: uart.burst=15: uart's burst capped at 15`; `, burst 15,`; the rest as `m8-release`; whether every line is whole | the control: `uart` writes as in the M8 re-run, so whether the loss repeats |
+| `m9-burst1-a`, `-b` | `root: uart.burst=1: uart's burst capped at 1`; the 32 flood lines, each whole and right after the one before; `uart`'s line with `, burst 1,`; the rest as `m8-release`; whether every line is whole | with `m9-burst15`: lines whole with burst 1 but cut with 15 mean Hyper-V's FIFO takes fewer bytes after it reports THRE than `uart` writes; cut either way, the named pipe drops what its reader has not taken. Burst 1 also writes more slowly, a THRE interrupt a byte |
+| `m9-burst15-a`, `-b` | `root: uart.burst=15: uart's burst capped at 15`; the same flood lines; `, burst 15,`; `Writes held`, which should be above 0: the flood filled the queue | the control: `uart` writes as in the M8 re-run, with the queue full, so whether the loss comes back |
+| `m9-burst1-raw`, `m9-burst15-raw` | the same, read through `-Raw` | a burst-15 run cut with the normal reader but whole with `-Raw`: the reader fell behind the pipe, not `uart` or the FIFO; cut with `-Raw` too: Hyper-V's FIFO, or the pipe itself. The `.com1` file shows exactly which bytes went |
+
+If every run is whole, the flood did not bring the loss back, and the M8
+loss stays open.
+
+### The network
+
+The networking images go on an internal switch with a fixed subnet, not
+the Default Switch, whose NAT subnet changes when the host restarts. Once,
+from an elevated PowerShell:
+
+```powershell
+.\New-L4Switch.ps1
+```
+
+This makes the internal switch `l4-net`, gives the host's `vEthernet
+(l4-net)` the address `192.168.77.1/24` and no other, and puts the VM's
+network adapter on the switch, adding one, with the VM off, if it has
+none; run it again to change the subnet. The CI images boot with
+`net.ip=192.168.77.2/24 net.gw=192.168.77.1`. If another of the host's
+networks overlaps `192.168.77.0/24`, the script stops and says so: pass
+`-Subnet` with another, such as `-Subnet 10.77.0.0/24`, write the words it
+prints into each image with `Set-L4Cmdline.ps1 -VhdxPath <disk.vhdx>
+-Cmdline '<the image's command line with them>'` before booting it, and
+change the scenario's `cmdline:` and the `expect:` lines that name the
+addresses to match. `Set-L4Cmdline.ps1` mounts the VHDX, so run it on the
+downloaded image, not the VM's copy, and paste its error into the PR if it
+fails: it first runs at this check.
+
+A scenario's `udp_echo: <n>` makes `Test-L4Vhdx.ps1 -Scenario` run
+`Send-L4Udp.ps1` against the `net.ip=` of the scenario's `cmdline:`: it
+pings the guest four times, sends `n` datagrams to its port 7 with
+xtask's payloads, window of 8 and limits, prints `udp_echo: <n> sent, <k>
+echoed` with any missing indices, and the guest's MAC as the host's
+neighbour table has it beside the VM adapter's; its lines go into the log
+as `l4:` lines, and a missing datagram or a bad echo fails the run. To try
+it by hand while a networking image runs:
+
+```powershell
+.\Send-L4Udp.ps1 -Address 192.168.77.2
+```
+
+Windows answers the guest's ARP request for the host's address; its
+firewall may drop the guest's ping of the host, which does not matter. The
+host's pings and the guest's echoes come back as answers to the host's own
+requests.
+
+The network scripts were written without a Windows host to run them. If
+one fails, paste its error into the PR with the log.
 
 ## Optional: the M4 check
 
@@ -288,10 +355,13 @@ tables.
 | --- | --- |
 | `New-L4Vm.ps1` | creates the VM, once |
 | `Set-L4Vhdx.ps1` | turns the VM off and swaps in a new VHDX |
-| `Read-L4Com1.ps1` | reads COM1 from the named pipe until a marker line |
-| `Test-L4Vhdx.ps1` | all of the above, plus the pass or fail verdict; with `-Scenario`, follows a scenario file, typing into COM1 and saving the screen (M8) |
+| `Read-L4Com1.ps1` | reads COM1 from the named pipe until a marker line; with `-Raw <file>` (M9), copies the pipe's bytes into the file as they come, off the script's thread, and reads the lines from it |
+| `Test-L4Vhdx.ps1` | all of the above, plus the pass or fail verdict; with `-Scenario`, follows a scenario file, typing into COM1 and saving the screen (M8), and at a `udp_echo:` running `Send-L4Udp.ps1` (M9); `-Raw` as `Read-L4Com1.ps1`'s |
+| `New-L4Switch.ps1` | (M9) once: the internal switch `l4-net` with the host at `192.168.77.1/24`, or `-Subnet`'s first address, and the VM's adapter on it |
+| `Send-L4Udp.ps1` | (M9) pings the guest and has it echo UDP datagrams, as xtask's `udp_echo:` does |
+| `Set-L4Cmdline.ps1` | (M9) writes another kernel command line into a VHDX, for a host whose network overlaps `192.168.77.0/24` |
 | `m8-tui.scenario`, `m8-release.scenario` | the M8 check's scenarios; `golden/` holds the screens `m8-tui` must show |
-| `m9-burst1.scenario`, `m9-burst15.scenario` | the M9 check's runs with `uart`'s burst capped at 1 and at 15 |
+| `m9-release-burst1.scenario`, `m9-release-burst15.scenario` | the M9 check's COM1 runs, with `uart`'s burst capped at 1 and at 15 and root's flood |
 
 To watch COM1 by hand instead, start the VM and run `.\Read-L4Com1.ps1`, or
 connect PuTTY to the serial line `\\.\pipe\l4-com1`.
