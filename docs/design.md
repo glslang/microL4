@@ -6333,7 +6333,10 @@ The API's documentation calls the thumbnail "raw RGB 565", two bytes a
 pixel, but gives no byte or row order: the script reads it as Windows'
 `Format16bppRgb565` bitmaps are laid out (little-endian words, red in the
 top five bits, rows from the top) and keeps the raw bytes in case that is
-wrong. RGB 565 keeps 5 or 6 bits a channel, so the check compares by eye;
+wrong. On the owner's host the API returned 4 bytes more than 2 × 1024 ×
+768 (the first M8 run, 2026-11-27); the script takes the pixels from the
+buffer's start, as Microsoft's samples do, and logs how many bytes came
+after them. RGB 565 keeps 5 or 6 bits a channel, so the check compares by eye;
 an exact comparison against the goldens reduced to RGB 565 is an [open
 question](#open-questions). The PowerShell has not yet run on a Windows
 host.

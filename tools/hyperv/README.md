@@ -161,8 +161,11 @@ At each `screendump:` the script saves the VM's screen, through Hyper-V's
 returned as `l4-<name>.rgb565`. Its documentation says only that they are
 "raw RGB 565"; the script reads them as Windows' 16-bit RGB 565 bitmaps
 are laid out (two bytes a pixel, little-endian, red in the top five bits,
-rows from the top). If a PNG looks scrambled or its colours swapped, that
-guess is wrong: say so in the PR, and keep the `.rgb565` files. A screen
+rows from the top). The pixels are the first 2 × 1024 × 768 bytes, as
+Microsoft's samples copy them; on the first M8 run the API returned 4
+bytes more, and the log line says how many came past the pixels. If a
+PNG looks scrambled, shifted sideways or its colours swapped, that guess
+is wrong: say so in the PR, and keep the `.rgb565` files. A screen
 the script cannot save fails the run, which still goes on to the end so
 the log is whole.
 `-ConnectAfterSeconds 20` starts the VM and opens the pipe only 20 seconds

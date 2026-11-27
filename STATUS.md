@@ -125,6 +125,8 @@ Current milestone: M8 · Framebuffer, terminal emulator and TUI, done on QEMU: t
   - `isolation`: check 0 for both threads and the root task.
   - `redteam-movss`: probe 1 `0x3/0x0` (the deferred step reached ring 0 and the kernel returned), probe 2 `0xd/0x402`, probe 3 `0x1/0x0`.
 
+- **M8, first run** (2026-11-27, owner, `m8-tui`): the guest ran to `TEST PASS` (root's last line, focus back to client 1), but all three screendumps failed to save: `GetVirtualSystemThumbnailImage` returned 1,572,868 bytes for 1024x768, 4 more than 2 bytes a pixel, and the script required the exact length. Fixed in the script (the pixels are the first 2 x 1024 x 768 bytes, as Microsoft's samples take them; every byte is kept in the `.rgb565`); re-run `m8-tui` with the updated script. The full logs of all three runs are still to come.
+
 ## Last session
 2026-11-23: M8, in the same session as M6 and M7 (PR #8 merged by rebase).
 - **Design:** the designer's note and a screendump spike in parallel, then a fresh check of the note.
