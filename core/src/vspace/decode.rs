@@ -7,12 +7,14 @@
 //! a label of another type or level is `IllegalOperation`. The checks after
 //! the length are [`super::paging`]'s, in the ABI's order, and an
 //! invocation that fails has changed nothing. A successful one hands its
-//! flush to [`PagingStore::flush`] before returning.
+//! flush to [`PagingStore::flush`] before returning. `Frame_GetAddress`
+//! (M9) reads the capability alone and changes nothing.
 
 use crate::cap::CapType;
 use crate::error::SyscallError;
-use crate::invoke::{InvokeError, Message, Reply};
-use crate::slot::{SlotAddr, SlotMemory};
+use crate::invoke::{self, InvokeError, Message, Reply};
+use crate::slot::SlotAddr;
+use crate::tcb::Threads;
 
 use super::paging::{self, PagingStore};
 
@@ -28,7 +30,7 @@ pub mod label {
     pub const FRAME_MAP: u64 = 0x50;
     pub const FRAME_UNMAP: u64 = 0x51;
     pub const FRAME_REMAP: u64 = 0x52;
-    /// M9; `IllegalOperation` until then.
+    /// M9.
     pub const FRAME_GET_ADDRESS: u64 = 0x53;
 }
 
@@ -61,15 +63,23 @@ fn table_labels(ty: CapType) -> Option<(u64, u64)> {
 /// | Frame | `Frame_Map` | MR0 `vaddr`, MR1 rights, MR2 attributes | the VSpace |
 /// | Frame | `Frame_Unmap` | | |
 /// | Frame | `Frame_Remap` | MR0 rights, MR1 attributes | |
+/// | Frame | `Frame_GetAddress` | | |
 ///
-/// Anything else, `Frame_GetAddress` until M9 and any label on a PML4
-/// included, is `IllegalOperation`. No invocation has results.
-pub fn invoke<K: SlotMemory + PagingStore + ?Sized>(
+/// Anything else, any label on a PML4 included, is `IllegalOperation`.
+/// Only `Frame_GetAddress` has a result: MR0 the physical address of the
+/// frame's first byte, for any Frame capability, RAM or device, 4 KiB or
+/// 2 MiB, mapped or not, whatever its rights (`docs/abi.md`,
+/// "`Frame_GetAddress`"), as seL4's `X86PageGetAddress`.
+pub fn invoke<K: Threads + PagingStore + ?Sized>(
     k: &mut K,
     slot: SlotAddr,
     msg: &Message<'_>,
 ) -> Result<Reply, InvokeError> {
-    let ty = k.load(slot).cap.cap_type();
+    let cap = k.load(slot).cap;
+    let ty = cap.cap_type();
+    if ty == CapType::Frame && msg.label == label::FRAME_GET_ADDRESS {
+        return Ok(invoke::results(k, &[cap.object()]));
+    }
     let flush = match (ty, table_labels(ty)) {
         (_, Some((map, _))) if msg.label == map => {
             let [vaddr] = args(msg, 1)?;

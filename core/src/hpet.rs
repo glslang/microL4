@@ -67,6 +67,31 @@ pub const fn level_config(old: u64, route: u8) -> u64 {
         | TN_INT_ENB_CNF
 }
 
+/// A comparator's `Tn_FSB_INT_DEL_CAP`, read-only: it can deliver by FSB.
+pub const TN_FSB_INT_DEL_CAP: u64 = 1 << 15;
+
+/// Comparator `n`'s FSB interrupt route register: `Tn_FSB_INT_VAL` (the
+/// message data) in bits 0-31, `Tn_FSB_INT_ADDR` (the message address) in
+/// bits 32-63.
+pub const fn comparator_fsb_route(n: u8) -> u32 {
+    comparator_config(n) + 0x10
+}
+
+/// The FSB route register's value for an MSI with `address` and `data`,
+/// as `IRQControl_GetMSI` returns them (both below `2^32`).
+pub const fn fsb_route(address: u64, data: u64) -> u64 {
+    (address & 0xFFFF_FFFF) << 32 | (data & 0xFFFF_FFFF)
+}
+
+/// A comparator's configuration raising one edge-triggered, one-shot
+/// interrupt by FSB message, its I/O APIC route left as read and unused,
+/// every other bit as read. The `test=msi` self-test uses it as the device
+/// that writes `GetMSI`'s message (M9).
+pub const fn fsb_config(old: u64) -> u64 {
+    const PERIODIC: u64 = 1 << 3;
+    (old & !(PERIODIC | TN_INT_TYPE_CNF)) | TN_INT_ENB_CNF | TN_FSB_EN_CNF
+}
+
 /// The general configuration to write: legacy replacement off, the main
 /// counter running, every reserved bit as read.
 pub const fn general_config(old: u64) -> u64 {
@@ -192,6 +217,30 @@ mod tests {
             old & !(0x1F << 9 | 0xE | TN_FSB_EN_CNF | 1 << 3)
         );
         assert_eq!(quiet_comparator(v), Some(v & !TN_INT_ENB_CNF));
+    }
+
+    #[test]
+    fn an_fsb_comparator_sends_one_edge_message() {
+        assert_eq!(comparator_fsb_route(0), 0x110);
+        assert_eq!(comparator_fsb_route(2), 0x150);
+        // Level and periodic off; interrupts and FSB delivery on; the
+        // route, the capabilities and the size bit as read.
+        let old = 0x00FF_0104_0000_0030 | TN_INT_TYPE_CNF | 1 << 3 | 23 << 9 | TN_FSB_INT_DEL_CAP;
+        let v = fsb_config(old);
+        assert_eq!(v & (TN_INT_TYPE_CNF | 1 << 3), 0);
+        assert_eq!(
+            v & (TN_INT_ENB_CNF | TN_FSB_EN_CNF),
+            TN_INT_ENB_CNF | TN_FSB_EN_CNF
+        );
+        assert_eq!(v >> 9 & 0x1F, 23);
+        assert_eq!(v & !(0xE | TN_FSB_EN_CNF), old & !(0xE | TN_FSB_EN_CNF));
+        assert_eq!(
+            quiet_comparator(v),
+            Some(v & !(TN_INT_ENB_CNF | TN_FSB_EN_CNF))
+        );
+        // GetMSI's address and data, the address in the high half.
+        assert_eq!(fsb_route(0xFEE0_3000, 0x31), 0xFEE0_3000_0000_0031);
+        assert_eq!(fsb_route(u64::MAX, u64::MAX), u64::MAX);
     }
 
     /// QEMU's HPET: 10 ns, three comparators, 64-bit, legacy replacement

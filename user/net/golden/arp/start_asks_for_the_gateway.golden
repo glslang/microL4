@@ -1,0 +1,21 @@
+# Stack::start sends one ARP request for the gateway and no gratuitous
+# ARP; the gateway's reply is learnt and reported once.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+start:
+out: ffffffffffff 525400123456 0806  # ARP request: who has 10.0.2.2? tell 10.0.2.15; 60 bytes
+     0001 0800 06 04 0001 525400123456 0a00020f 000000000000 0a000202
+     00000000 00000000 00000000 00000000
+     0000
+in: 525400123456 52550a000202 0806  # ARP reply: 10.0.2.2 is at 52:55:0a:00:02:02, to 10.0.2.15; 42 bytes
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+out: 52550a000202 525400123456 0800  # 10.0.2.15 > 10.0.2.2, id 1: ICMP echo request, id 0x4c34 seq 1, 56 bytes; 98 bytes
+     45 00 0054 0001 4000 40 01 2298 0a00020f 0a000202
+     08 00 b4b7 4c34 0001
+     00010203 04050607 08090a0b 0c0d0e0f
+     10111213 14151617 18191a1b 1c1d1e1f
+     20212223 24252627 28292a2b 2c2d2e2f
+     30313233 34353637
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 525400123456 52550a000202 0806  # ARP reply: 10.0.2.2 is at 52:55:0a:00:02:02, to 10.0.2.15; 42 bytes
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+stats: frames_in=2 frames_out=2 arp_sent=1 arp_learnt=2 ping_sent=1

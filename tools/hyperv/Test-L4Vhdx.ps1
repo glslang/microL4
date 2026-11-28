@@ -13,17 +13,31 @@ log is written to -LogPath for pasting into the PR.
 
 With -Scenario, a scenario file in the QEMU harness's format (from M8,
 tools/hyperv/m8-*.scenario) replaces -Expect: its expect:, next:, send:,
-forbid: and screendump: lines are followed as `cargo xtask test` follows
-them, over the named pipe. An expect: must appear after the one before it,
-on a later line or further along the same one; a next: must start the line
-right after its step's; a send: is typed into COM1 once every expect: above
-it has matched, and the expects after it match from the next line on; no
-line may contain a forbid: text. At a screendump:, once the line above it
-has matched and before any later send:, the VM's screen is saved through
-Hyper-V's thumbnail API at 1024x768 as l4-<name>.png beside the log, with
-the API's raw RGB 565 bytes as l4-<name>.rgb565. The scenario's cmdline:,
-kernel:, exit:, timeout: and qemu_args: are QEMU's and are ignored: the
-VHDX carries its own command line.
+forbid:, screendump: and udp_echo: lines are followed as `cargo xtask
+test` follows them, over the named pipe. An expect: must appear after the
+one before it, on a later line or further along the same one; a next: must
+start the line right after its step's; a send: is typed into COM1 once
+every expect: above it has matched, and the expects after it match from
+the next line on; no line may contain a forbid: text. At a screendump:,
+once the line above it has matched and before any later send:, the VM's
+screen is saved through Hyper-V's thumbnail API at 1024x768 as
+l4-<name>.png beside the log, with the API's raw RGB 565 bytes as
+l4-<name>.rgb565. At a udp_echo: <n> (M9), once the line above it has
+matched and before any later step, Send-L4Udp.ps1 pings the guest and
+sends it n datagrams to echo, at the address of the net.ip= word in the
+scenario's cmdline:; its lines are logged as l4: lines, and a datagram
+missing or a bad echo fails the run. Nothing reads the pipe while the
+datagrams go, and net may print its gateway line meanwhile, so run a
+udp_echo: scenario with -Raw, which copies COM1's bytes off the pipe as
+they come. The scenario's
+kernel:, exit:, timeout:, qemu_args: and nic: are QEMU's and are ignored,
+and so is cmdline: but for net.ip=: the VHDX carries its own command line.
+
+Unlike `cargo xtask test`, which ends the boot at a next: that fails, the
+script records the failure and goes on from the next step that is not a
+next:, on the same line, so the run, though failed, reaches the steps
+after it and the log is whole: a flood line cut at the M9 check still
+leaves uart's line and TEST PASS in the log.
 
 -ConnectAfterSeconds starts the VM and opens the pipe only after that many
 seconds, to see whether what uart wrote while no client was on the pipe
@@ -37,6 +51,10 @@ the expect: lines above that send:, from the first that starts
 while the loader's polled writes give up on a transmitter that does not
 drain, so its lines say nothing.
 
+-Raw <file> has Read-L4Com1.ps1 copy COM1's bytes into that file as they
+come, off the script's thread, and read the lines back from it, so COM1
+never waits on the script's work per line (M9).
+
 Exit status 0 means pass, 1 means fail.
 
 .EXAMPLE
@@ -44,6 +62,9 @@ Exit status 0 means pass, 1 means fail.
 
 .EXAMPLE
 .\Test-L4Vhdx.ps1 -VhdxPath .\m8-check\tui\disk.vhdx -Scenario .\m8-check\m8-tui.scenario -LogPath m8-tui.log
+
+.EXAMPLE
+.\Test-L4Vhdx.ps1 -VhdxPath .\m9-com1\release-burst15\disk.vhdx -Scenario .\m9-com1\m9-release-burst15.scenario -LogPath m9-burst15-raw.log -Raw m9-burst15-raw.com1
 #>
 [CmdletBinding()]
 param(
@@ -69,7 +90,9 @@ param(
     # A scenario file, followed in place of -Expect.
     [string] $Scenario,
     # Start the VM, then open COM1's pipe only after this many seconds.
-    [int] $ConnectAfterSeconds = 0
+    [int] $ConnectAfterSeconds = 0,
+    # A file COM1's bytes are copied to as they come (Read-L4Com1.ps1 -Raw).
+    [string] $Raw
 )
 $ErrorActionPreference = 'Stop'
 
@@ -104,12 +127,13 @@ function ConvertFrom-L4Escape([string] $Text) {
     return , $out.ToArray()
 }
 
-# The steps of a scenario file: expect, next, send (with its bytes) and
-# screendump, in order, and the forbid texts, checked as the QEMU
-# harness checks them.
+# The steps of a scenario file: expect, next, send (with its bytes),
+# screendump and udp_echo (with its count), in order, the forbid texts and
+# the cmdline, checked as the QEMU harness checks them.
 function Read-L4Scenario([string] $Path) {
     $steps = [System.Collections.Generic.List[object]]::new()
     $forbid = [System.Collections.Generic.List[string]]::new()
+    $cmdline = ''
     $n = 0
     foreach ($raw in Get-Content -LiteralPath $Path) {
         $n++
@@ -123,8 +147,11 @@ function Read-L4Scenario([string] $Path) {
         if ($comment -ge 0) { $value = $value.Substring(0, $comment) }
         $value = $value.Trim()
         $last = if ($steps.Count -gt 0) { $steps[$steps.Count - 1].Kind } else { '' }
-        if ($key -in 'cmdline', 'kernel', 'exit', 'timeout', 'qemu_args') {
-            # QEMU's: the VHDX has its own command line and kernel.
+        if ($key -eq 'cmdline') {
+            # The VHDX has its own; a udp_echo: takes its net.ip= from this.
+            $cmdline = $value
+        } elseif ($key -in 'kernel', 'exit', 'timeout', 'qemu_args', 'nic') {
+            # QEMU's: the VHDX has its own kernel, and the VM its adapter.
         } elseif ($value -eq '' -and $key -in 'expect', 'next', 'send', 'forbid', 'screendump') {
             throw "${Path}:${n}: empty $key line"
         } elseif ($key -eq 'expect') {
@@ -142,12 +169,27 @@ function Read-L4Scenario([string] $Path) {
             if ($last -notin 'expect', 'next') { throw "${Path}:${n}: a screendump: needs an expect: or next: right above it" }
             if ($value -cnotmatch '^[a-z0-9_-]+$') { throw "${Path}:${n}: a screendump's name is lowercase letters, digits, '-' and '_'" }
             $steps.Add([pscustomobject]@{ Kind = 'screendump'; Text = $value })
+        } elseif ($key -eq 'udp_echo') {
+            if ($last -notin 'expect', 'next') { throw "${Path}:${n}: a udp_echo: needs an expect: or next: right above it" }
+            if ($value -notmatch '^[0-9]{1,4}$' -or [int] $value -lt 1 -or [int] $value -gt 1000) {
+                throw "${Path}:${n}: udp_echo's count must be a number from 1 to 1000"
+            }
+            $steps.Add([pscustomobject]@{ Kind = 'udp_echo'; Text = $value; Count = [int] $value })
         } else {
             throw "${Path}:${n}: unknown key '$key'"
         }
     }
     if (-not ($steps | Where-Object Kind -eq 'expect')) { throw "${Path}: needs at least one expect:" }
-    [pscustomobject]@{ Steps = $steps; Forbid = $forbid }
+    # A udp_echo: goes to the guest's address, the first net.ip= word's.
+    $guest = $null
+    if ($steps | Where-Object Kind -eq 'udp_echo') {
+        $word = @($cmdline -split '\s+' | Where-Object { $_.StartsWith('net.ip=', [System.StringComparison]::Ordinal) })
+        if ($word.Count -eq 0 -or $word[0] -notmatch '^net\.ip=(\d{1,3}(\.\d{1,3}){3})/\d{1,2}$') {
+            throw "${Path}: a udp_echo: needs net.ip=<a.b.c.d>/<n> in the cmdline:, the guest's address"
+        }
+        $guest = $Matches[1]
+    }
+    [pscustomobject]@{ Steps = $steps; Forbid = $forbid; Guest = $guest }
 }
 
 # Saves the VM's screen through Msvm_VirtualSystemManagementService's
@@ -234,6 +276,9 @@ if ($Scenario) {
         # The first screendump that could not be saved: the run goes on, so
         # the rest of the log is kept, but it fails.
         Unsaved = $null
+        # The guest's address for a udp_echo:, and the first exchange that
+        # failed, which fails the run the same way.
+        Guest = $parsed.Guest; Udp = $null
         # With -ConnectAfterSeconds: the texts of uart's expects above the
         # first send, whether each arrived, the first send's step, when the
         # last line came (or the pipe connected), the seconds with no line
@@ -260,6 +305,24 @@ if ($Scenario) {
         } catch {
             if ($null -eq $scn.Unsaved) { $scn.Unsaved = "could not save screendump $($step.Text): $_" }
             "l4: screendump $($step.Text) failed: $_"
+        }
+    }
+    # Pings the guest and has it echo a udp_echo step's datagrams.
+    $sendUdp = Join-Path $PSScriptRoot 'Send-L4Udp.ps1'
+    $udp = {
+        param($step)
+        $count = $step.Count
+        try {
+            $r = & $sendUdp -Address $scn.Guest -Count $count -VMName $VMName -Quiet -PassThru
+            foreach ($l in $r.Lines) { "l4: $l" }
+            $bad = @($r.Problems)
+            if ($null -eq $scn.Udp -and ($r.Echoed -lt $count -or $bad.Count -gt 0)) {
+                $scn.Udp = "udp_echo ${count}: $($r.Echoed) of $count echoed"
+                if ($bad.Count -gt 0) { $scn.Udp += ", and $($bad.Count) bad echoes, the first $($bad[0])" }
+            }
+        } catch {
+            if ($null -eq $scn.Udp) { $scn.Udp = "udp_echo ${count}: $_" }
+            "l4: udp_echo $count failed: $_"
         }
     }
 
@@ -334,7 +397,7 @@ if ($Scenario) {
         $rest = $line
         $sent = $false
         $matched = $false
-        while ($null -eq $scn.Broken -and $scn.Next -lt $steps.Count) {
+        while ($scn.Next -lt $steps.Count) {
             $step = $steps[$scn.Next]
             if ($step.Kind -eq 'expect') {
                 if ($sent) { break }
@@ -346,14 +409,25 @@ if ($Scenario) {
                 if ($matched) { break }
                 if (-not $line.StartsWith($step.Text, [System.StringComparison]::Ordinal)) {
                     $above = $steps[$scn.Next - 1].Text
-                    $scn.Broken = "printed '$line' right after the line with '$above', where a line starting '$($step.Text)' must come"
-                    break
+                    if ($null -eq $scn.Broken) {
+                        $scn.Broken = "printed '$line' right after the line with '$above', where a line starting '$($step.Text)' must come"
+                    }
+                    "l4: a next: failed here; going on from the next step that is not a next:"
+                    # The run has failed; go on so the log reaches its end.
+                    # Nothing on this line has matched, so the step after
+                    # the next: lines may match all of it.
+                    while ($scn.Next -lt $steps.Count -and $steps[$scn.Next].Kind -eq 'next') { $scn.Next++ }
+                    continue
                 }
                 $rest = $line.Substring($step.Text.Length)
                 $matched = $true
             } elseif ($step.Kind -eq 'send') {
                 $sent = $true
                 & $send $pipe $step
+            } elseif ($step.Kind -eq 'udp_echo') {
+                # As a send: what comes after it answers it.
+                $sent = $true
+                & $udp $step
             } else {
                 & $dump $step
             }
@@ -374,7 +448,7 @@ try {
         Start-Sleep -Seconds $ConnectAfterSeconds
     }
     $result = & (Join-Path $PSScriptRoot 'Read-L4Com1.ps1') -PipeName $PipeName -TimeoutSeconds $TimeoutSeconds `
-        -LogPath $LogPath -OnConnect $onConnect -OnLine $onLine -OnIdle $onIdle
+        -LogPath $LogPath -OnConnect $onConnect -OnLine $onLine -OnIdle $onIdle -Raw $Raw
 } finally {
     # Surfaces a Start-VM failure, if there was one, then stops the VM.
     Receive-Job -Job $start -Wait -AutoRemoveJob | Out-Null
@@ -400,6 +474,8 @@ if ($scn) {
         $why = $scn.Forbidden
     } elseif ($scn.Unsaved) {
         $why = $scn.Unsaved
+    } elseif ($scn.Udp) {
+        $why = $scn.Udp
     } else {
         $waiting = @($scn.Steps | Select-Object -Skip $scn.Next | Where-Object Kind -in 'expect', 'next')
         if ($waiting.Count -gt 0) { $missing = $waiting[0].Text }

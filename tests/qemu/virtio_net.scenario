@@ -1,0 +1,33 @@
+# The QEMU driver without the stack (M9; user/root/src/net.rs and
+# servers.rs; docs/design.md, "Network scenarios"). Root starts watch,
+# uart and console, attaches as client 1, sets up PCI as test=net does
+# (ECAM through carved device frames, virtio-net-pci at 00:02.0, its
+# regions and MSI-X checked, the MSI bound to NV and MSI-X entry 0
+# programmed, bus mastering on once the driver's frames are mapped,
+# configuration space and the MSI-X table unmapped), and starts
+# virtio-net (140) in a CSpace and VSpace of its own: its DMA frame, its
+# three regions' device pages uncached, and the frame queues' frame. No
+# net runs: a probe thread of root's own, at 130, in root's VSpace on a
+# copy of the frame queues' frame, takes the link block, hands the driver
+# every receive buffer, sends an ARP request for 10.0.2.2 built with
+# net::arp, and waits for the reply, which libslirp sends from
+# 52:55:0a:00:02:02. Root prints it, then the driver's Stats (frames each
+# way, signals, no bad used element or queue entry) and passes.
+cmdline: test=virtio_net
+exit: success
+nic: virtio-net
+expect: root: cmdline "test=virtio_net"
+expect: pci: ecam 0xe0000000, segment 0, buses 0-255
+expect: pci: virtio-net at 00:02.0
+expect: pci: virtio-net: MSI-X entry 0 sends IRQ
+expect: bus mastering on; configuration space and the MSI-X table unmapped
+expect: servers: virtio-net (priority 140, MSI-X IRQ
+expect: probe (priority 130); root CNode
+expect: virtio-net: up: MAC 52:54:00:12:34:56, features VERSION_1 MAC STATUS, link up, queues 64 and 64
+expect: virtio_net: ARP reply: 10.0.2.2 is at 52:55:0a:00:02:02
+expect: virtio-net: stats:
+expect: , 0 bad used elements,
+expect: , 0 bad queue entries,
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
+forbid: TEST FAIL

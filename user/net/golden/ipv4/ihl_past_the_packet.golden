@@ -1,0 +1,10 @@
+# An IHL of 15 (60 bytes) in a 44-byte packet.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 525400123456 52550a000202 0800  # 10.0.2.2 > 10.0.2.15, id 4660; 58 bytes
+    4f00002c 12344000 4001068d 0a000202
+    0a00020f 0800a27f 12340001 61626364
+    65666768 696a6b6c 6d6e6f70
+stats: frames_in=2 arp_learnt=1 ip_malformed=1

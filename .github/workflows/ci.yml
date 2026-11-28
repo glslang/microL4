@@ -77,6 +77,49 @@ jobs:
           name: microl4-vhdx-m8-check
           path: target/xtask/m8-check
           if-no-files-found: error
+      # The M9 Hyper-V check's COM1 runs, first and in an artifact of their
+      # own (tools/hyperv/README.md, "At the M9 check"): test=release on
+      # the release kernel with uart's burst capped at 1 and at 15 and
+      # root's 32-line flood, each in a folder named after it, beside the
+      # scenarios Test-L4Vhdx.ps1 -Scenario follows. xtask's
+      # the_com1_runs_are_release_with_the_cap_and_the_flood checks these
+      # command lines against the scenarios'.
+      - name: Build the M9 COM1 images
+        run: |
+          for burst in 1 15; do
+            mkdir -p "target/xtask/m9-com1/release-burst$burst"
+            cargo xtask image --kernel release --cmdline "test=release uart.burst=$burst release.flood=32"
+            mv target/xtask/image/disk.vhdx "target/xtask/m9-com1/release-burst$burst/disk.vhdx"
+          done
+          cp tools/hyperv/m9-release-burst1.scenario tools/hyperv/m9-release-burst15.scenario target/xtask/m9-com1/
+      - name: Upload the M9 COM1 VHDXs
+        uses: actions/upload-artifact@v4
+        with:
+          name: microl4-vhdx-m9-com1
+          path: target/xtask/m9-com1
+          if-no-files-found: error
+      # The M9 Hyper-V check's network runs (tools/hyperv/README.md, "At
+      # the M9 check"): test=net on the selftest kernel at 192.168.77.2/24
+      # via the host's 192.168.77.1 on New-L4Switch.ps1's switch, with
+      # netvsc signalling the host by SignalEvent (net) or through the
+      # monitor page (net-mnf), each in a folder named after it, beside the
+      # scenarios Test-L4Vhdx.ps1 -Scenario follows. xtask's
+      # the_network_runs_are_net_on_hyperv checks these command lines
+      # against the scenarios'.
+      - name: Build the M9 check images
+        run: |
+          mkdir -p target/xtask/m9-check/net target/xtask/m9-check/net-mnf
+          cargo xtask image --cmdline "test=net net.ip=192.168.77.2/24 net.gw=192.168.77.1"
+          mv target/xtask/image/disk.vhdx target/xtask/m9-check/net/disk.vhdx
+          cargo xtask image --cmdline "test=net net.ip=192.168.77.2/24 net.gw=192.168.77.1 netvsc.mnf=1"
+          mv target/xtask/image/disk.vhdx target/xtask/m9-check/net-mnf/disk.vhdx
+          cp tools/hyperv/m9-net.scenario tools/hyperv/m9-net-mnf.scenario target/xtask/m9-check/
+      - name: Upload the M9 check VHDXs
+        uses: actions/upload-artifact@v4
+        with:
+          name: microl4-vhdx-m9-check
+          path: target/xtask/m9-check
+          if-no-files-found: error
 
   lint:
     name: rustfmt and clippy

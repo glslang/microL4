@@ -1,0 +1,4 @@
+# A bare header of type ARP passes Ethernet; ARP finds no body.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # EtherType 0x0806; 14 bytes
+stats: frames_in=1 arp_malformed=1

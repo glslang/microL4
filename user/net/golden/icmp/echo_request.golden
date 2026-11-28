@@ -1,0 +1,16 @@
+# An echo request: its identifier, sequence and data come back.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 525400123456 52550a000202 0800  # 10.0.2.2 > 10.0.2.15, id 4660: ICMP echo request, id 0xbeef seq 65535, 19 bytes; 61 bytes
+    45 00 002f 1234 4000 40 01 108a 0a000202 0a00020f
+    08 00 1b14 beef ffff
+    54686520 71756963 6b206272 6f776e20
+    666f78
+out: 52550a000202 525400123456 0800  # 10.0.2.15 > 10.0.2.2, id 1: ICMP echo reply, id 0xbeef seq 65535, 19 bytes; 61 bytes
+     45 00 002f 0001 4000 40 01 22bd 0a00020f 0a000202
+     00 00 2314 beef ffff
+     54686520 71756963 6b206272 6f776e20
+     666f78
+stats: frames_in=2 frames_out=1 arp_learnt=1 icmp_answered=1

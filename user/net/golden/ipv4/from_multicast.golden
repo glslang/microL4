@@ -1,0 +1,10 @@
+# From 239.1.2.3.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 525400123456 52550a000202 0800  # 239.1.2.3 > 10.0.2.15, id 4660: ICMP echo request, id 0x1234 seq 1, 16 bytes; 58 bytes
+    45 00 002c 1234 4000 40 01 2b8a ef010203 0a00020f
+    08 00 a27f 1234 0001
+    61626364 65666768 696a6b6c 6d6e6f70
+stats: frames_in=2 arp_learnt=1 ip_bad_source=1

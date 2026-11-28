@@ -157,9 +157,11 @@ pub fn level_source(p: &Platform) -> Option<LevelSource> {
 impl LevelSource {
     fn write(&self, offset: u32, value: u64) {
         // SAFETY: as in `read_at`, for a 64-bit register of the block. The
-        // self-test writes only this comparator's configuration and value
-        // and the status register: a level interrupt on the one I/O APIC
-        // input it picked, which it then lowers and turns off.
+        // self-tests write only this comparator's configuration, value and
+        // FSB route, and the status register: a level interrupt on the one
+        // I/O APIC input `test=irq_stale` picked, or one FSB message with
+        // the address and data `GetMSI` gave `test=msi`, which they then
+        // lower and turn off.
         unsafe { ptr::write_volatile((self.base + u64::from(offset)) as *mut u64, value) }
     }
 
@@ -181,6 +183,25 @@ impl LevelSource {
         let now = read_at(self.base, h::MAIN_COUNTER);
         self.write(h::comparator_value(self.n), now.wrapping_add(ticks));
         self.write(reg, h::level_config(config, route));
+    }
+
+    /// Whether it can deliver by FSB message (`Tn_FSB_INT_DEL_CAP`; QEMU's
+    /// HPET with `-global hpet.msi=on`), for `test=msi`.
+    pub fn fsb_capable(&self) -> bool {
+        read_at(self.base, h::comparator_config(self.n)) & h::TN_FSB_INT_DEL_CAP != 0
+    }
+
+    /// `test=msi` (M9): sends one edge-triggered FSB message, `address`
+    /// and `data` as `IRQControl_GetMSI` gave them, `ticks` main-counter
+    /// ticks from now. The HPET then writes `data` to `address` as a
+    /// device's MSI does.
+    pub fn fire_fsb(&self, address: u64, data: u64, ticks: u64) {
+        let reg = h::comparator_config(self.n);
+        let config = read_at(self.base, reg);
+        self.write(h::comparator_fsb_route(self.n), h::fsb_route(address, data));
+        let now = read_at(self.base, h::MAIN_COUNTER);
+        self.write(h::comparator_value(self.n), now.wrapping_add(ticks));
+        self.write(reg, h::fsb_config(config));
     }
 
     /// Lowers its line, by clearing its status bit, and turns it off.

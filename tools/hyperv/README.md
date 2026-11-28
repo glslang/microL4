@@ -27,7 +27,8 @@ gh run download --repo glslang/microL4 --name microl4-vhdx --dir microl4-vhdx <r
 Then create the VM. It is a Generation 2 VM named `l4` with 512 MB, one vCPU
 with processor compatibility mode off, Secure Boot off, COM1 on
 `\\.\pipe\l4-com1`, and no automatic checkpoints. Pass `-SwitchName ''` if
-you have no `Default Switch`; networking is not needed until M9.
+you have no `Default Switch`; networking is not needed until M9, whose
+`New-L4Switch.ps1` moves the adapter to a switch of its own.
 
 ```powershell
 .\New-L4Vm.ps1 -VhdxPath .\microl4-vhdx\disk.vhdx
@@ -204,6 +205,182 @@ The `-Scenario` and `-ConnectAfterSeconds` code and the thumbnail were
 written without a Windows host to run them. If the script itself fails,
 paste its error into the PR with the log, which is written all the same.
 
+## At the M9 check
+
+### First: COM1's lost bytes
+
+Each M8 `m8-release` run lost a few bytes of one of root's lines while
+root's summary flooded `uart`, though `uart` wrote every burst after an LSR
+that said THRE (`docs/design.md`, Open questions). CI builds
+`microl4-vhdx-m9-com1` for this alone, so it can come first:
+`release-burst1/disk.vhdx` and `release-burst15/disk.vhdx` boot
+`test=release` on the release kernel with `uart.burst=1` or `uart.burst=15`
+and `release.flood=32`, and beside them are `m9-release-burst1.scenario`
+and `m9-release-burst15.scenario`. `uart.burst=<n>` caps `uart`'s burst:
+root prints `root: uart.burst=<n>: uart's burst capped at <n>` after its
+`root: cmdline` line, and `uart`'s line ends `burst <n>, <m> stale THREs`.
+`release.flood=32` makes root print, right after its summary, 32 lines
+from `release: flood 01/32 123456789abc...` to `release: flood 32/32
+wxyz...`, 75 bytes each with CR LF: 2,400 bytes, more than `uart`'s
+2,048-byte queue, so `uart` holds console's writes and keeps its FIFO fed,
+as root's summary did in M8. The scenarios expect the first flood line and
+the other 31 with `next:`, each whole, and release's own line right after
+the last; a cut line fails the run, and the script goes on from the next
+`expect:`, so the log still reaches `uart`'s line and `TEST PASS`.
+
+Run each image three times: twice with the normal reader, and once with
+`-Raw`, which copies the pipe's bytes into a file as they come, through a
+1 MiB buffer and off the script's thread, so COM1 never waits on the
+script's work per line, and reads the lines back from that file:
+
+```powershell
+gh run download --repo glslang/microL4 --name microl4-vhdx-m9-com1 --dir m9-com1 <run-id>
+
+foreach ($burst in 1, 15) {
+    $vhdx = ".\m9-com1\release-burst$burst\disk.vhdx"
+    $scenario = ".\m9-com1\m9-release-burst$burst.scenario"
+    foreach ($run in 'a', 'b') {
+        .\Test-L4Vhdx.ps1 -VhdxPath $vhdx -Scenario $scenario -LogPath "m9-burst$burst-$run.log"
+    }
+    .\Test-L4Vhdx.ps1 -VhdxPath $vhdx -Scenario $scenario -LogPath "m9-burst$burst-raw.log" `
+        -Raw "m9-burst$burst-raw.com1"
+}
+```
+
+Paste the six logs into the PR and attach the two `.com1` files, which
+hold every byte as it came, CR LF and escape sequences included. A scenario
+sees only the lines it expects, so a run can pass with another line cut;
+the session reads every line for missing bytes.
+
+| Run | The log must show | It settles |
+| --- | --- | --- |
+| `m9-burst1-a`, `-b` | `root: uart.burst=1: uart's burst capped at 1`; the 32 flood lines, each whole and right after the one before; `uart`'s line with `, burst 1,`; the rest as `m8-release`; whether every line is whole | with `m9-burst15`: lines whole with burst 1 but cut with 15 mean Hyper-V's FIFO takes fewer bytes after it reports THRE than `uart` writes; cut either way, the named pipe drops what its reader has not taken. Burst 1 also writes more slowly, a THRE interrupt a byte |
+| `m9-burst15-a`, `-b` | `root: uart.burst=15: uart's burst capped at 15`; the same flood lines; `, burst 15,`; `Writes held`, which should be above 0: the flood filled the queue | the control: `uart` writes as in the M8 re-run, with the queue full, so whether the loss comes back |
+| `m9-burst1-raw`, `m9-burst15-raw` | the same, read through `-Raw` | a burst-15 run cut with the normal reader but whole with `-Raw`: the reader fell behind the pipe, not `uart` or the FIFO; cut with `-Raw` too: Hyper-V's FIFO, or the pipe itself. The `.com1` file shows exactly which bytes went |
+
+If every run is whole, the flood did not bring the loss back, and the M8
+loss stays open.
+
+### The network
+
+The networking images go on an internal switch with a fixed subnet, not
+the Default Switch, whose NAT subnet changes when the host restarts. Once,
+from an elevated PowerShell:
+
+```powershell
+.\New-L4Switch.ps1
+```
+
+This makes the internal switch `l4-net`, gives the host's `vEthernet
+(l4-net)` the address `192.168.77.1/24` and no other, and puts the VM's
+network adapter on the switch, adding one, with the VM off, if it has
+none; run it again to change the subnet. The CI images boot with
+`net.ip=192.168.77.2/24 net.gw=192.168.77.1`. If another of the host's
+networks overlaps `192.168.77.0/24`, the script stops and says so: pass
+`-Subnet` with another, such as `-Subnet 10.77.0.0/24`, write the words it
+prints into each image with `Set-L4Cmdline.ps1 -VhdxPath <disk.vhdx>
+-Cmdline '<the image's command line with them>'` before booting it, and
+change the scenario's `cmdline:` and the `expect:` lines that name the
+addresses to match. `Set-L4Cmdline.ps1` mounts the VHDX, so run it on the
+downloaded image, not the VM's copy, and paste its error into the PR if it
+fails: it first runs at this check.
+
+A scenario's `udp_echo: <n>` makes `Test-L4Vhdx.ps1 -Scenario` run
+`Send-L4Udp.ps1` against the `net.ip=` of the scenario's `cmdline:`: it
+pings the guest four times, sends `n` datagrams to its port 7 with
+xtask's payloads, window of 8 and limits, prints `udp_echo: <n> sent, <k>
+echoed` with any missing indices, and the guest's MAC as the host's
+neighbour table has it beside the VM adapter's; its lines go into the log
+as `l4:` lines, and a missing datagram or a bad echo fails the run. To try
+it by hand while a networking image runs:
+
+```powershell
+.\Send-L4Udp.ps1 -Address 192.168.77.2
+```
+
+Windows answers the guest's ARP request for the host's address; its
+firewall may drop the guest's ping of the host, which does not matter. The
+host's pings and the guest's echoes come back as answers to the host's own
+requests.
+
+The network scripts were written without a Windows host to run them. If
+one fails, paste its error into the PR with the log.
+
+### Then: the network runs
+
+CI builds `microl4-vhdx-m9-check` for M9's done-when on Hyper-V:
+`net/disk.vhdx` boots `test=net net.ip=192.168.77.2/24
+net.gw=192.168.77.1` on the selftest kernel, `net-mnf/disk.vhdx` the same
+with `netvsc.mnf=1`, and beside them are the two scenarios the script
+follows, `m9-net.scenario` and `m9-net-mnf.scenario`. With the VM's
+adapter on the switch (`New-L4Switch.ps1`, above), run each once, through
+`-Raw`: the exchange runs inside the script's line handler, so nothing
+reads the pipe for its 5 to 35 s, and `net` prints its gateway line in
+that time; with `-Raw` the bytes are copied off the pipe as they come, so
+a pipe that drops unread bytes cannot fail the run's `expect:`:
+
+```powershell
+gh run download --repo glslang/microL4 --name microl4-vhdx-m9-check --dir m9-check <run-id>
+
+.\Test-L4Vhdx.ps1 -VhdxPath .\m9-check\net\disk.vhdx -Scenario .\m9-check\m9-net.scenario `
+    -TimeoutSeconds 120 -LogPath m9-net.log -Raw m9-net.com1
+.\Test-L4Vhdx.ps1 -VhdxPath .\m9-check\net-mnf\disk.vhdx -Scenario .\m9-check\m9-net-mnf.scenario `
+    -TimeoutSeconds 120 -LogPath m9-net-mnf.log -Raw m9-net-mnf.com1
+```
+
+Root starts `vmbus`, `netvsc` and `net`; once `net` prints `echo:
+listening on UDP port 7`, the script runs `Send-L4Udp.ps1` against
+`192.168.77.2` (four pings, then 100 datagrams, each echo checked, its
+lines logged as `l4:` lines), then types Enter, and root prints
+`vmbus`'s, `netvsc`'s and `net`'s counters and its verdict. The
+exchange comes before the gateway's line in the scenario, though `net`
+prints that line first, so that a host that never answers still leaves
+root's counters in the log. Paste both logs into the PR.
+
+| Run | The log must show | It settles |
+| --- | --- | --- |
+| `m9-net` | `cpu: hypervisor Hyper-V`; root's `servers: Hyper-V: SINT 2 is IRQ <n>; channel frame ..., monitor pages ... and ..., event flags ...; netvsc signals the host with SignalEvent` and `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130); root CNode <k> of 4096 slots used`; `vmbus: version 4.0` (or 3.0 or 2.4); every `vmbus: offer`, netvsc's among them; `vmbus: netvsc channel <id> open, connection <c>`; `netvsc: up: NVSP <v>, NDIS <v>, MAC 00:15:5d:..., link up, <n> send sections of <m> bytes`; `net: up: 192.168.77.2/24 via 192.168.77.1`; `echo: listening on UDP port 7`; the script's four ping replies and `udp_echo: 100 sent, 100 echoed`, and the guest's MAC in the host's neighbour table equal to the VM adapter's and to `netvsc: up`'s; `net: gateway 192.168.77.1 is at <mac>`; root's `vmbus: stats:`, `netvsc: stats:` with 0 broken packets, 0 dropped and 0 bad queue entries, and `net: stats:` with `, 4 ICMP echo requests answered,` and `, 100 datagrams echoed,`; `TEST PASS`. Record the versions, the offers, the section counts and sizes, and `netvsc`'s ignored messages (the host's notes count there) | the done-when on Hyper-V; the Hypervisor capability, SINT 2 and the SynIC frames on a real host; contact with no UNLOAD first; `SignalEvent` on a channel the host may monitor; the buffer sizes; the MAC Hyper-V assigned |
+| `m9-net-mnf` | the same, with `through monitor page 2 and the event flags (netvsc.mnf=1)` in root's first `servers:` line; netvsc's offer line ends `, monitor trigger <t>` if the host may monitor the channel, and netvsc then signals through the monitor page, else with `SignalEvent` | FreeBSD's monitor-page signalling; with `m9-net`, which of the two the host takes |
+
+Read a failed log from the top, since each server waits for the one
+before it; the first of these that is missing says where it stopped:
+
+1. `servers: Hyper-V: ...`. Without it, root's `TEST FAIL: servers: ...`
+   names the invocation refused. `servers: no network: no Hypervisor
+   capability in slot 12` means the kernel made none: its boot lines
+   before root's say why (a privilege missing, or a hypercall page that
+   did not enable).
+2. `vmbus: version`. `vmbus: the host accepts none of VMBus 4.0, 3.0,
+   2.4` or `vmbus: PostMessage of CONNECT: <status>` say what the host
+   answered. No `vmbus:` line at all after root's `servers:` lines means
+   no SINT 2 interrupt reached `vmbus`, or the host never answered
+   CONNECT.
+3. `vmbus: offer ...: netvsc` and `vmbus: netvsc channel ... open`.
+   `vmbus: no netvsc offer` means the VM has no network adapter;
+   `vmbus: netvsc channel <id>: the host refused <step> (status <s>)`
+   names the GPADL or the open the host refused.
+4. `netvsc: up`. A refused step is a `USER PANIC` line naming it, such as
+   `netvsc: the host refused the receive buffer: ...`, after which the
+   kernel halts and the script reads on until its timeout. The receive
+   buffer's answer is a risk on a real host: `netvsc` checks that each
+   section the host lays out lies inside its 1 MiB buffer, and the line
+   gives the section's start, end, slot size and count and which of the
+   three checks it failed. NVSP 4 or 2 in the up line means the host
+   refused 5. In `m9-net-mnf`, nothing after the open line means the host
+   did not take the monitor page's signal.
+5. `net: gateway 192.168.77.1 is at`, the host's answer to `net`'s ARP
+   request, the first frame `netvsc` sends. Missing while the pings and
+   datagrams fail too, nothing `netvsc` sent reached the host. The other
+   risk is there: from NVSP 5 FreeBSD adds a hash value to every frame it
+   sends, which `netvsc` does not. `netvsc: stats:` then tells sent from
+   lost: its `frames sent` against its `send completions`, and its
+   `ignored messages`, where a send completion with a status other than
+   OK is counted.
+6. The `l4:` lines: a ping or datagram missing while the gateway's line
+   came means frames from the host were lost; `netvsc: stats:` shows
+   `packets skipped` and `dropped for no buffer`, and `net: stats:` the
+   stack's drops by reason.
+
 ## Optional: the M4 check
 
 The M4 self-test still runs on Hyper-V, though CI no longer uploads its
@@ -253,9 +430,14 @@ tables.
 | --- | --- |
 | `New-L4Vm.ps1` | creates the VM, once |
 | `Set-L4Vhdx.ps1` | turns the VM off and swaps in a new VHDX |
-| `Read-L4Com1.ps1` | reads COM1 from the named pipe until a marker line |
-| `Test-L4Vhdx.ps1` | all of the above, plus the pass or fail verdict; with `-Scenario`, follows a scenario file, typing into COM1 and saving the screen (M8) |
+| `Read-L4Com1.ps1` | reads COM1 from the named pipe until a marker line; with `-Raw <file>` (M9), copies the pipe's bytes into the file as they come, off the script's thread, and reads the lines from it |
+| `Test-L4Vhdx.ps1` | all of the above, plus the pass or fail verdict; with `-Scenario`, follows a scenario file, typing into COM1 and saving the screen (M8), and at a `udp_echo:` running `Send-L4Udp.ps1` (M9); `-Raw` as `Read-L4Com1.ps1`'s |
+| `New-L4Switch.ps1` | (M9) once: the internal switch `l4-net` with the host at `192.168.77.1/24`, or `-Subnet`'s first address, and the VM's adapter on it |
+| `Send-L4Udp.ps1` | (M9) pings the guest and has it echo UDP datagrams, as xtask's `udp_echo:` does |
+| `Set-L4Cmdline.ps1` | (M9) writes another kernel command line into a VHDX, for a host whose network overlaps `192.168.77.0/24` |
 | `m8-tui.scenario`, `m8-release.scenario` | the M8 check's scenarios; `golden/` holds the screens `m8-tui` must show |
+| `m9-release-burst1.scenario`, `m9-release-burst15.scenario` | the M9 check's COM1 runs, with `uart`'s burst capped at 1 and at 15 and root's flood |
+| `m9-net.scenario`, `m9-net-mnf.scenario` | the M9 check's network runs, M9's done-when on Hyper-V, with `netvsc` signalling the host by `SignalEvent` and through the monitor page |
 
 To watch COM1 by hand instead, start the VM and run `.\Read-L4Com1.ps1`, or
 connect PuTTY to the serial line `\\.\pipe\l4-com1`.

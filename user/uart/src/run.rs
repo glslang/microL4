@@ -6,7 +6,7 @@ use libsys::invoke::{Slot, cnode_save_caller};
 use libsys::proto::{self, IRQ, MAX_BYTES, MAX_WORDS};
 use libsys::{CPtr, Event, Ipc, Message, MessageInfo, Received, recv, reply_recv, send, signal};
 
-use crate::{Answer, Irq, Outcome, Port, Release, Uart, decode, slot};
+use crate::{Answer, Cap, Irq, Outcome, Port, Release, Uart, decode, slot};
 
 /// COM1's base port.
 const COM1: u16 = 0x3F8;
@@ -37,9 +37,11 @@ impl Irq for Device {
 }
 
 /// uart's thread: programs COM1, then loops for ever, receiving on U.
-/// Its slots are [`slot`]'s; it takes no arguments. It blocks only in its
-/// receive: it sends only to reply capabilities and signals only NC.
-pub fn run() -> ! {
+/// Its slots are [`slot`]'s; its one argument is the burst's cap, which
+/// root passes in `rdi` from the command line's `uart.burst=<n>`. It
+/// blocks only in its receive: it sends only to reply capabilities and
+/// signals only NC.
+pub fn run(cap: Cap) -> ! {
     // The statics are a copy of the root task's, which name its slots.
     libsys::output::reset();
     let ipc = Ipc::root();
@@ -47,7 +49,7 @@ pub fn run() -> ! {
         port: slot::IOPORT,
         irq: slot::IRQ,
     };
-    let (mut uart, first) = Uart::start(&mut dev);
+    let (mut uart, first) = Uart::start(&mut dev, cap);
     act(ipc, first);
     let mut buf = [0u8; MAX_BYTES];
     let mut out = [0u8; MAX_BYTES];

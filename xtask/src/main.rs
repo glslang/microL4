@@ -13,6 +13,7 @@ mod rootimage;
 mod scenario;
 mod screen;
 mod source;
+mod udp;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,9 @@ commands:
   build             build the user crates, both kernels with the root task
                     embedded, and the loader
   image             build target/xtask/image/disk.img and disk.vhdx
-  run               boot the image under OVMF, COM1 on stdio (Ctrl-A X quits)
+  run [--nic]       boot the image under OVMF, COM1 on stdio (Ctrl-A X quits);
+                    with --nic, a virtio-net NIC whose port 7 is UDP port
+                    5555 on the host's loopback (nc -u 127.0.0.1 5555)
   test [names...] [--bless]
                     host tests, kernel source checks, the release kernel's
                     disassembly check, then every QEMU scenario in
@@ -67,6 +70,7 @@ struct Options {
     out: Option<PathBuf>,
     from_log: Option<PathBuf>,
     bless: bool,
+    nic: bool,
     rest: Vec<String>,
 }
 
@@ -80,6 +84,7 @@ fn parse_args() -> Result<Options> {
         out: None,
         from_log: None,
         bless: false,
+        nic: false,
         rest: Vec::new(),
     };
     while let Some(a) = args.next() {
@@ -96,6 +101,7 @@ fn parse_args() -> Result<Options> {
                 opts.from_log = Some(args.next().ok_or("--from-log needs a file")?.into())
             }
             "--bless" => opts.bless = true,
+            "--nic" => opts.nic = true,
             "--" => opts.rest.extend(args.by_ref()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}").into()),
             _ => opts.rest.push(a),
@@ -123,6 +129,9 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
     let kernel = opts.kernel;
     if opts.bless && opts.command != "test" {
         return Err("--bless is only for `test`".into());
+    }
+    if opts.nic && opts.command != "run" {
+        return Err("--nic is only for `run`; a scenario asks for one with `nic:`".into());
     }
     match opts.command.as_str() {
         "build" => {
@@ -162,7 +171,18 @@ fn dispatch(opts: &Options) -> Result<ExitCode> {
                 kernel,
                 opts.cmdline.as_deref(),
             )?;
-            return qemu::run_interactive(&disk, &opts.rest);
+            let mut extra = Vec::new();
+            if opts.nic {
+                let port = qemu::RUN_NIC_PORT;
+                extra = qemu::nic_args(qemu::Nic::VirtioNet, port);
+                println!(
+                    "nic: virtio-net, MAC {}; UDP 127.0.0.1:{port} reaches the guest's port {}: nc -u 127.0.0.1 {port}",
+                    qemu::GUEST_MAC,
+                    qemu::GUEST_ECHO_PORT
+                );
+            }
+            extra.extend(opts.rest.iter().cloned());
+            return qemu::run_interactive(&disk, &extra);
         }
         "gdb" => {
             let art = compile::build(profile, &[kernel])?;
@@ -198,6 +218,8 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "--package",
             "fb",
             "--package",
+            "pci",
+            "--package",
             "uart",
             "--package",
             "console",
@@ -205,6 +227,16 @@ fn test(profile: compile::Profile, only: &[String], bless: bool) -> Result<ExitC
             "term",
             "--package",
             "tui",
+            "--package",
+            "net",
+            "--package",
+            "virtio-net",
+            "--package",
+            "vmbus",
+            "--package",
+            "netvsc",
+            "--package",
+            "hvmock",
             "--package",
             "root",
             "--lib",

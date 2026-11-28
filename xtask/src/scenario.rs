@@ -23,6 +23,9 @@
 //!                          # it have matched
 //! expect: TEST PASS
 //! forbid: KERNEL PANIC     # no serial line may contain this
+//! nic: virtio-net          # (M9) a NIC, with a forwarded UDP port
+//! expect: echo: listening on UDP port 7
+//! udp_echo: 100            # 100 datagrams through it, each echoed once
 //! ```
 //!
 //! A `next:` follows an `expect:` or another `next:`: the serial line right
@@ -51,9 +54,21 @@
 //! fails. The guest must keep the
 //! screen still from the line the screendump follows until it is taken:
 //! say, by waiting for a `send:` after it.
+//!
+//! From M9, `nic: virtio-net` gives the machine a virtio-net device on
+//! QEMU's user networking ([`qemu::nic_args`]), with a free loopback UDP
+//! port forwarded to the guest's port 7, and `udp_echo: <count>`, which
+//! follows an `expect:` or a `next:` in a scenario with `nic:`, sends
+//! `count` datagrams through that port once the step above it has matched
+//! and before any later step, and fails the scenario unless each comes
+//! back once, unaltered ([`udp::exchange`]). Like a `send:`, it changes
+//! what the guest does, so the steps after it match from the next line
+//! on; the lines that arrive while it runs are matched when it ends. The
+//! log records the port and each exchange as `xtask:` lines.
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -63,7 +78,8 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use crate::compile::{Artifacts, Kernel};
-use crate::{Result, image, qemu, rel, screen};
+use crate::qemu::Nic;
+use crate::{Result, image, qemu, rel, screen, udp};
 
 /// Every boot gets at most this long.
 const MAX_TIMEOUT: Duration = Duration::from_secs(60);
@@ -97,7 +113,8 @@ impl Exit {
 /// The most input one scenario may send, in bytes after unescaping.
 const MAX_SEND_BYTES: usize = 4096;
 
-/// One `expect:`, `next:`, `send:` or `screendump:`, in file order.
+/// One `expect:`, `next:`, `send:`, `screendump:` or `udp_echo:`, in file
+/// order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     /// Text a serial line must contain, after the previous step's.
@@ -110,14 +127,18 @@ pub enum Step {
     /// The screen, captured once the step right above it matched and
     /// compared with `tests/qemu/golden/<name>.png`.
     Screendump(String),
+    /// (M9) This many datagrams through the forwarded port, once the step
+    /// right above it matched, each to come back once, unaltered.
+    UdpEcho(u32),
 }
 
-/// What the runner does when the matcher reaches a `send:` or a
-/// `screendump:`, in step order.
+/// What the runner does when the matcher reaches a `send:`, a
+/// `screendump:` or a `udp_echo:`, in step order.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action<'a> {
     Send(&'a [u8]),
     Screendump(&'a str),
+    UdpEcho(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -133,6 +154,8 @@ pub struct Scenario {
     pub steps: Vec<Step>,
     /// Text no serial line may contain.
     pub forbid: Vec<String>,
+    /// (M9) The network device, if any.
+    pub nic: Option<Nic>,
 }
 
 pub fn parse(name: &str, text: &str) -> Result<Scenario> {
@@ -143,6 +166,9 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
     let mut timeout = None;
     let mut steps = Vec::new();
     let mut forbid = Vec::new();
+    let mut nic = None;
+    // The first `udp_echo:`'s line, which needs a `nic:`.
+    let mut udp_echo_line = None;
     for (n, raw) in text.lines().enumerate() {
         let err = |msg: &str| format!("{name}.scenario:{}: {msg}", n + 1);
         // A '#' starts a comment, except inside `expect:` text, where it may
@@ -239,8 +265,41 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
                 }
                 steps.push(Step::Screendump(value.to_string()));
             }
+            "nic" if nic.is_some() => return Err(err("a second `nic:`").into()),
+            "nic" => {
+                nic = Some(Nic::parse(value).ok_or_else(|| err("nic must be `virtio-net`"))?);
+            }
+            "udp_echo" => {
+                // The exchange is the guest's answer to what the line above
+                // announced, as a screendump's screen is.
+                if !matches!(steps.last(), Some(Step::Expect(_) | Step::Next(_))) {
+                    return Err(
+                        err("a `udp_echo:` needs an `expect:` or `next:` right above it").into(),
+                    );
+                }
+                let count = Some(value)
+                    .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|v| v.parse().ok())
+                    .filter(|n| (1..=udp::MAX_COUNT).contains(n))
+                    .ok_or_else(|| {
+                        err(&format!(
+                            "udp_echo's count must be a number from 1 to {}",
+                            udp::MAX_COUNT
+                        ))
+                    })?;
+                steps.push(Step::UdpEcho(count));
+                udp_echo_line.get_or_insert(n + 1);
+            }
             other => return Err(err(&format!("unknown key {other:?}")).into()),
         }
+    }
+    if let Some(line) = udp_echo_line
+        && nic.is_none()
+    {
+        return Err(format!(
+            "{name}.scenario:{line}: a `udp_echo:` needs `nic: virtio-net`, its forwarded port"
+        )
+        .into());
     }
     let exit = exit.ok_or_else(|| format!("{name}.scenario: missing `exit:`"))?;
     if !steps.iter().any(|s| matches!(s, Step::Expect(_))) {
@@ -257,7 +316,7 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
         .iter()
         .map(|s| match s {
             Step::Send(bytes) => bytes.len(),
-            Step::Expect(_) | Step::Next(_) | Step::Screendump(_) => 0,
+            Step::Expect(_) | Step::Next(_) | Step::Screendump(_) | Step::UdpEcho(_) => 0,
         })
         .sum();
     if sent > MAX_SEND_BYTES {
@@ -275,6 +334,7 @@ pub fn parse(name: &str, text: &str) -> Result<Scenario> {
         timeout: timeout.unwrap_or(MAX_TIMEOUT),
         steps,
         forbid,
+        nic,
     })
 }
 
@@ -397,9 +457,11 @@ pub fn clean(raw: &[u8]) -> String {
 /// it has matched, and the expectations after it match only from the next
 /// line on: the rest of the line that released it was printed before the
 /// guest could have read the text. A screendump is released like a send,
-/// but changes nothing in the guest, so matching goes on along its line. A
-/// `next:` must match at the start of the line after its step's; when it
-/// does not, the matcher is broken and matches nothing more.
+/// but changes nothing in the guest, so matching goes on along its line;
+/// a `udp_echo:` is released like a send, and changes what the guest does
+/// as a send does. A `next:` must match at the start of the line after its
+/// step's; when it does not, the matcher is broken and matches nothing
+/// more.
 pub struct Matcher<'a> {
     steps: &'a [Step],
     next: usize,
@@ -442,7 +504,7 @@ impl<'a> Matcher<'a> {
                     let Some(r) = line.strip_prefix(t.as_str()) else {
                         let above = match &self.steps[self.next - 1] {
                             Step::Expect(a) | Step::Next(a) => a.as_str(),
-                            Step::Send(_) | Step::Screendump(_) => "",
+                            Step::Send(_) | Step::Screendump(_) | Step::UdpEcho(_) => "",
                         };
                         self.broken = Some(format!(
                             "printed {line:?} right after the line with {above:?}, \
@@ -458,6 +520,10 @@ impl<'a> Matcher<'a> {
                     actions.push(Action::Send(text));
                 }
                 Step::Screendump(name) => actions.push(Action::Screendump(name)),
+                Step::UdpEcho(count) => {
+                    sent = true;
+                    actions.push(Action::UdpEcho(*count));
+                }
             }
             self.next += 1;
         }
@@ -476,7 +542,7 @@ impl<'a> Matcher<'a> {
     pub fn waiting_for(&self) -> Option<&'a str> {
         self.steps[self.next..].iter().find_map(|s| match s {
             Step::Expect(e) | Step::Next(e) => Some(e.as_str()),
-            Step::Send(_) | Step::Screendump(_) => None,
+            Step::Send(_) | Step::Screendump(_) | Step::UdpEcho(_) => None,
         })
     }
 }
@@ -566,10 +632,17 @@ fn run_one(
         }
         None => (None, Vec::new()),
     };
+    // A NIC's forwarded port, found free: two scenarios may run at once.
+    let nic = match sc.nic {
+        Some(nic) => Some((nic, qemu::free_udp_port()?)),
+        None => None,
+    };
+    let nic_args = nic.map_or_else(Vec::new, |(nic, port)| qemu::nic_args(nic, port));
     let start = Instant::now();
     let mut child = qemu::base_command(&disk)?
         .args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
         .args(&qmp_args)
+        .args(&nic_args)
         .args(&sc.qemu_args)
         .stdin(if sends { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -602,6 +675,14 @@ fn run_one(
             transcript.push(line);
         }
     };
+    if let Some((nic, port)) = nic {
+        record(format!(
+            "xtask: nic {nic}, udp 127.0.0.1:{port} to the guest's port {}",
+            qemu::GUEST_ECHO_PORT
+        ));
+    }
+    // Why the `udp_echo:` exchanges failed, if any did.
+    let mut udp_errors = Vec::new();
     // The first serial line with forbidden text, and the text.
     let mut forbidden: Option<(&str, String)> = None;
     let mut send_error = None;
@@ -655,6 +736,26 @@ fn run_one(
                                 Err(e) => {
                                     record(format!("xtask: screendump \"{name}\" failed"));
                                     screendump_errors.push(format!("screendump {name:?}: {e}"));
+                                }
+                            }
+                        }
+                        Action::UdpEcho(count) => {
+                            // The parser gave every scenario with a
+                            // `udp_echo:` a NIC. The serial lines that
+                            // arrive meanwhile wait in the channel.
+                            let (_, port) = nic.unwrap();
+                            let to = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+                            match udp::exchange(to, count, udp::Limits::SCENARIO, deadline) {
+                                Ok(report) => {
+                                    record(format!("xtask: {}", report.line()));
+                                    for p in report.problems() {
+                                        record(format!("xtask: udp_echo: {p}"));
+                                    }
+                                    udp_errors.extend(report.failure());
+                                }
+                                Err(e) => {
+                                    record(format!("xtask: udp_echo {count} to {to} failed: {e}"));
+                                    udp_errors.push(format!("udp_echo {count}: {e}"));
                                 }
                             }
                         }
@@ -716,6 +817,7 @@ fn run_one(
         )),
         (Some(_), false) => {}
     }
+    why.extend(udp_errors);
     why.extend(screendump_errors);
     let notes = check_screens(sc, &screens, goldens, &mut why);
 
@@ -923,6 +1025,10 @@ expect: TEST PASS   # the kernel's success marker
         Step::Screendump(n.into())
     }
 
+    fn udp_echo(count: u32) -> Step {
+        Step::UdpEcho(count)
+    }
+
     #[test]
     fn parses_a_scenario() {
         let s = parse("hello", HELLO).unwrap();
@@ -937,6 +1043,7 @@ expect: TEST PASS   # the kernel's success marker
                 timeout: MAX_TIMEOUT,
                 steps: vec![expect("microL4 kernel"), expect("TEST PASS")],
                 forbid: vec![],
+                nic: None,
             }
         );
     }
@@ -1365,6 +1472,433 @@ expect: TEST PASS
                 e.contains("lowercase letters, digits"),
                 "{name:?} gave {e:?}"
             );
+        }
+    }
+
+    #[test]
+    fn parses_nic_and_udp_echo() {
+        let s = parse(
+            "net",
+            "\
+cmdline: test=net
+exit: success
+nic: virtio-net                    # QEMU's user networking
+expect: echo: listening on UDP port 7
+udp_echo: 100                      # the done-when
+send: \\r
+expect: , 100 datagrams echoed,
+next: TEST PASS
+udp_echo: 0100
+expect: x
+udp_echo: 1000
+",
+        )
+        .unwrap();
+        assert_eq!(s.nic, Some(Nic::VirtioNet));
+        assert_eq!(
+            s.steps,
+            vec![
+                expect("echo: listening on UDP port 7"),
+                udp_echo(100),
+                send(b"\r"),
+                expect(", 100 datagrams echoed,"),
+                next("TEST PASS"),
+                udp_echo(100),
+                expect("x"),
+                udp_echo(1000),
+            ]
+        );
+        assert_eq!(parse("x", "exit: success\nexpect: x\n").unwrap().nic, None);
+        // A `nic:` alone, anywhere, is enough; a `udp_echo:` needs one.
+        let s = parse("x", "exit: success\nexpect: x\nnic: virtio-net\n").unwrap();
+        assert_eq!((s.nic, s.steps.len()), (Some(Nic::VirtioNet), 1));
+        let nic = "nic: virtio-net\nexit: success\n";
+        for (text, why) in [
+            (
+                "exit: success\nexpect: x\nudp_echo: 5\nexpect: y\nudp_echo: 1\n".to_string(),
+                "t.scenario:3: a `udp_echo:` needs `nic: virtio-net`",
+            ),
+            (
+                format!("{nic}udp_echo: 5\nexpect: x\n"),
+                "3: a `udp_echo:` needs an `expect:` or `next:` right above it",
+            ),
+            (
+                format!("{nic}expect: x\nsend: y\nudp_echo: 5\n"),
+                "right above it",
+            ),
+            (
+                format!("{nic}expect: x\nscreendump: s\nudp_echo: 5\n"),
+                "right above it",
+            ),
+            (
+                format!("{nic}expect: x\nudp_echo: 5\nudp_echo: 5\n"),
+                "5: a `udp_echo:` needs an `expect:` or `next:`",
+            ),
+            (
+                format!("{nic}expect: x\nudp_echo: 5\nnext: y\n"),
+                "5: a `next:` needs",
+            ),
+            (
+                format!("{nic}expect: x\nudp_echo: 5\nscreendump: s\n"),
+                "5: a `screendump:` needs",
+            ),
+            (
+                "nic: e1000e\nexit: success\nexpect: x\n".into(),
+                "1: nic must be `virtio-net`",
+            ),
+            (
+                "nic:   # none\nexit: success\nexpect: x\n".into(),
+                "nic must be `virtio-net`",
+            ),
+            (
+                format!("{nic}nic: virtio-net\nexpect: x\n"),
+                "3: a second `nic:`",
+            ),
+        ] {
+            let e = parse("t", &text).unwrap_err().to_string();
+            assert!(e.contains(why), "{text:?} gave {e:?}, wanted {why:?}");
+        }
+        for count in [
+            "0",
+            "00",
+            "1001",
+            "-1",
+            "+5",
+            "1e2",
+            "0x10",
+            "1,000",
+            "100 datagrams",
+            "4294967296",
+            "  # none",
+        ] {
+            let e = parse("t", &format!("{nic}expect: x\nudp_echo: {count}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("4: udp_echo's count must be a number from 1 to 1000"),
+                "{count:?} gave {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn matcher_releases_udp_echo_like_a_send() {
+        let steps = vec![
+            expect("listening"),
+            udp_echo(100),
+            send(b"\r"),
+            expect("echoed"),
+            expect("PASS"),
+        ];
+        let mut m = Matcher::new(&steps);
+        assert!(m.feed("not yet").is_empty());
+        // Released with the send after it, in order; the rest of the line
+        // was printed before the exchange.
+        assert_eq!(
+            m.feed("listening; echoed"),
+            [Action::UdpEcho(100), Action::Send(b"\r")]
+        );
+        assert_eq!(m.waiting_for(), Some("echoed"));
+        assert!(m.feed("100 echoed, PASS").is_empty());
+        assert!(m.done());
+        // Alone, it still ends its line's matching.
+        let steps = vec![expect("a"), udp_echo(3), expect("b")];
+        let mut m = Matcher::new(&steps);
+        assert_eq!(m.feed("a b"), [Action::UdpEcho(3)]);
+        assert_eq!(m.waiting_for(), Some("b"));
+        assert!(m.feed("b").is_empty());
+        assert!(m.done());
+        assert!(m.feed("a").is_empty(), "released once");
+    }
+
+    /// `Test-L4Vhdx.ps1 -Scenario` follows the Hyper-V checks' scenarios,
+    /// which are in this format: each must parse here, so a typo shows on
+    /// the host. The script ignores QEMU's `kernel:`, `exit:`, `timeout:`,
+    /// `qemu_args:` and `nic:`, and reads `cmdline:` only for the guest's
+    /// `net.ip=`, which a `udp_echo:` sends to.
+    #[test]
+    fn hyperv_scenarios_parse() {
+        let all = load_dir(&crate::root().join("tools/hyperv")).unwrap();
+        assert!(all.iter().any(|s| s.name == "m8-release"));
+    }
+
+    /// The lines root's `release.flood=<n>` prints (`root::flood`), from
+    /// the design rather than root's code: `release: flood <i>/<n> `, `i`
+    /// zero-padded to `n`'s width, then `0`-`9`, `a`-`z`, `A`-`P` rotated
+    /// left by `i`.
+    fn flood(n: usize) -> Vec<String> {
+        let alphabet: Vec<char> = ('0'..='9').chain('a'..='z').chain('A'..='P').collect();
+        assert_eq!(alphabet.len(), 52);
+        let width = n.to_string().len();
+        (1..=n)
+            .map(|i| {
+                let rotated: String = (0..52).map(|j| alphabet[(i + j) % 52]).collect();
+                format!("release: flood {i:0width$}/{n} {rotated}")
+            })
+            .collect()
+    }
+
+    /// The M9 COM1 runs, `release_burst1` and `release_burst15` on QEMU and
+    /// `m9-release-burst1` and `-burst15` on Hyper-V, which boot the same
+    /// command lines, are `release`'s and `m8-release`'s steps with the cap
+    /// and the flood: the command line and its `root: cmdline` line; the 32
+    /// flood lines after `root: empty: slots`, the first an `expect:` and
+    /// the rest `next:`; release's own line `next:` after them; the burst
+    /// in uart's line; and root's line for an ignored word forbidden. On
+    /// QEMU root's line for the cap is `next:` after its command line; on
+    /// Hyper-V it is not expected, so a byte lost there leaves the run
+    /// going.
+    #[test]
+    fn the_com1_runs_are_release_with_the_cap_and_the_flood() {
+        let load = |dir: &str, name: &str| {
+            let path = crate::root().join(dir).join(format!("{name}.scenario"));
+            parse(name, &fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let lines = flood(32);
+        assert_eq!(
+            lines[0],
+            "release: flood 01/32 123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0"
+        );
+        let bytes: usize = lines.iter().map(|l| l.len() + 2).sum();
+        assert_eq!(bytes, 2400, "with console's CR LF");
+        let flood: Vec<Step> = lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| if i == 0 { expect(&l) } else { next(&l) })
+            .collect();
+        for (dir, base, prefix, base_burst) in [
+            ("tests/qemu", "release", "release_burst", ", burst 15"),
+            (
+                "tools/hyperv",
+                "m8-release",
+                "m9-release-burst",
+                ", burst 1",
+            ),
+        ] {
+            let qemu = dir == "tests/qemu";
+            let base = load(dir, base);
+            for cap in [1, 15] {
+                let name = format!("{prefix}{cap}");
+                let sc = load(dir, &name);
+                let cmdline = format!("test=release uart.burst={cap} release.flood=32");
+                assert_eq!(
+                    (sc.cmdline.as_str(), sc.kernel, sc.exit, sc.timeout, sc.nic),
+                    (
+                        cmdline.as_str(),
+                        Kernel::Release,
+                        base.exit,
+                        base.timeout,
+                        None
+                    ),
+                    "{name}"
+                );
+                assert!(sc.qemu_args.is_empty() && base.qemu_args.is_empty());
+                let mut want = Vec::new();
+                let mut changes = 0;
+                for s in &base.steps {
+                    let Step::Expect(t) = s else {
+                        want.push(s.clone());
+                        continue;
+                    };
+                    changes += 1;
+                    match t.as_str() {
+                        "root: cmdline \"test=release\"" => {
+                            want.push(expect(&format!("root: cmdline {cmdline:?}")));
+                            if qemu {
+                                want.push(next(&format!(
+                                    "root: uart.burst={cap}: uart's burst capped at {cap}"
+                                )));
+                            }
+                        }
+                        "root: empty: slots" => {
+                            want.push(s.clone());
+                            want.extend(flood.iter().cloned());
+                        }
+                        t if t.starts_with("release: watch (priority 255), ") => want.push(next(t)),
+                        t if t == base_burst => want.push(expect(&match qemu {
+                            true => format!(", burst {cap}, 0 stale THREs"),
+                            false => format!(", burst {cap},"),
+                        })),
+                        _ => {
+                            changes -= 1;
+                            want.push(s.clone());
+                        }
+                    }
+                }
+                assert_eq!(changes, 4, "{name}: each change found its step");
+                assert_eq!(sc.steps, want, "{name}");
+                let mut forbid = base.forbid.clone();
+                forbid.push("ignored: not a number".into());
+                assert_eq!(sc.forbid, forbid, "{name}");
+            }
+        }
+        // CI builds the Hyper-V images with the scenarios' command lines
+        // and puts the scenarios beside them.
+        let ci = fs::read_to_string(crate::root().join(".github/workflows/ci.yml")).unwrap();
+        for text in [
+            "for burst in 1 15; do",
+            "--kernel release --cmdline \"test=release uart.burst=$burst release.flood=32\"",
+            "target/xtask/m9-com1/release-burst$burst/disk.vhdx",
+            "cp tools/hyperv/m9-release-burst1.scenario tools/hyperv/m9-release-burst15.scenario target/xtask/m9-com1/",
+            "name: microl4-vhdx-m9-com1",
+        ] {
+            assert!(ci.contains(text), "ci.yml has no {text:?}");
+        }
+    }
+
+    /// The M9 Hyper-V check's network runs, `m9-net` and `m9-net-mnf`, are
+    /// QEMU's `net` on Hyper-V: `test=net` on the selftest kernel with the
+    /// note's addresses, the mnf run differing only in `netvsc.mnf=1` and
+    /// the line that says how netvsc signals the host; `nic:`, so that
+    /// `udp_echo:` parses; one exchange of QEMU's count followed by root's
+    /// Enter, released once echo listens; the lines naming the addresses
+    /// agree with the command line's `net.ip=` and `net.gw=`; QEMU's
+    /// checks of net's Stats, with the script's 4 pings answered, before
+    /// `TEST PASS`; and CI builds the images with these command lines and
+    /// puts the scenarios beside them.
+    #[test]
+    fn the_network_runs_are_net_on_hyperv() {
+        let load = |dir: &str, name: &str| {
+            let path = crate::root().join(dir).join(format!("{name}.scenario"));
+            parse(name, &fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let qemu = load("tests/qemu", "net");
+        let net = load("tools/hyperv", "m9-net");
+        let mnf = load("tools/hyperv", "m9-net-mnf");
+        let addresses = "net.ip=192.168.77.2/24 net.gw=192.168.77.1";
+        assert_eq!(net.cmdline, format!("test=net {addresses}"));
+        assert_eq!(mnf.cmdline, format!("test=net {addresses} netvsc.mnf=1"));
+        let exchange = |sc: &Scenario| {
+            let at: Vec<usize> = (0..sc.steps.len())
+                .filter(|&i| matches!(sc.steps[i], Step::UdpEcho(_)))
+                .collect();
+            assert_eq!(at.len(), 1, "{}: one udp_echo:", sc.name);
+            at[0]
+        };
+        let q = exchange(&qemu);
+        // Each step of `want` among `steps`, in this order.
+        let in_order = |name: &str, steps: &[Step], want: &[Step]| {
+            let mut rest = steps.iter();
+            for w in want {
+                assert!(rest.any(|s| s == w), "{name}: no {w:?} in order");
+            }
+        };
+        for sc in [&net, &mnf] {
+            let name = sc.name.as_str();
+            assert_eq!(
+                (sc.kernel, sc.exit, sc.nic),
+                (Kernel::Selftest, qemu.exit, qemu.nic),
+                "{name}"
+            );
+            assert!(sc.qemu_args.is_empty(), "{name}");
+            let word = |key: &str| {
+                sc.cmdline
+                    .split_whitespace()
+                    .find_map(|w| w.strip_prefix(key))
+                    .unwrap()
+            };
+            let (ip, gw) = (word("net.ip="), word("net.gw="));
+            let i = exchange(sc);
+            assert_eq!(
+                sc.steps[i..i + 2],
+                qemu.steps[q..q + 2],
+                "{name}: QEMU's exchange and Enter"
+            );
+            assert_eq!(
+                sc.steps[i - 1],
+                expect("echo: listening on UDP port 7"),
+                "{name}"
+            );
+            let before = [
+                expect("cpu: hypervisor Hyper-V"),
+                expect(&format!("root: cmdline {:?}", sc.cmdline)),
+                expect("servers: vmbus (priority 145, SINT 2 IRQ"),
+                expect("), netvsc (priority 140), net (priority 130); root CNode"),
+                expect("vmbus: version"),
+                expect(": netvsc, connection"),
+                expect("netvsc: up: NVSP"),
+                expect(&format!("net: up: {ip} via {gw}, MAC 00:15:5d:")),
+            ];
+            in_order(name, &sc.steps[..i], &before);
+            // After the exchange: the gateway, which net prints only after
+            // echo's line, then the Stats and the verdict.
+            in_order(
+                name,
+                &sc.steps[i..],
+                &[
+                    Step::UdpEcho(100),
+                    expect(&format!("net: gateway {gw} is at")),
+                    expect("vmbus: stats: version"),
+                    expect("netvsc: stats: NVSP"),
+                    expect(", 0 broken packets,"),
+                    expect("net: stats:"),
+                    expect(", 4 ICMP echo requests answered,"),
+                    expect(", 100 datagrams echoed,"),
+                    expect(", 0 frames dropped, 0 bad entries,"),
+                    expect("TEST PASS"),
+                ],
+            );
+            // QEMU's checks of net's Stats, in QEMU's order.
+            let nets: Vec<Step> = qemu.steps[q..]
+                .iter()
+                .skip_while(|s| **s != expect("net: stats:"))
+                .filter(|s| !matches!(s, Step::Expect(t) if t.starts_with("DEBUG HALT")))
+                .cloned()
+                .collect();
+            assert_eq!(nets.len(), 4, "net: stats: to TEST PASS on QEMU");
+            in_order(name, &sc.steps[i..], &nets);
+            let mut forbid = qemu.forbid.clone();
+            forbid.push("USER PANIC".into());
+            assert_eq!(sc.forbid, forbid, "{name}");
+        }
+        // The two differ in the command line's line and the signalling
+        // line alone.
+        assert_eq!(net.steps.len(), mnf.steps.len());
+        let differ: Vec<(&Step, &Step)> = net
+            .steps
+            .iter()
+            .zip(&mnf.steps)
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(
+            differ,
+            [
+                (
+                    &expect(&format!("root: cmdline {:?}", net.cmdline)),
+                    &expect(&format!("root: cmdline {:?}", mnf.cmdline))
+                ),
+                (
+                    &expect("; netvsc signals the host with SignalEvent"),
+                    &expect(
+                        "; netvsc signals the host through monitor page 2 and the event flags (netvsc.mnf=1)"
+                    )
+                ),
+            ]
+        );
+        // CI builds the images with the scenarios' command lines and puts
+        // the scenarios beside them.
+        let ci = fs::read_to_string(crate::root().join(".github/workflows/ci.yml")).unwrap();
+        for text in [
+            format!("cargo xtask image --cmdline \"{}\"", net.cmdline),
+            "mv target/xtask/image/disk.vhdx target/xtask/m9-check/net/disk.vhdx".into(),
+            format!("cargo xtask image --cmdline \"{}\"", mnf.cmdline),
+            "mv target/xtask/image/disk.vhdx target/xtask/m9-check/net-mnf/disk.vhdx".into(),
+            "cp tools/hyperv/m9-net.scenario tools/hyperv/m9-net-mnf.scenario target/xtask/m9-check/"
+                .into(),
+            "name: microl4-vhdx-m9-check".into(),
+        ] {
+            assert!(ci.contains(&text), "ci.yml has no {text:?}");
+        }
+        // The README runs each with its scenario.
+        let readme = fs::read_to_string(crate::root().join("tools/hyperv/README.md")).unwrap();
+        for text in [
+            "microl4-vhdx-m9-check",
+            "m9-check\\net\\disk.vhdx",
+            "m9-check\\net-mnf\\disk.vhdx",
+            "m9-check\\m9-net.scenario",
+            "m9-check\\m9-net-mnf.scenario",
+        ] {
+            assert!(readme.contains(text), "README.md has no {text:?}");
         }
     }
 

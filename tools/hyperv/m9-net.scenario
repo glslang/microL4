@@ -1,0 +1,62 @@
+# The M9 Hyper-V check's network run (tools/hyperv/README.md, "At the M9
+# check"; docs/design.md, "The M9 Hyper-V check"): M9's done-when on
+# Hyper-V, tests/qemu/net.scenario's steps with what differs there, on
+# the selftest kernel. The VM's adapter is on New-L4Switch.ps1's internal
+# switch, the host at 192.168.77.1/24. Root issues SINT 2 with
+# IRQControl_GetSint, binds it to vmbus's notification, makes the channel
+# frame, the frame queues' frame and the monitor and event-flags pages,
+# prints where they are and that netvsc signals the host with
+# SignalEvent, and starts net (130), netvsc (140) and vmbus (145), each
+# in a CSpace and VSpace of its own. vmbus makes contact, lists the
+# host's offers, builds netvsc's GPADLs and opens its channel; netvsc
+# speaks NVSP and RNDIS and writes the link block; net takes it and ARPs
+# for the host. At udp_echo: Test-L4Vhdx.ps1 runs Send-L4Udp.ps1 against
+# the cmdline's net.ip=: 4 pings, then 100 datagrams of 8 to 1,472 bytes,
+# at most 8 at a time, each echo checked; then it types Enter, and root
+# prints vmbus's, netvsc's and net's Stats and its verdict
+# (root::check::net): the netvsc channel open, no broken packet, no bad
+# queue entry, no frame dropped for want of a buffer, no checksum error,
+# 100 datagrams echoed and the 4 pings answered. Unlike QEMU's scenario,
+# the exchange and Enter come right after "echo: listening", before the
+# gateway's line, which net prints once the host answers its ARP request
+# and so always after that line: if the host never answers, the run
+# still reaches root's Stats, whose netvsc line shows what was sent and
+# completed. The host's firewall may drop net's ping of the host, so
+# "net: ping" is not expected. nic: is xtask's, so that udp_echo: parses
+# here; the script ignores it, and the kernel halts after TEST PASS.
+cmdline: test=net net.ip=192.168.77.2/24 net.gw=192.168.77.1
+exit: success
+nic: virtio-net
+expect: cpu: hypervisor Hyper-V
+expect: root: cmdline "test=net net.ip=192.168.77.2/24 net.gw=192.168.77.1"
+expect: servers: Hyper-V: SINT 2 is IRQ
+expect: ; netvsc signals the host with SignalEvent
+expect: servers: vmbus (priority 145, SINT 2 IRQ
+expect: ), netvsc (priority 140), net (priority 130); root CNode
+expect: vmbus: version
+expect: vmbus: offer
+expect: : netvsc, connection
+expect: vmbus: netvsc channel
+expect: open, connection
+expect: netvsc: up: NVSP
+expect: , MAC 00:15:5d:
+expect: , link up,
+expect: net: up: 192.168.77.2/24 via 192.168.77.1, MAC 00:15:5d:
+expect: echo: listening on UDP port 7
+udp_echo: 100
+send: \r                           # root's line: report and end
+expect: net: gateway 192.168.77.1 is at
+expect: vmbus: stats: version
+expect: , netvsc channel
+expect: netvsc: stats: NVSP
+expect: , 0 dropped for no buffer,
+expect: , 0 broken packets,
+expect: , 0 bad queue entries
+expect: net: stats:
+expect: , 4 ICMP echo requests answered,
+expect: , 100 datagrams echoed,
+expect: , 0 frames dropped, 0 bad entries,
+expect: TEST PASS
+forbid: TEST FAIL
+forbid: KERNEL PANIC
+forbid: USER PANIC

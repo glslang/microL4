@@ -422,6 +422,10 @@ fn data() -> impl Strategy<Value = Data> {
         3 => (0u8..=8, any::<u64>()).prop_map(|(s, g)| Data::Guard(s, g)),
         1 => (any::<u8>(), any::<u64>()).prop_map(|(s, g)| Data::Guard(s, g)),
         1 => any::<u64>().prop_map(Data::Raw),
+        // A Hypervisor narrowing (M9): one of four connections with some
+        // of `post` and `signal`, so that a restricted copy is narrowed
+        // again, to its own connection or another.
+        1 => (0u64..4, 0u64..4).prop_map(|(c, r)| Data::Raw(c | r << 24)),
     ]
 }
 

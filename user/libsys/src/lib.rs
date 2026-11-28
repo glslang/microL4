@@ -18,7 +18,8 @@
 //!   binding included, and [`Error`] is the error a failed one returns,
 //!   decoded.
 //! - [`device`] performs the IRQControl, IRQHandler, IOPortControl and
-//!   IOPort invocations (M7).
+//!   IOPort invocations (M7), `GetMSI` and `GetSint` included (M9), and
+//!   [`hyperv`] the Hypervisor invocations (M9).
 //! - [`objects`] hands out the root task's free slots and picks the untyped
 //!   its objects are retyped from.
 //! - [`proto`] defines the `uart`, `console` and `term` protocols;
@@ -31,6 +32,11 @@
 //! - [`vspace`] maps paging structures and frames, and [`image`] gives the
 //!   program's segment bounds, for building a server's address space from
 //!   the root task's image frames.
+//! - [`mem`] reaches device registers ([`mem::Mmio`]) and memory shared
+//!   with a device, the host or another VSpace ([`mem::Shared`]) through
+//!   the [`mem::Regs`] and [`mem::Memory`] traits, which [`mem::Ram`]
+//!   implements on the host for the drivers' tests (M9).
+//! - [`frames`] is the frame queues a network driver and `net` share (M9).
 //!
 //! User programs build for `x86_64-unknown-none`, like the kernel, so
 //! nothing uses SSE (`docs/design.md`, "FP and SIMD"), but with the small
@@ -52,9 +58,12 @@ pub mod cpu;
 mod debug;
 pub mod device;
 pub mod error;
+pub mod frames;
+pub mod hyperv;
 #[cfg(target_os = "none")]
 pub mod image;
 pub mod invoke;
+pub mod mem;
 pub mod notification;
 pub mod objects;
 pub mod output;

@@ -1,0 +1,10 @@
+# The UDP checksum off by one.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 52550a000202 0806  # the gateway's ARP reply: the stack learns its MAC
+    0001 0800 06 04 0002 52550a000202 0a000202 525400123456 0a00020f
+event: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+in: 525400123456 52550a000202 0800  # 10.0.2.2 > 10.0.2.15, id 4660: UDP 40000 > 7, 11 bytes; 53 bytes
+    45 00 0027 1234 4000 40 11 1082 0a000202 0a00020f
+    9c40 0007 0013 14a5
+    68656c6c 6f2c2065 63686f
+stats: frames_in=2 arp_learnt=1 udp_checksum=1

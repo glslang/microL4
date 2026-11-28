@@ -1,0 +1,17 @@
+[package]
+name = "pci"
+description = "microL4's PCI enumeration through ECAM for the root task: the scan, functions, BARs and their sizing, the capability walk, MSI-X and the plan of a virtio-net function's pages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dev-dependencies]
+# The proptest of random configuration spaces. `std` alone: no forking,
+# timeouts or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

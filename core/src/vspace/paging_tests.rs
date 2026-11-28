@@ -555,8 +555,8 @@ fn a_label_of_another_type_or_level_is_illegal_before_the_length() {
         (PDPT1, &[PDPT_MAP, PDPT_UNMAP]),
         (PD1, &[PD_MAP, PD_UNMAP]),
         (PT1, &[PT_MAP, PT_UNMAP]),
-        (F0 + 1, &[MAP, UNMAP, REMAP]),
-        (G1, &[MAP, UNMAP, REMAP]),
+        (F0 + 1, &[MAP, UNMAP, REMAP, label::FRAME_GET_ADDRESS]),
+        (G1, &[MAP, UNMAP, REMAP, label::FRAME_GET_ADDRESS]),
         (PML4_A, &[]),
         (PML4_B, &[]),
     ];
@@ -570,8 +570,10 @@ fn a_label_of_another_type_or_level_is_illegal_before_the_length() {
             }
         }
     }
-    // Frame_GetAddress is M9's.
-    w.fails(F0, label::FRAME_GET_ADDRESS, &[], &[], ILLEGAL);
+    // Frame_GetAddress (M9) is a Frame's alone.
+    for slot in [PML4_A, PDPT0, PD0, PT0] {
+        w.fails(slot, label::FRAME_GET_ADDRESS, &[], &[], ILLEGAL);
+    }
     // An empty slot is InvalidCapability 0 whatever the label.
     w.fails(FREE, MAP, &[], &[], SyscallError::InvalidCapability(0));
 }
@@ -1081,4 +1083,63 @@ fn errors_convert_into_invoke_errors() {
     assert_eq!(r, Err(InvokeError::Error(missing(39))));
     let f: Cap = w.root(F0);
     assert_eq!(paging::link_of(&f), None);
+}
+
+#[test]
+fn frame_get_address_answers_any_frame_and_changes_nothing() {
+    // Mapped (F0) or not (F0 + 1), RAM or device, 4 KiB or 2 MiB,
+    // read-only: one result word, no flush, no memory changed.
+    let mut w = stocked();
+    for slot in [F0, F0 + 1, DF, G0, DG, FR] {
+        let before = w.k.mem.clone();
+        let r = w.call(rs(slot), label::FRAME_GET_ADDRESS, &[], &[]);
+        assert_eq!(r, Ok(crate::invoke::Reply { length: 1 }), "slot {slot}");
+        // Extra registers and capabilities are ignored.
+        let r = w.call(rs(slot), label::FRAME_GET_ADDRESS, &[1, 2, 3], &[rs(EP)]);
+        assert_eq!(r, Ok(crate::invoke::Reply { length: 1 }), "slot {slot}");
+        assert!(w.k.mem == before && w.k.flushes.is_empty(), "slot {slot}");
+        assert!(w.k.events.is_empty());
+    }
+    check(&w.k).unwrap();
+}
+
+#[test]
+fn frame_get_address_returns_the_frames_physical_base_to_the_caller() {
+    use crate::cdt;
+    use crate::ipc::MessageInfo;
+    use crate::ipc::tests::{self as ipc, A, FRAME_RO, FRAME_RW, S_FRAME_RO, S_FRAME_RW, S_FREE};
+    use crate::syscall::Outcome;
+
+    let mut w = ipc::World::new();
+    // Frames the thread can name but nobody maps; GetAddress never reads
+    // them: a 2 MiB RAM frame above 4 GiB, a 2 MiB and a 4 KiB device
+    // frame, one without rights.
+    let others = [
+        (0x2_0020_0000, 21, false, RW_RIGHTS),
+        (0xC000_0000, 21, true, RW_RIGHTS),
+        (0xFEB0_1000, 12, true, Rights::NONE),
+    ];
+    for (i, &(base, bits, device, rights)) in others.iter().enumerate() {
+        let cap = Cap::new(CapType::Frame, base, bits, rights, device, 0);
+        cdt::insert_root(&mut w.k, ipc::rs(S_FREE + i as u64), cap);
+    }
+    let wants = [(S_FRAME_RW, FRAME_RW), (S_FRAME_RO, FRAME_RO)]
+        .into_iter()
+        .chain(
+            others
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (S_FREE + i as u64, o.0)),
+        );
+    for (slot, want) in wants {
+        let rsi = MessageInfo::new(label::FRAME_GET_ADDRESS, 0, 0, 0).word();
+        assert_eq!(w.syscall(A, 1, slot, rsi, None), Outcome::Done);
+        let m = MessageInfo::from_word(w.regs(A).rsi);
+        assert_eq!(
+            (m.label(), m.length(), w.mr(A, 0)),
+            (0, 1, want),
+            "slot {slot}"
+        );
+    }
+    w.check();
 }

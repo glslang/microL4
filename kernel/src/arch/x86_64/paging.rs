@@ -835,6 +835,36 @@ mod vspace_test {
         fn irq_action(&mut self, action: l4core::irq::Action) -> bool {
             self.0.irq_action(action)
         }
+
+        fn apic_id(&self) -> u8 {
+            self.0.apic_id()
+        }
+
+        fn synic(&self) -> bool {
+            self.0.synic()
+        }
+
+        fn sint_action(&mut self, action: l4core::irq::SintAction) {
+            self.0.sint_action(action)
+        }
+    }
+
+    impl l4core::hyperv::Hypercalls for Wired {
+        fn post_message(&mut self, call: l4core::hyperv::PostMessage) -> u16 {
+            self.0.post_message(call)
+        }
+
+        fn signal_event(&mut self, call: l4core::hyperv::SignalEvent) -> u16 {
+            self.0.signal_event(call)
+        }
+
+        fn eom(&mut self) {
+            self.0.eom()
+        }
+
+        fn vp_index(&mut self) -> u64 {
+            self.0.vp_index()
+        }
     }
 
     impl l4core::ioport::IoPorts for Wired {

@@ -1,0 +1,22 @@
+[package]
+name = "net"
+description = "microL4's network stack: Ethernet, ARP, IPv4, ICMP echo and UDP with the UDP echo service, host-tested against golden frames, and the loop the root task runs in a VSpace of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+# The command line's words, the console client, output and refusals that
+# `net::run` and root use.
+libsys = { path = "../libsys" }
+
+[dev-dependencies]
+# The proptests of random and mutated frames. `std` alone: no forking,
+# timeouts or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

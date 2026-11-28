@@ -1,9 +1,11 @@
 //! The `uart`, `console` and `term` protocols (`docs/design.md`, "The
 //! uart protocol", "Protocols" and "Input and the term protocol"): request
 //! labels, the byte-string encoding, the error labels, `uart`'s and
-//! `term`'s `Stats`, `term`'s `Size`, and the notification badges. Both
-//! ends are built into one root image, so this module is the protocols'
-//! only definition; it is not part of `docs/abi.md`.
+//! `term`'s `Stats`, `term`'s `Size`, and the notification badges; from M9
+//! the network servers' labels, badges, `Stats` and texts and `vmbus`'s
+//! `Attach` reply (`docs/design.md`, "Networking"). Both ends are built
+//! into one root image, so this module is the protocols' only definition;
+//! it is not part of `docs/abi.md`.
 //!
 //! A byte string travels as MR0 = its length `n` and MR1 to MR⌈`n`/8⌉ =
 //! its bytes, eight per word, little-endian: byte `i` is bits 8(`i` mod 8)
@@ -19,6 +21,14 @@
 use core::fmt;
 
 use l4core::ipc::MSG_MAX_LENGTH;
+
+mod net;
+
+pub use crate::frames::Mac;
+pub use net::{
+    NdisVersion, NetvscStats, NvspVersion, VirtioFeatures, VirtioNetStats, VmbusAttach, VmbusStats,
+    VmbusVersion, virtio_feature,
+};
 
 /// The most bytes one message carries.
 pub const MAX_BYTES: usize = 8 * (MSG_MAX_LENGTH - 1);
@@ -69,6 +79,20 @@ pub mod label {
     pub const TERM_SIZE: u64 = 0x142;
     /// `term`: the counters ([`super::TermStats`]); any badge.
     pub const TERM_STATS: u64 = 0x143;
+
+    /// `virtio-net`: the counters ([`super::VirtioNetStats`]) (M9).
+    pub const VIRTIO_NET_STATS: u64 = 0x150;
+    /// `vmbus`: netvsc's request for its channel, answered once it is open
+    /// ([`super::VmbusAttach`] and the restricted Hypervisor capability);
+    /// badge 1 only (M9).
+    pub const VMBUS_ATTACH: u64 = 0x160;
+    /// `vmbus`: the counters ([`super::VmbusStats`]) (M9).
+    pub const VMBUS_STATS: u64 = 0x161;
+    /// `netvsc`: the counters ([`super::NetvscStats`]) (M9).
+    pub const NETVSC_STATS: u64 = 0x170;
+    /// `net`: the counters, which `net` defines and words itself
+    /// (`net::link::Report`) (M9).
+    pub const NET_STATS: u64 = 0x180;
 }
 
 /// A server's refusal: the reply's label, with `length` 0.
@@ -84,6 +108,9 @@ pub enum Refusal {
     Busy = 0x103,
     /// A badge outside the requests' range.
     BadBadge = 0x104,
+    /// What the request asks for does not exist and will not: `vmbus`'s
+    /// `Attach` with no netvsc offer, or after its setup stopped (M9).
+    Unavailable = 0x105,
 }
 
 impl Refusal {
@@ -94,6 +121,7 @@ impl Refusal {
             0x102 => Some(Refusal::BadLength),
             0x103 => Some(Refusal::Busy),
             0x104 => Some(Refusal::BadBadge),
+            0x105 => Some(Refusal::Unavailable),
             _ => None,
         }
     }
@@ -111,6 +139,7 @@ impl fmt::Display for Refusal {
             Refusal::BadLength => "BadLength",
             Refusal::Busy => "Busy",
             Refusal::BadBadge => "BadBadge",
+            Refusal::Unavailable => "Unavailable",
         })
     }
 }
@@ -120,8 +149,21 @@ impl fmt::Display for Refusal {
 /// endpoint badge either server's requests carry, so
 /// `libsys::Event::classify` tells them from messages.
 pub const RX_READY: u64 = 1 << 32;
-/// The badge of the IRQ 4 handler's notification capability.
+/// The badge of the IRQ 4 handler's notification capability, and from M9
+/// of `virtio-net`'s MSI handler's.
 pub const IRQ: u64 = 1 << 32;
+/// The badge with which a network driver and `net` signal each other's
+/// notification after a batch of the frame queues ([`crate::frames`]):
+/// bit 33, so that `virtio-net` tells it from its `IRQ` and `netvsc` from
+/// its `CHANNEL` (M9).
+pub const FRAMES: u64 = 1 << 33;
+/// The badge of `vmbus`'s SINT 2 handler's notification capability (M9).
+pub const SINT: u64 = 1 << 32;
+/// The badge with which `vmbus` signals `netvsc` an event on its channel
+/// (M9).
+pub const CHANNEL: u64 = 1 << 32;
+/// The badge of `vmbus`'s one client, `netvsc`; `Attach` needs it (M9).
+pub const VMBUS_CLIENT: u64 = 1;
 /// The badge of console's capability to term's notification NT, which it
 /// signals once per uart `Read` that put bytes in its raw queue: bit 32,
 /// above term's client badges, as [`RX_READY`] is above console's.
@@ -200,8 +242,9 @@ pub struct UartStats {
     /// MR7: service routines cut short by the limit of 64 reads that move
     /// no byte.
     pub cut_short: u64,
-    /// MR8 (M8): the transmit burst setup chose, 15 with working FIFOs
-    /// and 1 without, for the Hyper-V check of its 16550.
+    /// MR8 (M8): the transmit burst in use, 15 with working FIFOs and 1
+    /// without, for the Hyper-V check of its 16550; from M9 at most `n`
+    /// under the command line's `uart.burst=<n>`.
     pub burst: u64,
     /// MR9 (M8): THRE interrupts found stale, IIR naming THRE while LSR
     /// said the FIFO still held bytes, which uart then ignores; for the
@@ -245,7 +288,7 @@ impl UartStats {
 }
 
 /// What root's uart lines show; `release` expects `, burst 15` (working
-/// FIFOs) near their end.
+/// FIFOs) near their end, and `release_burst1` `, burst 1,`.
 impl fmt::Display for UartStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -486,6 +529,11 @@ mod tests {
             label::TERM_READ,
             label::TERM_SIZE,
             label::TERM_STATS,
+            label::VIRTIO_NET_STATS,
+            label::VMBUS_ATTACH,
+            label::VMBUS_STATS,
+            label::NETVSC_STATS,
+            label::NET_STATS,
         ];
         assert!(all.iter().all(|&l| l > 0x8F));
         // Distinct, and none an error label.
@@ -498,18 +546,40 @@ mod tests {
             Refusal::BadLength,
             Refusal::Busy,
             Refusal::BadBadge,
+            Refusal::Unavailable,
         ] {
             assert!(r.label() > 10);
             assert_eq!(Refusal::from_label(r.label()), Some(r));
+            assert_eq!(std::format!("{r:?}"), std::format!("{r}"));
         }
+        assert_eq!(Refusal::Unavailable.label(), 0x105);
         assert_eq!(Refusal::from_label(0), None);
-        assert_eq!(Refusal::from_label(0x105), None);
+        assert_eq!(Refusal::from_label(0x106), None);
         assert_eq!(RX_READY & 0xFFFF_FFFF, 0);
         // term's notification bit lies above every badge its endpoint's
         // capabilities carry (its client 1, root's Stats 2).
         assert_eq!(KEYS & 0xFFFF_FFFF, 0);
         assert_eq!(TERM_CLIENT & !0xFFFF_FFFF, 0);
         assert_eq!(CONSOLE_RAW_CLIENT, 4);
+        // M9's: the design's values, the signal badges above every
+        // endpoint badge (clients 1, root's Stats 2), and a driver's two
+        // signals told apart.
+        assert_eq!(
+            [
+                label::VIRTIO_NET_STATS,
+                label::VMBUS_ATTACH,
+                label::VMBUS_STATS,
+                label::NETVSC_STATS,
+                label::NET_STATS
+            ],
+            [0x150, 0x160, 0x161, 0x170, 0x180]
+        );
+        assert_eq!(
+            (FRAMES, SINT, CHANNEL, IRQ),
+            (1 << 33, 1 << 32, 1 << 32, 1 << 32)
+        );
+        assert_eq!(FRAMES & (IRQ | CHANNEL), 0);
+        assert_eq!(VMBUS_CLIENT, 1);
     }
 
     #[test]

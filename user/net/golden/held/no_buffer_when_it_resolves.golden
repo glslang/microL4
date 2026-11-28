@@ -1,0 +1,18 @@
+# The waiting packet is dropped, and counted, if no transmit buffer is
+# free when its address resolves; it does not wait again.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: 525400123456 020000000003 0800  # 10.0.2.3 > 10.0.2.15, id 4660: ICMP echo request, id 0x1234 seq 1, 16 bytes; 58 bytes
+    45 00 002c 1234 4000 40 01 108c 0a000203 0a00020f
+    08 00 a27f 1234 0001
+    61626364 65666768 696a6b6c 6d6e6f70
+out: ffffffffffff 525400123456 0806  # ARP request: who has 10.0.2.3? tell 10.0.2.15; 60 bytes
+     0001 0800 06 04 0001 525400123456 0a00020f 000000000000 0a000203
+     00000000 00000000 00000000 00000000
+     0000
+tx: 0
+in: 525400123456 020000000003 0806  # ARP reply: 10.0.2.3 is at 02:00:00:00:00:03, to 10.0.2.15; 42 bytes
+    0001 0800 06 04 0002 020000000003 0a000203 525400123456 0a00020f
+tx: any
+in: 525400123456 020000000003 0806  # ARP reply: 10.0.2.3 is at 02:00:00:00:00:03, to 10.0.2.15; 42 bytes
+    0001 0800 06 04 0002 020000000003 0a000203 525400123456 0a00020f
+stats: frames_in=3 frames_out=1 arp_sent=1 arp_learnt=2 icmp_answered=1 tx_full=1

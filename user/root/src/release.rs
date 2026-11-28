@@ -8,10 +8,12 @@
 //! stop it silently. It issues the COM1 range, IRQ 4 and, under QEMU,
 //! `0xF4` to `0xF7`, sets its exit port, starts `watch`, `uart` and
 //! `console`, attaches as client 1, sets its output and prints through
-//! console: its usual summary; a probe thread's five debug and reserved
-//! system calls, each an `UnknownSyscall` fault the root task answers with
-//! the probe's registers and `ip` + 2; the line the harness types, which
-//! reaches client 1 since focus starts there; uart's totals; `TEST PASS`.
+//! console: its usual summary; from M9, with `release.flood=<n>` on the
+//! command line, `n` numbered lines right after it, back to back
+//! (`root::flood`); a probe thread's five debug and reserved system calls,
+//! each an `UnknownSyscall` fault the root task answers with the probe's
+//! registers and `ip` + 2; the line the harness types, which reaches
+//! client 1 since focus starts there; uart's totals; `TEST PASS`.
 //! `exit(0)` then syncs the console and writes `0x10` to `isa-debug-exit`.
 
 use libsys::bootinfo::CAP_INIT_TCB;
@@ -26,6 +28,7 @@ use root::check::console::{
     self as check, PROBE_NUMBERS, RELEASE_INPUT_BYTES, RELEASE_LINE, REPORT, ROOT,
     UNKNOWN_SYSCALL_WORDS,
 };
+use root::flood::Flood;
 
 use crate::fail;
 use crate::servers::{self, CLIENT_PRIORITY, CONSOLE_PRIORITY, UART_PRIORITY, WATCH_PRIORITY};
@@ -48,6 +51,15 @@ pub fn run(bi: &'static BootInfo) -> ! {
         fail!("release: root's Attach gave {attached:?}, not client 1");
     }
     crate::summary(bi);
+    // From M9: the flood, for the Hyper-V check of COM1's lost bytes,
+    // before anything else is printed.
+    let flood = Flood::parse(bi.cmdline());
+    if let Flood::Ignored(_) = flood {
+        println!("release: {flood}");
+    }
+    for line in flood.lines() {
+        println!("{line}");
+    }
     println!(
         "release: watch (priority {WATCH_PRIORITY}), uart (priority {UART_PRIORITY}) with the COM1 IOPort and IRQ 4, console (priority {CONSOLE_PRIORITY}); exit port {}",
         if exit.is_some() {

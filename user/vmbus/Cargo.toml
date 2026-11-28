@@ -1,0 +1,25 @@
+[package]
+name = "vmbus"
+description = "microL4's VMBus driver: the SynIC message slot and event flags, contact, channel offers, GPADLs and netvsc's channel, host-tested against the mock VMBus host, and the vmbus server the root task runs in a VSpace of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+# The Memory trait the SynIC pages are reached through, the vmbus
+# protocol's labels, Stats and Attach reply, and on the target the
+# invocations.
+libsys = { path = "../libsys" }
+
+[dev-dependencies]
+# The mock VMBus host the tests run vmbus against.
+hvmock = { path = "../hvmock" }
+# The proptest of hostile host messages. `std` alone: no forking, timeouts
+# or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

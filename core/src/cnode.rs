@@ -11,6 +11,7 @@
 use crate::cap::{Cap, CapType, Rights, TCB_BITS, TCB_SLOTS, cnode_data};
 use crate::cdt;
 use crate::error::{LookupFailure, SyscallError};
+use crate::hyperv::HypervisorCap;
 use crate::kernel::{Kernel, Preempted};
 use crate::slot::{SlotAddr, SlotMemory};
 
@@ -222,8 +223,13 @@ fn mint_data(cap: Cap, data: u64) -> Result<(Cap, bool), SyscallError> {
             }
         }
         CapType::CNode => Ok((with_guard(cap, data)?, false)),
-        // Narrowing a Hypervisor capability arrives with it, in M9.
-        CapType::Hypervisor if data != 0 => Err(SyscallError::IllegalOperation),
+        // Data 0 is a Copy; other data narrows, never widens, and makes an
+        // original (`docs/abi.md`, "Mint data word").
+        CapType::Hypervisor => {
+            let hv = HypervisorCap::from_cap(&cap).expect("a Hypervisor capability");
+            let (narrowed, original) = hv.mint(data)?;
+            Ok((narrowed.cap(), original))
+        }
         CapType::Untyped => Ok((cap, true)),
         _ => Ok((cap, false)),
     }

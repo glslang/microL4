@@ -74,7 +74,7 @@ fn setup_programs_the_device_in_order() {
         reads: reads.into_iter().collect(),
         acks: 0,
     };
-    let (uart, out) = Uart::start(&mut s);
+    let (uart, out) = Uart::start(&mut s, Cap::NONE);
     assert_eq!(uart.burst(), FIFO_BURST);
     assert_eq!(out, Outcome::default());
     let w = |reg, v| ('w', reg, v);
@@ -131,7 +131,7 @@ fn without_working_fifos_the_burst_is_one() {
         reads: [LSR_TEMT, 0x01, 0x60, 0, IIR_NO_INT].into_iter().collect(),
         acks: 0,
     };
-    let (uart, _) = Uart::start(&mut s);
+    let (uart, _) = Uart::start(&mut s, Cap::NONE);
     assert_eq!((uart.burst(), uart.stats().burst), (1, 1));
     // TEMT never comes: 10,000 polls, then on.
     let mut s = Script {
@@ -142,6 +142,40 @@ fn without_working_fifos_the_burst_is_one() {
     setup(&mut s);
     let polls = s.log.iter().filter(|e| e.1 == LSR && e.0 == 'r').count();
     assert_eq!(polls, TEMT_POLLS as usize + 1, "and step 7's read");
+}
+
+#[test]
+fn the_command_lines_cap_limits_setups_burst() {
+    // Cap::new takes 1 to 15 only, and the word in rdi round-trips.
+    for n in [0, 16, 17, 255, u64::MAX] {
+        assert_eq!(Cap::new(n), None, "{n}");
+        assert_eq!(Cap::from_word(n), Cap::NONE, "{n}");
+    }
+    assert_eq!(Cap::NONE.to_word(), 0);
+    for n in 1..=FIFO_BURST as u64 {
+        let cap = Cap::new(n).unwrap();
+        assert_eq!((cap.to_word(), Cap::from_word(n)), (n, cap));
+    }
+    // The burst is the smaller of the cap and setup's, 15 with working
+    // FIFOs and 1 without; no cap, or a word root never passes, keeps
+    // setup's. Stats MR8 reports the burst in use.
+    for (iir, setup) in [(0xC1, FIFO_BURST), (0x01, 1)] {
+        for word in [0, 1, 2, 7, 14, 15, 16, 255, u64::MAX] {
+            let mut s = Script {
+                log: Vec::new(),
+                reads: [LSR_TEMT, iir, 0x60, 0, IIR_NO_INT].into_iter().collect(),
+                acks: 0,
+            };
+            let (uart, _) = Uart::start(&mut s, Cap::from_word(word));
+            let want = match word {
+                1..=15 => setup.min(word as usize),
+                _ => setup,
+            };
+            assert_eq!(uart.burst(), want, "IIR {iir:#x}, cap {word}");
+            assert_eq!(uart.stats().burst, want as u64);
+            assert_eq!(uart.stats().to_words()[8], want as u64);
+        }
+    }
 }
 
 #[test]
@@ -218,6 +252,8 @@ struct Config {
     service_first: bool,
     /// A THR write leaves a pending THRE interrupt pending (`Dev`).
     stale_thre: bool,
+    /// The command line's cap on the burst.
+    cap: Cap,
 }
 
 /// The device, the pin and the outside world, as uart's [`Port`] and
@@ -440,7 +476,7 @@ fn run(cfg: Config, seed: u64) -> Result<(Uart, Sim, Console), Failure> {
         ..Console::default()
     };
     let broken = |m: std::string::String| Err(Failure::Broken(m));
-    let (mut uart, first) = Uart::start(&mut sim);
+    let (mut uart, first) = Uart::start(&mut sim, cfg.cap);
     // Input starts once uart runs, as the harness's `send:` waits for a
     // line uart printed: setup's FIFO reset drops what came before. So
     // does the kernel's output: step 2 lets the bytes written before it
@@ -612,6 +648,10 @@ fn check_end(cfg: &Config, uart: &Uart, sim: &Sim, con: &Console) {
     assert_eq!(s.cut_short, 0, "a working device never reaches the limit");
     assert_eq!(s.received as usize, con.received.len());
     assert_eq!(s.sent as usize, expect.len());
+    // The burst is setup's, capped; Stats MR8 reports it.
+    let setup = if cfg.fifos { FIFO_BURST } else { 1 };
+    assert_eq!(uart.burst(), cfg.cap.apply(setup));
+    assert_eq!(s.burst as usize, uart.burst());
     assert!(
         sim.most_per_thre <= uart.burst(),
         "{} bytes after one THRE",
@@ -653,6 +693,7 @@ fn config(rng: &mut Rng) -> Config {
         line_errors: pick(rng, 4) == 0,
         service_first: false,
         stale_thre: pick(rng, 4) == 0,
+        cap: Cap::NONE,
     }
 }
 
@@ -701,6 +742,34 @@ fn a_stale_thre_interrupt_never_overflows_the_fifo() {
     }
 }
 
+/// Whatever the command line's cap, the random runs keep every limit: the
+/// model's FIFO never overflows, no more than the cap follows one THRE,
+/// and no byte is lost or left behind (`check_end`).
+#[test]
+fn every_cap_keeps_the_fifo_from_overflowing() {
+    let (caps, runs): (&[u64], u64) = if cfg!(miri) {
+        (&[1, 15], 1)
+    } else {
+        (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 20)
+    };
+    for &n in caps {
+        for seed in 0..runs {
+            let mut rng = Rng::new(20_000 + 100 * n + seed);
+            let cfg = Config {
+                cap: Cap::new(n).unwrap(),
+                ..config(&mut rng)
+            };
+            match run(cfg, seed) {
+                Ok((uart, sim, con)) => {
+                    check_end(&cfg, &uart, &sim, &con);
+                    assert!(sim.most_per_thre <= n as usize, "cap {n}");
+                }
+                Err(f) => panic!("cap {n}, seed {seed}, {cfg:?}: {f:?}"),
+            }
+        }
+    }
+}
+
 #[test]
 fn servicing_before_the_ack_strands_uart() {
     // The old loop, wait, service, Ack, on an edge pin that drops edges
@@ -727,6 +796,11 @@ fn servicing_before_the_ack_strands_uart() {
 /// A device for the hand-written tests: a FIFO 16550 set up by uart,
 /// QEMU's instant transmitter, and no random events.
 fn quiet(tx: Tx) -> (Uart, Sim) {
+    quiet_capped(tx, Cap::NONE)
+}
+
+/// The same, with the burst capped.
+fn quiet_capped(tx: Tx, cap: Cap) -> (Uart, Sim) {
     let cfg = Config {
         tx,
         rx: Rx::Wait,
@@ -740,9 +814,10 @@ fn quiet(tx: Tx) -> (Uart, Sim) {
         line_errors: false,
         service_first: false,
         stale_thre: false,
+        cap,
     };
     let mut sim = Sim::new(&cfg, Rng::new(1));
-    let (uart, _) = Uart::start(&mut sim);
+    let (uart, _) = Uart::start(&mut sim, cfg.cap);
     (uart, sim)
 }
 
@@ -805,6 +880,38 @@ fn a_write_that_does_not_fit_is_held_and_released_in_order() {
     }
     assert_eq!(sim.dev.ier & IER_THRI, 0);
     assert!(uart.stats().thre_bursts > 0);
+}
+
+#[test]
+fn a_capped_burst_fills_the_fifo_with_at_most_the_cap() {
+    // A slow transmitter, as on hardware: each THRE interrupt finds the
+    // FIFO empty and gets one burst of exactly the cap, the last one
+    // what is left.
+    let bytes: Vec<u8> = (0..100u8).collect();
+    for n in 1..=FIFO_BURST {
+        let (mut uart, mut sim) = quiet_capped(Tx::Slow, Cap::new(n as u64).unwrap());
+        assert_eq!((uart.burst(), uart.stats().burst), (n, n as u64));
+        assert_eq!(
+            write(&mut uart, &mut sim, &bytes, true),
+            Answer::Written(100)
+        );
+        assert_eq!(uart.queued(), 100 - n, "the request's burst");
+        while uart.queued() > 0 {
+            while sim.tick() && !sim.pin.signal {}
+            if sim.pin.signal {
+                sim.pin.signal = false;
+                uart.on_interrupt(&mut sim);
+            }
+        }
+        while sim.tick() {}
+        let wire: Vec<u8> = sim.dev.wire.iter().map(|w| w.1).collect();
+        assert_eq!(wire, bytes, "cap {n}");
+        assert_eq!(sim.most_per_thre, n, "cap {n}: bytes after one THRE");
+        assert!(!sim.dev.overflowed);
+        let s = uart.stats();
+        assert_eq!(s.thre_bursts as usize, (100 - n).div_ceil(n), "cap {n}");
+        assert_eq!((s.sent, s.stale_thre, s.cut_short), (100, 0, 0));
+    }
 }
 
 #[test]
@@ -893,22 +1000,34 @@ fn a_full_ring_stops_and_resumes_reception() {
 
 #[test]
 fn qemus_transmitter_empties_the_queue_in_one_routine() {
-    let (mut uart, mut sim) = quiet(Tx::Instant);
-    for _ in 0..2 {
+    // With any cap: `release_burst1` runs QEMU with burst 1, which takes
+    // 1,902 THRE bursts in one routine, none of which counts toward the
+    // limit of 64.
+    for cap in [Cap::NONE, Cap::new(1).unwrap(), Cap::new(7).unwrap()] {
+        let (mut uart, mut sim) = quiet_capped(Tx::Instant, cap);
+        let burst = uart.burst();
+        assert_eq!(burst, cap.apply(FIFO_BURST));
+        for _ in 0..2 {
+            assert_eq!(
+                write(&mut uart, &mut sim, &[b'q'; MAX_BYTES], true),
+                Answer::Written(952)
+            );
+        }
+        // Each THR write leaves at once and raises THRE again; each Write
+        // wrote one burst.
+        assert!(sim.pin.signal);
+        sim.pin.signal = false;
+        uart.on_interrupt(&mut sim);
+        assert_eq!(uart.queued(), 0);
+        assert_eq!(sim.dev.wire.len(), 2 * MAX_BYTES);
+        let s = uart.stats();
+        assert_eq!(s.cut_short, 0);
         assert_eq!(
-            write(&mut uart, &mut sim, &[b'q'; MAX_BYTES], true),
-            Answer::Written(952)
+            s.thre_bursts as usize,
+            (2 * MAX_BYTES - 2 * burst).div_ceil(burst),
+            "burst {burst}"
         );
     }
-    // Each THR write leaves at once and raises THRE again.
-    assert!(sim.pin.signal);
-    sim.pin.signal = false;
-    uart.on_interrupt(&mut sim);
-    assert_eq!(uart.queued(), 0);
-    assert_eq!(sim.dev.wire.len(), 2 * MAX_BYTES);
-    let s = uart.stats();
-    assert_eq!(s.cut_short, 0);
-    assert_eq!(s.thre_bursts as usize, (2 * MAX_BYTES - 30).div_ceil(15));
 }
 
 #[test]

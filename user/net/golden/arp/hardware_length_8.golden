@@ -1,0 +1,5 @@
+# A hardware length of 8, not 6.
+config: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+in: ffffffffffff 020000000003 0806  # ARP request: who has 10.0.2.15? tell 10.0.2.3; 42 bytes
+    0001 0800 08 04 0001 020000000003 0a000203 000000000000 0a00020f
+stats: frames_in=1 arp_malformed=1

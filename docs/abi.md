@@ -416,6 +416,10 @@ Errors, in the order they are checked:
 The call may be preempted while the untyped is cleared; it then restarts
 from the thread's saved registers with progress kept.
 
+An Untyped retyped from device untyped is device memory too, at every
+depth: it retypes only into Untyped and Frames, is never cleared, and its
+frames are device frames, which map only `Uncached` or `WriteCombining`.
+
 ### CNode invocations
 
 | Label | Name |
@@ -1493,6 +1497,12 @@ No arguments and no extra capabilities. Result: length 1; MR0 is the physical
 address of the frame's first byte. Errors: none beyond `IllegalOperation` for
 the wrong type. Built in M9; before M9 the label returns `IllegalOperation`.
 
+Any Frame capability answers: RAM or device, 4 KiB or 2 MiB, mapped or not,
+whatever its rights. Without an IOMMU the address is also the bus address a
+device's DMA uses. DMA buffers are RAM frames mapped `WriteBack`; DMA on
+both targets is cache-coherent, so nothing else is needed. Deleting a frame
+or revoking its untyped does not stop a device that was given its address.
+
 ## Interrupts, I/O ports and Hyper-V
 
 This section gives the interrupt vectors, the IRQControl, IRQHandler,
@@ -1635,14 +1645,22 @@ Reserves a vector for one MSI or MSI-X message. Before M9 this label returns
 Extra capability 0: destination root CNode.
 
 Result: MR0 `irq`; MR1 `address`, the message address (`0xFEE0_0000 | (APIC
-ID << 12)`; the upper 32 bits are 0); MR2 `data`, the message data (the
-vector, fixed delivery, edge). The driver writes both into the device
-unchanged.
+ID << 12)`, the boot CPU's xAPIC ID in bits 12-19, redirection hint and
+destination mode 0, so physical destination; the upper 32 bits are 0); MR2
+`data`, the message data, `0x30 + irq`: the vector in bits 0-7 and every
+other bit 0, which is fixed delivery, edge-triggered. `data` fits MSI's 16-bit Message
+Data register and MSI-X's 32-bit one. The driver writes both into the device
+unchanged: for MSI-X, into its table entry (address low dword, address high
+dword 0, data, then the vector control word's mask bit 0 cleared), mapped
+`Uncached` from the BAR the capability names; for MSI, into the capability's
+address and data registers, with Multiple Message Enable 0. The device needs
+Bus Master set to send it. The kernel never masks an MSI, and `IRQHandler_Ack`
+does nothing for one.
 
 | Error | When |
 | --- | --- |
 | `TruncatedMessage` | fewer than 2 registers, or no extra capability |
-| `RevokeFirst` | no device vector is free |
+| `RevokeFirst` | no device vector is free: `GetISA`, `GetIOAPIC`, `GetMSI` and `GetSint` share the 192 |
 | `RangeError(1, 64)`, `FailedLookup`, `DeleteFirst` | destination slot, checked last |
 
 #### `0x63` `IRQControl_GetSint` (M9)
@@ -1659,7 +1677,7 @@ Extra capability 0: destination root CNode. Result: MR0 `irq`.
 
 | Error | When |
 | --- | --- |
-| `IllegalOperation` | no usable SynIC: the kernel made no Hypervisor capability at boot (not Hyper-V, an M9 privilege missing, or a hypercall MSR locked outside `.hvcall`) |
+| `IllegalOperation` | no usable SynIC: the kernel made no Hypervisor capability at boot (not Hyper-V, an M9 privilege missing, a hypercall MSR locked outside `.hvcall`, or a hypercall page that did not enable) |
 | `TruncatedMessage` | fewer than 3 registers, or no extra capability |
 | `RangeError(0, 15)` | `sint` > 15 |
 | `RevokeFirst` | the SINT already has a handler, or no device vector is free |
@@ -1766,8 +1784,28 @@ Labels `0x77`-`0x7F` are reserved.
 
 Present only on Hyper-V with every privilege that `docs/design.md`,
 [Detection (M3)](design.md#detection-m3), lists, and with the hypercall page
-at `.hvcall`. A restricted capability allows `PostMessage` and `SignalEvent`
-on its own connection with the matching right, and nothing else.
+enabled at `.hvcall`: the kernel writes the guest OS ID
+`0x8000_0000_0000_0000`, then the hypercall MSR, and reads the MSR back
+([ADR 0029](adr/0029-hypercall-page-read-back.md)). A restricted capability
+allows `PostMessage` and `SignalEvent` on its own connection with the matching
+right, and nothing else.
+
+The `HV_STATUS` values the two hypercalls can return once the kernel's checks
+pass (TLFS `HvCallPostMessage.md`, `HvCallSignalEvent.md`, `hv_status.md`):
+
+| `HV_STATUS` | Value | `PostMessage` | `SignalEvent` |
+| --- | --- | --- | --- |
+| `HV_STATUS_SUCCESS` | `0x00` | posted | signalled |
+| `HV_STATUS_INVALID_PARAMETER` | `0x05` | | `flag` at or above the port's flag count |
+| `HV_STATUS_INVALID_VP_INDEX` | `0x0E` | the target processor is gone, or none can take the message | the same, for the event |
+| `HV_STATUS_INVALID_PORT_ID` | `0x11` | the connection's port is deleted, inactive or not a message port | the same, not an event port |
+| `HV_STATUS_INVALID_CONNECTION_ID` | `0x12` | no such connection | the same |
+| `HV_STATUS_INSUFFICIENT_BUFFERS` | `0x13` | the port's message buffers are all in use; retry | |
+| `HV_STATUS_INVALID_SYNIC_STATE` | `0x18` | the target's SynIC or SIM page is off | the target's SynIC or SIEF page is off, or its SINT masked |
+
+`HV_STATUS_ACCESS_DENIED` cannot come back (boot checked the privileges), nor
+the common input, alignment and code errors (the kernel builds the input).
+Treat any other value as a failure.
 
 #### `0x80` `Hypervisor_PostMessage`
 
@@ -1780,9 +1818,10 @@ Runs `HvCallPostMessage` (code `0x005C`) with an input block the kernel builds.
 | MR2 | `payload_size` | bytes, at most 240 |
 | MR3 onwards | `payload` | `ceil(payload_size / 8)` words; payload byte `i` is byte `i mod 8` (little-endian) of MR`3 + i / 8`; bytes past `payload_size` are ignored |
 
-Result: MR0 the hypervisor's `HV_STATUS` (16 bits; 0 is success; other
-values are the TLFS's, such as `HV_STATUS_INSUFFICIENT_BUFFERS`, which the
-caller retries).
+Result: MR0 the hypervisor's `HV_STATUS` (16 bits; 0 is success; the others
+are in the table above, such as `HV_STATUS_INSUFFICIENT_BUFFERS`, which the
+caller retries). The kernel writes the whole 256-byte input block on every
+call, zeroing the payload past `payload_size`.
 
 | Error | When |
 | --- | --- |
@@ -1802,7 +1841,8 @@ Runs `HvCallSignalEvent` (code `0x005D`) as a fast hypercall.
 | MR0 | `connection` | connection ID, below `2^24` |
 | MR1 | `flag` | event flag number relative to the port's base, below `2^16` |
 
-Result: MR0 the hypervisor's `HV_STATUS`.
+Result: MR0 the hypervisor's `HV_STATUS` (the table above). The kernel passes
+`connection | flag << 32` in `rdx`.
 
 | Error | When |
 | --- | --- |
@@ -1815,7 +1855,10 @@ Result: MR0 the hypervisor's `HV_STATUS`.
 
 Writes 0 to the SynIC EOM register (MSR `0x4000_0084`), so the hypervisor
 delivers the next queued message. No registers, no result. `IllegalOperation`
-on a restricted capability.
+on a restricted capability. The hypervisor delivers only into an empty slot,
+and with nothing queued the write does nothing, so invoke it after emptying
+the slot, as [SynIC frames](#synic-frames) says; the next message may be in
+the slot when it returns.
 
 #### `0x83` `Hypervisor_VpIndex`
 
@@ -1875,7 +1918,14 @@ To consume a message: copy it, write 0 to `MessageType`, execute a full
 fence (`mfence` or a locked instruction), then read `MessageFlags` again and,
 if `MessagePending` is set, invoke `Hypervisor_Eom`. The hypervisor may set
 the flag after delivery, so the copy's value is not enough (TLFS
-`hv_message.md`; FreeBSD `vmbus_msg_task`).
+`hv_message.md`; FreeBSD `vmbus_msg_task`). The kernel EOIs the local APIC
+when the SINT's interrupt arrives, before the slot is emptied, so that EOI
+never delivers the next message, and `Hypervisor_Eom` is what does. Then read
+the slot again: `vmbus_msg_task` loops until it finds the slot empty.
+
+A SINT's interrupt is lost while the SINT is masked, and one that arrives
+before `IRQHandler_SetNotification` signals nothing, so after binding a SINT's
+handler read its slot and its event flags once before the first wait.
 
 Event-flag frame (SIEF): 16 slots of 256 bytes; flag `n` of SINT `s` is bit
 `n mod 8` of byte `256 * s + n / 8`. Clear flags with a locked instruction
@@ -1891,7 +1941,7 @@ Hyper-V fill, under the same names.
 | --- | --- | --- | --- |
 | `CAP_IRQ_CONTROL` | initial slot 4 | IRQControl | M4 (invocations M7) |
 | `CAP_IO_PORT_CONTROL` | initial slot 7 | IOPortControl | M4 (invocations M7) |
-| `CAP_HYPERVISOR` | initial slot 12 | unrestricted Hypervisor capability; null if not Hyper-V, if an M9 privilege is missing, or if the firmware locked the hypercall MSR outside `.hvcall` | M9 |
+| `CAP_HYPERVISOR` | initial slot 12 | unrestricted Hypervisor capability; null if not Hyper-V, if an M9 privilege is missing, if the firmware locked the hypercall MSR outside `.hvcall`, or if the hypercall MSR does not read back enabled at `.hvcall` ([ADR 0029](adr/0029-hypercall-page-read-back.md)) | M9 |
 | `CAP_SYNIC_MESSAGE_FRAME` | initial slot 13 | 4 KiB Frame for the SIM page; null whenever slot 12 is | M9 |
 | `CAP_SYNIC_EVENT_FRAME` | initial slot 14 | 4 KiB Frame for the SIEF page; null whenever slot 12 is | M9 |
 | `rsdp` | BootInfo offset 176 | physical address of the RSDP, or 0; for information only, as ACPI memory becomes untyped | M4 |
@@ -1923,6 +1973,10 @@ or whose region overflows.
 
 Function `(bus, device, function)` has its 4 KiB of configuration space at
 `base + (bus << 20 | device << 15 | function << 12)`, within device untyped.
+The kernel does not check that device untyped cover a whole range; the root
+task looks in `untyped_list`. On QEMU's q35 there is one range, at
+`0xE000_0000` for buses 0 to 255; Hyper-V's Generation 2 VMs have no MCFG, so
+`ecam_count` is 0. Map configuration space and BARs `Uncached`.
 
 `IoApicInfo`, 8 bytes, in MADT order:
 
@@ -1968,7 +2022,7 @@ capability in slot 2 has guard 0 and guard size 52, so the root task's CPtr
 | 9 | `CAP_BOOTINFO_FRAME` | BootInfo's first frame | `seL4_CapBootInfoFrame` |
 | 10 | `CAP_INIT_IPC_BUFFER` | the root task's IPC buffer frame | `seL4_CapInitThreadIPCBuffer` |
 | 11 | | null (no domains) | `seL4_CapDomain` |
-| 12 | `CAP_HYPERVISOR` | the unrestricted Hypervisor capability on Hyper-V from M9; null elsewhere, before M9, when an M9 privilege is missing, and when the firmware locked the hypercall MSR to a page outside `.hvcall` | (`seL4_CapSMMUSIDControl`, Arm) |
+| 12 | `CAP_HYPERVISOR` | the unrestricted Hypervisor capability on Hyper-V from M9; null elsewhere, before M9, when an M9 privilege is missing, when the firmware locked the hypercall MSR to a page outside `.hvcall`, and when the hypercall MSR does not read back enabled at `.hvcall` | (`seL4_CapSMMUSIDControl`, Arm) |
 | 13 | `CAP_SYNIC_MESSAGE_FRAME` | 4 KiB Frame for the SynIC message page (SIM), a boot-region RAM frame; null when slot 12 is null | (`seL4_CapSMMUCBControl`, Arm) |
 | 14 | `CAP_SYNIC_EVENT_FRAME` | 4 KiB Frame for the SynIC event-flag page (SIEF), likewise | (`seL4_CapInitThreadSC`, MCS) |
 | 15 | | null, reserved | (`seL4_CapSMC`, Arm) |

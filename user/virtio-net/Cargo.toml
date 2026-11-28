@@ -1,0 +1,26 @@
+[package]
+name = "virtio-net"
+description = "microL4's QEMU network driver: virtio 1.x over PCI with split virtqueues and one MSI-X vector, host-tested against a model device written from the specification, and the driver loop the root task runs in a VSpace of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "virtio_net"
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+# The device windows and shared memory, the frame queues, the protocol's
+# labels, badges and Stats, and the console client.
+libsys = { path = "../libsys" }
+
+[dev-dependencies]
+# The end-to-end tests: the stack and its link to the frame queues, which
+# net runs beside the driver.
+net = { path = "../net" }
+# The random interleavings of the device, the driver and net. `std` alone:
+# no forking, timeouts or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

@@ -22,6 +22,7 @@ use crate::syscall::Outcome;
 use crate::tcb::{TcbRef, Tcbs, ThreadState};
 use crate::testing::FakeDevices;
 
+mod m9;
 mod model;
 
 // ---------------------------------------------------------------------------
@@ -642,19 +643,19 @@ fn irq_control_errors_in_order() {
     let isa = label::GET_ISA;
     let io = label::GET_IOAPIC;
     let cases = [
-        // 1: the label.
+        // 1: the label; GetSint without a SynIC, as on QEMU.
         case(
-            "GetMSI before M9",
-            label::GET_MSI,
-            &[S_H3, 64],
+            "GetSint without a SynIC",
+            label::GET_SINT,
+            &[0, S_H3, 64],
             &root,
             ILLEGAL,
         ),
         case(
-            "GetSint before M9",
+            "GetSint without a SynIC, short",
             label::GET_SINT,
-            &[0, S_H3, 64],
-            &root,
+            &[],
+            &[],
             ILLEGAL,
         ),
         case("reserved 0x64", 0x64, &[], &[], ILLEGAL),

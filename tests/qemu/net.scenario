@@ -1,0 +1,45 @@
+# M9's done-when on QEMU with the selftest kernel (user/root/src/net.rs
+# and servers.rs; docs/design.md, "Network scenarios"): 100 UDP datagrams
+# sent through QEMU's forwarded port all come back. Root starts watch,
+# uart and console, attaches as client 1 and points its output at
+# console, sets up PCI (ECAM through carved device frames, virtio-net-pci
+# at 00:02.0, its regions and MSI-X checked, the MSI bound to NV and MSI-X
+# entry 0 programmed, bus mastering on once the driver's frames are
+# mapped, configuration space and the MSI-X table unmapped), starts net
+# (130), with QEMU's 10.0.2.15/24 via 10.0.2.2, and virtio-net (140),
+# each in a CSpace and VSpace of its own sharing only the frame queues'
+# frame, prints the servers: line with the root CNode's slots in use, and
+# reads a line as client 1. virtio-net sets up the device and signals
+# net, which takes the link block, ARPs for the gateway and pings it
+# (libslirp answers both, from 52:55:0a:00:02:02). Then xtask sends 100
+# datagrams of 8 to 1,472 bytes through the forwarded port, at most 8 at
+# a time, and checks each echo. Enter ends it: root asks both servers'
+# Stats, prints them and requires (root::check::net) no bad queue entry
+# or used element, no IP or UDP checksum error, no frame dropped for want
+# of a buffer on either side, and at least 100 datagrams echoed; the
+# expect pins exactly 100.
+cmdline: test=net
+exit: success
+nic: virtio-net
+expect: root: cmdline "test=net"
+expect: pci: ecam 0xe0000000, segment 0, buses 0-255
+expect: pci: virtio-net at 00:02.0
+expect: servers: virtio-net (priority 140, MSI-X IRQ
+expect: net (priority 130); root CNode
+expect: virtio-net: up: MAC 52:54:00:12:34:56, features VERSION_1 MAC STATUS, link up, queues 64 and 64
+expect: net: up: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+expect: echo: listening on UDP port 7
+expect: net: gateway 10.0.2.2 is at 52:55:0a:00:02:02
+expect: net: ping 10.0.2.2: reply 1, 56 bytes
+udp_echo: 100
+send: \r                           # root's line: report and end
+expect: virtio-net: stats:
+expect: , 0 dropped for no buffer, 0 bad used elements,
+expect: , 0 bad queue entries,
+expect: net: stats:
+expect: , 100 datagrams echoed,
+expect: , 0 frames dropped, 0 bad entries,
+expect: TEST PASS
+expect: DEBUG HALT 0 from TCB
+forbid: TEST FAIL
+forbid: KERNEL PANIC

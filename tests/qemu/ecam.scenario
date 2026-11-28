@@ -1,0 +1,19 @@
+# M9: PCI through device untyped (kernel/src/arch/x86_64/m9test.rs).
+# BootInfo's InterruptInfo.ecam holds q35's one MCFG range, 0xe0000000 for
+# buses 0 to 255, all of it device untyped. The test then reads bus 0's
+# configuration space through the kernel's direct map, sizes every memory
+# BAR the firmware assigned, as firmware does, and checks that each lies
+# in device untyped; the virtio-net-pci added here has a 64-bit BAR,
+# which OVMF places above 4 GiB, and one must be found there. No driver
+# runs: root's own enumeration is test=pci's (user/pci).
+cmdline: test=ecam
+qemu_args: -netdev user,id=n0,ipv6=off -device virtio-net-pci,netdev=n0,romfile=
+exit: success
+expect: microL4 kernel
+expect: ecam: ok   InterruptInfo.ecam: base 0xe0000000, segment 0, buses 0-255; 0xe0000000-0xf0000000 all device untyped
+expect: ecam: 00:00.0 8086:29c0
+expect: , 64-bit: device untyped
+expect: ecam: ok
+expect: above 4 GiB, all in device untyped
+expect: TEST PASS
+forbid: TEST FAIL

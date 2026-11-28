@@ -18,6 +18,8 @@ mod ioapic;
 mod irq;
 #[cfg(feature = "selftest")]
 mod irq_stale;
+#[cfg(feature = "selftest")]
+mod m9test;
 mod objects;
 mod paging;
 mod pic;
@@ -42,6 +44,7 @@ use crate::boot::BootState;
 
 pub use cell::StaticCell;
 pub use cpu::{check_cpu, hypervisor, print_cpu_state};
+pub use hyperv::{hypercalls_enabled, set_up_synic};
 #[cfg(feature = "debug")]
 pub use objects::for_each_tcb;
 pub use objects::{Objects, bootinfo_frames};
@@ -58,6 +61,8 @@ pub use apic::test_nmi_stack;
 #[cfg(feature = "selftest")]
 pub use irq_stale::test_irq_stale;
 #[cfg(feature = "selftest")]
+pub use m9test::{test_ecam, test_frame_address, test_msi};
+#[cfg(feature = "selftest")]
 pub use objects::{inject_preemption, poll_stats, reset_stretches};
 #[cfg(feature = "selftest")]
 pub use paging::{
@@ -71,8 +76,9 @@ pub use timer::start_ticks_test;
 pub use trap::{Provoke, idle_self_test, print_stack_use, provoke, set_resume_hook};
 
 // The Hyper-V hypercall page (`docs/design.md`, "The kernel half"): one page
-// of the text segment of its own. M9 points `HV_X64_MSR_HYPERCALL` at it and
-// the hypervisor overlays it; until then it holds `int3`s.
+// of the text segment of its own. With the M9 privileges, `hyperv.rs` points
+// `HV_X64_MSR_HYPERCALL` at it and the hypervisor overlays it; until then,
+// and everywhere else, it holds `int3`s, which nothing calls.
 global_asm!(
     ".section .hvcall, \"ax\", @progbits",
     ".balign 4096",
@@ -125,7 +131,7 @@ pub fn init(boot: &'static BootState) -> &'static BootFacts {
     // Step 5: Hyper-V's leftovers off (a synthetic timer can raise an
     // NMI); the local APIC, LINT0 masked before the PIC is reprogrammed;
     // the I/O APICs; the HPET; then calibration and the 100 Hz timer.
-    let hv = hyperv::init();
+    let hv = hyperv::init(boot.handoff.kernel_phys_base);
     let platform = acpi::platform();
     apic::init();
     pic::init(platform.madt.pcat_compat());

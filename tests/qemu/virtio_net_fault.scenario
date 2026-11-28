@@ -1,0 +1,32 @@
+# Review test for M9's failure path (user/root/src/net.rs; docs/design.md,
+# "Failures" under "Networking"): a virtio-net fault ends the run with
+# failure through watch, whatever root waits on. Root starts everything
+# as test=net does, then reads a line as client 1, which has focus; the
+# harness types Enter once net has pinged the gateway, after which no
+# server prints again. Root prints its line and syncs, suspends
+# virtio-net, writes its rip 0 and resumes it, and calls its Stats.
+# virtio-net's next instruction fetch, at address 0, which nothing maps,
+# is a VMFault (ip 0, address 0, a fetch, fsr 0x14: a user-mode fetch of
+# a page not present); the kernel sends it on F with badge 4, and watch
+# writes TEST FAIL naming virtio-net through Polled, and ends the run with
+# DebugHalt(1). The next: lines show that nothing comes between root's
+# line, watch's and the halt's two lines: root, in its call to the dead
+# driver, prints nothing more, and net, which no frame reaches now,
+# prints nothing either.
+cmdline: test=virtio_net_fault
+exit: failure
+nic: virtio-net
+expect: root: cmdline "test=virtio_net_fault"
+expect: servers: virtio-net (priority 140, MSI-X IRQ
+expect: virtio-net: up: MAC 52:54:00:12:34:56
+expect: net: up: 10.0.2.15/24 via 10.0.2.2, MAC 52:54:00:12:34:56
+expect: net: ping 10.0.2.2: reply 1, 56 bytes
+send: \r                           # Enter: root's line
+expect: virtio_net_fault: suspending virtio-net, setting its rip to 0 and resuming it
+next: TEST FAIL: virtio-net fault 5 (VMFault), MR0 to MR3 0x0 0x0 0x1 0x14
+next: dispatch: invocations preempted and restarted:   # DebugHalt's first line
+next: DEBUG HALT 1 from TCB
+forbid: virtio-net answered Stats after its rip was set to 0
+forbid: watch did not end the run
+forbid: TEST PASS
+forbid: KERNEL PANIC

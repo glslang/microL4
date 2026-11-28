@@ -77,6 +77,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hvmock"
+version = "0.1.0"
+dependencies = [
+ "libsys",
+]
+
+[[package]]
 name = "kernel"
 version = "0.1.0"
 dependencies = [
@@ -109,6 +116,7 @@ name = "libsys"
 version = "0.1.0"
 dependencies = [
  "l4core",
+ "proptest",
 ]
 
 [[package]]
@@ -128,12 +136,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "net"
+version = "0.1.0"
+dependencies = [
+ "libsys",
+ "proptest",
+]
+
+[[package]]
+name = "netvsc"
+version = "0.1.0"
+dependencies = [
+ "hvmock",
+ "libsys",
+ "net",
+ "proptest",
+ "vmbus",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "pci"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]
@@ -196,9 +230,14 @@ dependencies = [
  "console",
  "fb",
  "libsys",
+ "net",
+ "netvsc",
+ "pci",
  "term",
  "tui",
  "uart",
+ "virtio-net",
+ "vmbus",
 ]
 
 [[package]]
@@ -230,6 +269,24 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
+name = "virtio-net"
+version = "0.1.0"
+dependencies = [
+ "libsys",
+ "net",
+ "proptest",
+]
+
+[[package]]
+name = "vmbus"
+version = "0.1.0"
+dependencies = [
+ "hvmock",
+ "libsys",
+ "proptest",
+]
 
 [[package]]
 name = "xtask"

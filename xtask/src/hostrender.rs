@@ -205,7 +205,8 @@ fn tui_screendumps_are_the_host_render() {
 /// The moments are the `tui` scenario's screendumps, and the Hyper-V
 /// check's: each golden here belongs to a step that takes the screen. The
 /// Hyper-V check's scenarios are in the harness's format, which
-/// `Test-L4Vhdx.ps1 -Scenario` follows.
+/// `Test-L4Vhdx.ps1 -Scenario` follows; the M9 COM1 runs' are checked
+/// against `m8-release`'s in `scenario.rs`.
 #[test]
 fn the_moments_are_the_scenarios_screendumps() {
     let names: Vec<&str> = MOMENTS.iter().map(|(n, _)| *n).collect();

@@ -1,0 +1,66 @@
+# release_burst1.scenario with uart's burst capped at 15 (M9;
+# docs/design.md, "Network scenarios" and "The M9 Hyper-V check"): what
+# the Hyper-V check's release-burst15 image boots, on QEMU. A cap of 15 is
+# the burst setup chooses with working FIFOs, so uart writes as in
+# release.scenario, with root's 32-line flood after its summary: 2,400
+# bytes, more than uart's 2,048-byte queue. The first line is expected,
+# the other 31 with next:, each whole, and release's line comes right
+# after the last. The Hyper-V check runs the same image
+# (tools/hyperv/m9-release-burst15.scenario).
+kernel: release
+cmdline: test=release uart.burst=15 release.flood=32
+exit: success
+expect: loader: microL4 loader
+expect: entering kernel
+next: root: microL4 root task
+expect: root: cmdline "test=release uart.burst=15 release.flood=32"
+next: root: uart.burst=15: uart's burst capped at 15
+expect: root: image frames: slots
+expect: root: empty: slots
+expect: release: flood 01/32 123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0
+next: release: flood 02/32 23456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP01
+next: release: flood 03/32 3456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP012
+next: release: flood 04/32 456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123
+next: release: flood 05/32 56789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP01234
+next: release: flood 06/32 6789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP012345
+next: release: flood 07/32 789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456
+next: release: flood 08/32 89abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP01234567
+next: release: flood 09/32 9abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP012345678
+next: release: flood 10/32 abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789
+next: release: flood 11/32 bcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789a
+next: release: flood 12/32 cdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789ab
+next: release: flood 13/32 defghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abc
+next: release: flood 14/32 efghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcd
+next: release: flood 15/32 fghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcde
+next: release: flood 16/32 ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdef
+next: release: flood 17/32 hijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefg
+next: release: flood 18/32 ijklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefgh
+next: release: flood 19/32 jklmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghi
+next: release: flood 20/32 klmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghij
+next: release: flood 21/32 lmnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijk
+next: release: flood 22/32 mnopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijkl
+next: release: flood 23/32 nopqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklm
+next: release: flood 24/32 opqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmn
+next: release: flood 25/32 pqrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmno
+next: release: flood 26/32 qrstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnop
+next: release: flood 27/32 rstuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopq
+next: release: flood 28/32 stuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqr
+next: release: flood 29/32 tuvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrs
+next: release: flood 30/32 uvwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrst
+next: release: flood 31/32 vwxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrstu
+next: release: flood 32/32 wxyzABCDEFGHIJKLMNOP0123456789abcdefghijklmnopqrstuv
+next: release: watch (priority 255), uart (priority 200) with the COM1 IOPort and IRQ 4, console (priority 150); exit port 0xf4-0xf7
+expect: release: a probe thread's DebugPutChar, DebugHalt, DebugDumpScheduler and reserved numbers 19 and 31 each raised UnknownSyscall with the number in MR18
+expect: release: type a line
+send: release input\r
+expect: release: read "release input"
+expect: release: uart:
+expect: , 14 bytes received,
+expect: , 0 overruns, 0 line errors,
+expect: , burst 15, 0 stale THREs
+expect: TEST PASS
+forbid: microL4 kernel
+forbid: bootinfo:
+forbid: DEBUG HALT
+forbid: KERNEL PANIC
+forbid: ignored: not a number

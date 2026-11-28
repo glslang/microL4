@@ -1,9 +1,10 @@
 //! Booting the disk image under QEMU and OVMF, and QEMU's QMP monitor.
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::{Result, output, rel};
@@ -56,6 +57,75 @@ pub fn base_command(disk: &Path) -> Result<Command> {
         .arg(format!("format=raw,file={}", disk.display()))
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     Ok(cmd)
+}
+
+/// A scenario's `nic:` (from M9): the network device the machine gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nic {
+    /// A modern virtio-net PCI device on QEMU's user networking, with a
+    /// UDP port on the host's loopback forwarded to the guest's port 7.
+    VirtioNet,
+}
+
+impl Nic {
+    /// The `nic:` value naming it.
+    pub fn parse(name: &str) -> Option<Nic> {
+        match name {
+            "virtio-net" => Some(Nic::VirtioNet),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Nic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Nic::VirtioNet => "virtio-net",
+        })
+    }
+}
+
+/// The guest's MAC address on a `nic:`.
+pub const GUEST_MAC: &str = "52:54:00:12:34:56";
+/// The guest's UDP echo port, where the forwarded port leads.
+pub const GUEST_ECHO_PORT: u16 = 7;
+/// The port `cargo xtask run --nic` forwards, PLAN.md's.
+pub const RUN_NIC_PORT: u16 = 5555;
+
+/// The QEMU arguments for `nic` with loopback UDP `port` forwarded to the
+/// guest's echo port. A `-netdev` leaves out QEMU's default NIC;
+/// `ipv6=off` keeps libslirp's IPv6 traffic, router advertisements among
+/// it, off the wire; `romfile=` loads no option ROM, so OVMF drives the NIC
+/// with its own `VirtioNetDxe`, which resets it at `ExitBootServices`.
+pub fn nic_args(nic: Nic, port: u16) -> Vec<String> {
+    match nic {
+        Nic::VirtioNet => vec![
+            "-netdev".into(),
+            format!("user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:{port}-:{GUEST_ECHO_PORT}"),
+            "-device".into(),
+            format!("virtio-net-pci,netdev=n0,mac={GUEST_MAC},romfile="),
+        ],
+    }
+}
+
+/// A loopback UDP port that was free a moment ago: bound and released, for
+/// a scenario's forwarded port, since two scenarios may run at once. A
+/// port it has given out before is never given again, so this xtask's
+/// scenarios never share one; another program that takes it first fails
+/// the boot with QEMU's error.
+pub fn free_udp_port() -> Result<u16> {
+    static GIVEN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+    let mut given = GIVEN.lock().unwrap();
+    for _ in 0..64 {
+        let port = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?
+            .local_addr()?
+            .port();
+        if !given.contains(&port) {
+            given.push(port);
+            return Ok(port);
+        }
+    }
+    Err("found no loopback UDP port not given out already".into())
 }
 
 /// Describes how the guest ended, from QEMU's exit status.
@@ -357,6 +427,34 @@ mod tests {
         assert!(Instant::now() < deadline + Duration::from_secs(5));
         done.send(()).unwrap();
         qemu.join().unwrap();
+    }
+
+    #[test]
+    fn nic_arguments() {
+        assert_eq!(Nic::parse("virtio-net"), Some(Nic::VirtioNet));
+        for bad in ["", "virtio", "Virtio-Net", "e1000e", "netvsc"] {
+            assert_eq!(Nic::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(Nic::VirtioNet.to_string(), "virtio-net");
+        assert_eq!(
+            nic_args(Nic::VirtioNet, 40123),
+            [
+                "-netdev",
+                "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:40123-:7",
+                "-device",
+                "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=",
+            ]
+        );
+    }
+
+    #[test]
+    fn free_udp_ports_are_never_given_twice() {
+        let ports: Vec<u16> = (0..20).map(|_| free_udp_port().unwrap()).collect();
+        for (i, p) in ports.iter().enumerate() {
+            assert!(!ports[..i].contains(p), "{p} twice");
+            // Free: it binds.
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, *p)).unwrap();
+        }
     }
 
     #[test]

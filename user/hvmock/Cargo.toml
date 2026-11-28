@@ -1,0 +1,17 @@
+[package]
+name = "hvmock"
+description = "microL4's mock VMBus host, host only: the hypervisor's SynIC message slot, event flags and two hypercalls, and the host's half of VMBus contact, offers, GPADLs, channels and ring buffers, with a pluggable device on each channel, for the tests of vmbus and netvsc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+# Guest memory: libsys::mem's host window, behind the Memory trait the
+# drivers use.
+libsys = { path = "../libsys" }
