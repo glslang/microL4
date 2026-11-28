@@ -365,6 +365,16 @@ fn frame(dst: [u8; 6], len: usize, seed: u64) -> Vec<u8> {
     f
 }
 
+/// `v`, or under Miri, where each bring-up takes seconds, `keep` of its
+/// cases spread across it, the first among them.
+fn sample<T>(v: Vec<T>, keep: usize) -> Vec<T> {
+    if !cfg!(miri) || v.len() <= keep {
+        return v;
+    }
+    let step = v.len().div_ceil(keep);
+    v.into_iter().step_by(step).collect()
+}
+
 /// xorshift64*: small, deterministic and fast under Miri.
 struct Rng(u64);
 

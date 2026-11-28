@@ -24,7 +24,7 @@
 //! | sending | each data packet's section read from the send buffer, its RNDIS message checked, the frame kept; completed at once, or held until [`Netvsc::release`], in any order; a section reused before its completion fails the test |
 //! | receiving | frames [`Netvsc::deliver`] queues go once the packet filter is set, each a PACKET_MSG in a section of [`Config::receive_section`] bytes, up to [`Config::frames_per_packet`] to a receive-buffer packet, with per-packet information if [`Config::pktinfo`]; a section is reused only after its packet's acknowledgement |
 //! | signals | [`Chan::send`]'s rule, FreeBSD's: only when the inbound ring was empty; a packet that finds it full waits for the guest's next signal |
-//! | hostility | [`Netvsc::inject`] any packet, [`Netvsc::inject_rndis`] any RNDIS messages in sections, [`Netvsc::inject_rxbuf`] a receive-buffer packet with any ranges |
+//! | hostility | [`Netvsc::inject`] any packet, [`Netvsc::inject_rndis`] any RNDIS messages in sections, [`Netvsc::inject_rxbuf`] a receive-buffer packet with any ranges; [`Config::tamper_nvs`] and [`Config::tamper_rndis`] rewrite its answers; [`Netvsc::pause_reading`] a host slow to read the outbound ring |
 //!
 //! Whatever the guest does that a host would refuse is a fault
 //! ([`Netvsc::faults`]): a test of an honest run asserts none, and none

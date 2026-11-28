@@ -9,15 +9,18 @@ use hvmock::{OfferSpec, ring as hring};
 
 use super::*;
 
-/// Frames to the MAC and to broadcast of every length class.
+/// Frames to the MAC and to broadcast of every length class; under
+/// Miri, which takes a second over each 1,514-byte frame, only the third
+/// is that long and the rest short.
 fn mixed(n: usize, rng: &mut Rng) -> Vec<Vec<u8>> {
+    let most = if cfg!(miri) { 200 } else { 1514 };
     (0..n)
         .map(|k| {
             let len = match k % 5 {
                 0 => 14,
                 1 => 60,
-                2 => 1514,
-                _ => 14 + rng.below(1501) as usize,
+                2 if !cfg!(miri) || k == 2 => 1514,
+                _ => 14 + rng.below(most - 13) as usize,
             };
             let dst = if k % 7 == 3 { [0xFF; 6] } else { MAC };
             frame(dst, len, k as u64)
@@ -144,10 +147,10 @@ fn completions_out_of_order_free_their_sections() {
     );
     assert_eq!(r.a.sections(), (48 * 1024, 16));
     let mut rng = Rng::new(4);
-    let rounds = if cfg!(miri) { 2 } else { 6 };
+    let (rounds, frames) = if cfg!(miri) { (1, 20) } else { (6, 40) };
     let mut want = Vec::new();
     for round in 0..rounds {
-        let batch = mixed(40, &mut rng);
+        let batch = mixed(frames, &mut rng);
         for f in &batch {
             r.send(f);
         }
@@ -342,7 +345,8 @@ fn the_rings_wrap() {
         &m,
         &q,
         Setup {
-            ring_start: (data - 4096) as u32,
+            // Under Miri 512 bytes, which setup's packets already cross.
+            ring_start: (data - if cfg!(miri) { 512 } else { 4096 }) as u32,
             nic: nic::Config {
                 frames_per_packet: 3,
                 ..nic::Config::default()
@@ -351,7 +355,7 @@ fn the_rings_wrap() {
         },
     );
     let mut rng = Rng::new(5);
-    let n = if cfg!(miri) { 60 } else { 1500 };
+    let n = if cfg!(miri) { 12 } else { 1500 };
     let (mut got, mut sent) = (Vec::new(), Vec::new());
     for chunk in mixed(n, &mut rng).chunks(30) {
         for f in chunk {

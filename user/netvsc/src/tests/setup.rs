@@ -108,19 +108,22 @@ fn sets_up_nvsp_5_and_rndis_and_hands_net_the_link() {
 
 #[test]
 fn nvsp_falls_back_from_5_to_4_and_2_with_ndis_6_1() {
-    for (versions, inits, line) in [
-        (
-            vec![hn::V4],
-            &["0x50000", "0x40000"][..],
-            "NVSP 4, NDIS 6.1",
-        ),
-        (
-            vec![hn::V2, hn::V1],
-            &["0x50000", "0x40000", "0x30002"][..],
-            "NVSP 2, NDIS 6.1",
-        ),
-        (vec![hn::V5, hn::V4], &["0x50000"][..], "NVSP 5, NDIS 6.30"),
-    ] {
+    for (versions, inits, line) in sample(
+        vec![
+            (
+                vec![hn::V4],
+                &["0x50000", "0x40000"][..],
+                "NVSP 4, NDIS 6.1",
+            ),
+            (
+                vec![hn::V2, hn::V1],
+                &["0x50000", "0x40000", "0x30002"][..],
+                "NVSP 2, NDIS 6.1",
+            ),
+            (vec![hn::V5, hn::V4], &["0x50000"][..], "NVSP 5, NDIS 6.30"),
+        ],
+        1,
+    ) {
         let m = Machine::new();
         let q = queues();
         let r = started(
@@ -201,68 +204,71 @@ fn a_malformed_init_answer_tries_the_next_version() {
 #[test]
 fn every_refusal_of_the_receive_buffer() {
     let mb = layout::RECEIVE_SIZE as u32;
-    for (nic, why) in [
-        (
-            nic::Config {
-                rxbuf_status: hn::FAILED,
-                ..nic::Config::default()
-            },
-            NvsBad::Status(hn::FAILED),
-        ),
-        (
-            nic::Config {
-                rxbuf_sections: Some(vec![]),
-                ..nic::Config::default()
-            },
-            NvsBad::Sections(0),
-        ),
-        (
-            nic::Config {
-                rxbuf_sections: Some(vec![[0, 1728, 100, 1728 * 100], [0, 1, 1, mb + 1]]),
-                ..nic::Config::default()
-            },
-            NvsBad::Section(1),
-        ),
-        (
-            nic::Config {
-                // Its slots reach past the buffer.
-                rxbuf_sections: Some(vec![[4096, 1728, 606, 4096]]),
-                ..nic::Config::default()
-            },
-            NvsBad::Section(0),
-        ),
-        (
-            nic::Config {
-                // Starts after it ends.
-                rxbuf_sections: Some(vec![[8, 0, 0, 4]]),
-                ..nic::Config::default()
-            },
-            NvsBad::Section(0),
-        ),
-        (
-            nic::Config {
-                // A count past what the answer holds.
-                tamper_nvs: Some(|t, b| {
-                    if t == hn::RXBUF_CONN {
-                        b[8] = 9;
-                    }
-                }),
-                ..nic::Config::default()
-            },
-            NvsBad::Sections(9),
-        ),
-        (
-            nic::Config {
-                tamper_nvs: Some(|t, b| {
-                    if t == hn::RXBUF_CONN {
-                        b[0] = 105;
-                    }
-                }),
-                ..nic::Config::default()
-            },
-            NvsBad::Kind(105),
-        ),
-    ] {
+    for (nic, why) in sample(
+        vec![
+            (
+                nic::Config {
+                    rxbuf_status: hn::FAILED,
+                    ..nic::Config::default()
+                },
+                NvsBad::Status(hn::FAILED),
+            ),
+            (
+                nic::Config {
+                    rxbuf_sections: Some(vec![]),
+                    ..nic::Config::default()
+                },
+                NvsBad::Sections(0),
+            ),
+            (
+                nic::Config {
+                    rxbuf_sections: Some(vec![[0, 1728, 100, 1728 * 100], [0, 1, 1, mb + 1]]),
+                    ..nic::Config::default()
+                },
+                NvsBad::Section(1),
+            ),
+            (
+                nic::Config {
+                    // Its slots reach past the buffer.
+                    rxbuf_sections: Some(vec![[4096, 1728, 606, 4096]]),
+                    ..nic::Config::default()
+                },
+                NvsBad::Section(0),
+            ),
+            (
+                nic::Config {
+                    // Starts after it ends.
+                    rxbuf_sections: Some(vec![[8, 0, 0, 4]]),
+                    ..nic::Config::default()
+                },
+                NvsBad::Section(0),
+            ),
+            (
+                nic::Config {
+                    // A count past what the answer holds.
+                    tamper_nvs: Some(|t, b| {
+                        if t == hn::RXBUF_CONN {
+                            b[8] = 9;
+                        }
+                    }),
+                    ..nic::Config::default()
+                },
+                NvsBad::Sections(9),
+            ),
+            (
+                nic::Config {
+                    tamper_nvs: Some(|t, b| {
+                        if t == hn::RXBUF_CONN {
+                            b[0] = 105;
+                        }
+                    }),
+                    ..nic::Config::default()
+                },
+                NvsBad::Kind(105),
+            ),
+        ],
+        2,
+    ) {
         let (f, _) = refused(nic);
         assert_eq!(f, Failure::Refused(Step::ReceiveBuffer, Why::Nvs(why)));
     }
@@ -299,7 +305,7 @@ fn sections_inside_the_receive_buffer_are_taken() {
 
 #[test]
 fn every_refusal_of_the_send_buffer_and_the_sections_taken() {
-    for size in [0, 4, 1556, 1558, 1562, 768 * 1024 + 4] {
+    for size in sample(vec![0, 4, 1556, 1558, 1562, 768 * 1024 + 4], 1) {
         let (f, _) = refused(nic::Config {
             section_size: size,
             ..nic::Config::default()
@@ -322,7 +328,10 @@ fn every_refusal_of_the_send_buffer_and_the_sections_taken() {
         "netvsc: the host refused the send buffer: status 0x2"
     );
     // A whole frame's message fits; at most 128 sections.
-    for (size, sections) in [(1560, 128), (6144, 128), (8192, 96), (768 * 1024, 1)] {
+    for (size, sections) in sample(
+        vec![(1560, 128), (6144, 128), (8192, 96), (768 * 1024, 1)],
+        1,
+    ) {
         let m = Machine::new();
         let q = queues();
         let r = started(
@@ -454,7 +463,7 @@ fn every_refusal_of_rndis() {
             ),
         ),
     ];
-    for (nic, want) in cases {
+    for (nic, want) in sample(cases, 3) {
         let m = Machine::new();
         let q = queues();
         let r = started(&m, &q, nic);
@@ -629,7 +638,10 @@ fn control_packets_completed_after_their_answers() {
 
 #[test]
 fn rndis_alignment_below_4_is_taken_as_4() {
-    for (shift, align) in [(0, 4), (1, 4), (2, 4), (3, 8), (12, 4096), (40, 1 << 31)] {
+    for (shift, align) in sample(
+        vec![(0, 4), (1, 4), (2, 4), (3, 8), (12, 4096), (40, 1 << 31)],
+        2,
+    ) {
         let m = Machine::new();
         let q = queues();
         let r = started(
@@ -721,6 +733,13 @@ fn the_attach_reply_is_read_and_refused() {
         Err(AttachError::BadReply {
             label: 0,
             length: 7
+        })
+    );
+    assert_eq!(
+        attach_reply(0, &[&w[..], &[0]].concat(), true),
+        Err(AttachError::BadReply {
+            label: 0,
+            length: 9
         })
     );
     let mut bad = w;

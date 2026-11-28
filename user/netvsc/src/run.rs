@@ -74,14 +74,15 @@ pub fn run<M: Memory>(start: Start, channel: M, mnf: Option<M>, queues: Driver<M
     );
     ipc.set_receive_slot(None);
     let info = reply.info;
-    let words: [u64; 8] = core::array::from_fn(|i| {
-        if i < info.length() as usize && i < 8 {
+    // Up to one word past the eight, so that a longer reply is refused.
+    let n = (info.length() as usize).min(9);
+    let words: [u64; 9] = core::array::from_fn(|i| {
+        if i < n {
             ipc.received_word(&reply, i)
         } else {
             0
         }
     });
-    let n = (info.length() as usize).min(8);
     let copied = ReceivedCaps::read(info, ipc).copied().is_some();
     let attach =
         attach_reply(info.label(), &words[..n], copied).unwrap_or_else(|e| panic!("netvsc: {e}"));

@@ -85,16 +85,19 @@ fn put(m: &Machine, ofs: usize, msg: &[u8]) {
 
 #[test]
 fn broken_headers_break_the_inbound_ring_once() {
-    for (what, bytes) in [
-        // A header under 16 bytes.
-        ("header", [header(6, 1, 4, 1), vec![0; 24]].concat()),
-        // A header longer than its packet.
-        ("longer", [header(6, 4, 2, 1), vec![0; 8]].concat()),
-        // A packet longer than the ring holds.
-        ("held", [header(6, 2, 200, 1), vec![0; 24]].concat()),
-        // Less than a header and trailer.
-        ("short", header(6, 2, 2, 1)),
-    ] {
+    for (what, bytes) in sample(
+        vec![
+            // A header under 16 bytes.
+            ("header", [header(6, 1, 4, 1), vec![0; 24]].concat()),
+            // A header longer than its packet.
+            ("longer", [header(6, 4, 2, 1), vec![0; 8]].concat()),
+            // A packet longer than the ring holds.
+            ("held", [header(6, 2, 200, 1), vec![0; 24]].concat()),
+            // Less than a header and trailer.
+            ("short", header(6, 2, 2, 1)),
+        ],
+        2,
+    ) {
         let m = Machine::new();
         let q = queues();
         let mut r = up(&m, &q, Setup::default());
@@ -121,7 +124,7 @@ fn broken_headers_break_the_inbound_ring_once() {
 #[test]
 fn a_bad_write_index_breaks_the_inbound_ring() {
     let data = ((layout::INBOUND_PAGES - 1) * layout::PAGE) as u32;
-    for bad in [13, data, data + 8, !7] {
+    for bad in sample(vec![13, data, data + 8, !7], 1) {
         let m = Machine::new();
         let q = queues();
         let mut r = up(&m, &q, Setup::default());
