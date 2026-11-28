@@ -1,18 +1,24 @@
-//! M9's network tests on QEMU (`docs/design.md`, "Network scenarios"):
-//! `test=virtio_net`, `test=net`, the done-when, and `test=virtio_net_fault`.
+//! M9's network tests (`docs/design.md`, "Network scenarios"):
+//! `test=virtio_net`, `test=net`, the done-when, and `test=virtio_net_fault`
+//! on QEMU, and `test=net` on Hyper-V (the M9 Hyper-V check).
 //!
 //! Each starts `watch`, `uart` and `console`, attaches as client 1 and
-//! points its output at console, then sets up PCI and starts `virtio-net`
-//! (140) with `servers::start_network`, and prints its `servers:` line
+//! points its output at console, then starts the network servers with
+//! `servers::start_network`: on QEMU it sets up PCI and starts
+//! `virtio-net` (140); on Hyper-V, with a Hypervisor capability in slot
+//! 12, `vmbus` (145) and `netvsc` (140). It prints its `servers:` line
 //! with the root CNode's slots in use.
 //!
 //! - `test=net` starts `net` (130) beside the driver, configured from the
-//!   command line with QEMU's defaults (`10.0.2.15/24` via `10.0.2.2`),
-//!   and reads a line as client 1, which the harness types once its
-//!   datagrams are echoed. Then it asks the driver's and net's `Stats`,
-//!   prints them, and requires `root::check::net`'s verdict: no bad queue
-//!   entry or used element, no IP or UDP checksum error, no frame dropped
-//!   for want of a buffer, and at least 100 datagrams echoed.
+//!   command line, with QEMU's defaults (`10.0.2.15/24` via `10.0.2.2`)
+//!   on QEMU and none on Hyper-V, where `net.ip=` and `net.gw=` are
+//!   required, and reads a line as client 1, which the harness types once
+//!   its datagrams are echoed. Then it asks the drivers' and net's
+//!   `Stats`, prints them, and requires `root::check::net`'s verdict: no
+//!   bad queue entry or used element (on Hyper-V, no broken packet), no
+//!   IP or UDP checksum error, no frame dropped for want of a buffer, at
+//!   least 100 datagrams echoed and, on Hyper-V, the script's 4 pings
+//!   answered.
 //! - `test=virtio_net` runs a probe thread of root's own instead of `net`,
 //!   in root's VSpace on a copy of the frame queues' frame: it takes the
 //!   link block, hands the driver the receive buffers, sends an ARP
@@ -29,18 +35,19 @@ use libsys::console::Client;
 use libsys::frames::{self, MAX_FRAME, Net};
 use libsys::invoke::{tcb_resume, tcb_set_sched_params, tcb_suspend, tcb_write_registers};
 use libsys::mem::Shared;
-use libsys::proto::{VirtioNetStats, label};
+use libsys::proto::{NetvscStats, VirtioNetStats, VmbusStats, label};
 use libsys::{
     BootInfo, CPtr, Ipc, Message, MessageInfo, ObjectAlloc, ObjectType, Registers, UserReg, call,
     println, recv, send, signal, wait,
 };
 use root::check::console::ROOT;
 use root::check::net::{
-    self as check, ArpLine, BadReply, Client as Beside, DriverLine, NetLine, Report, Started,
+    self as check, ArpLine, BadReply, Client as Beside, DriverLine, Drivers, NetLine, NetvscLine,
+    Report, Started, VmbusLine,
 };
 use root::network::{
-    DRIVER_PRIORITY, NET_PRIORITY, ProbeError, ProbeReport, arp_reply, arp_request, default_config,
-    probe_addresses, probe_word,
+    DRIVER_PRIORITY, NET_PRIORITY, Platform, ProbeError, ProbeReport, VMBUS_PRIORITY, arp_reply,
+    arp_request, default_config, probe_addresses, probe_word,
 };
 use root::process::{Fault, fault_kind};
 
@@ -53,6 +60,7 @@ struct Running {
     ipc: Ipc,
     /// The root task as console's client 1.
     me: Client,
+    platform: Platform,
     network: Network,
     config: net::Config,
     /// For `test=virtio_net`: the probe's endpoint, its report and fault
@@ -65,15 +73,39 @@ pub fn run(bi: &BootInfo) -> ! {
     let r = start(bi, "net", false);
     // The harness types Enter once its datagrams are echoed.
     read_line(&r, "net");
-    let driver = driver_stats(&r).unwrap_or_else(|e| fail!("net: virtio-net's Stats: {e}"));
-    println!("{}", DriverLine(driver));
-    let report = stats::<{ Report::WORDS }>(&r, r.network.net_stats, label::NET_STATS)
+    let verdict = match r.platform {
+        Platform::Qemu => {
+            let driver = driver_stats(&r).unwrap_or_else(|e| fail!("net: virtio-net's Stats: {e}"));
+            println!("{}", DriverLine(driver));
+            let report = net_stats(&r);
+            check::net(&driver, &report)
+        }
+        Platform::HyperV => {
+            let bus = stats::<{ VmbusStats::WORDS }>(&r, r.network.bus_stats, label::VMBUS_STATS)
+                .map(VmbusStats::from_words)
+                .unwrap_or_else(|e| fail!("net: vmbus's Stats: {e}"));
+            println!("{}", VmbusLine(bus));
+            let driver =
+                stats::<{ NetvscStats::WORDS }>(&r, r.network.driver_stats, label::NETVSC_STATS)
+                    .map(NetvscStats::from_words)
+                    .unwrap_or_else(|e| fail!("net: netvsc's Stats: {e}"));
+            println!("{}", NetvscLine(driver));
+            let report = net_stats(&r);
+            check::hyperv(&bus, &driver, &report)
+        }
+    };
+    verdict.unwrap_or_else(|e| fail!("net: {e}"));
+    println!("TEST PASS");
+    libsys::exit(0)
+}
+
+/// net's `Stats`, printed.
+fn net_stats(r: &Running) -> Report {
+    let report = stats::<{ Report::WORDS }>(r, r.network.net_stats, label::NET_STATS)
         .map(Report::from_words)
         .unwrap_or_else(|e| fail!("net: net's Stats: {e}"));
     println!("{}", NetLine(report));
-    check::net(&driver, &report).unwrap_or_else(|e| fail!("net: {e}"));
-    println!("TEST PASS");
-    libsys::exit(0)
+    report
 }
 
 /// `test=virtio_net`: the driver without the stack.
@@ -163,11 +195,21 @@ fn start(bi: &BootInfo, test: &str, probe: bool) -> Running {
         )
     });
     let slots = 1u64 << bi.root_cnode_bits;
+    let drivers = match platform {
+        Platform::Qemu => Drivers::VirtioNet {
+            priority: DRIVER_PRIORITY,
+            irq: network.irq,
+        },
+        Platform::HyperV => Drivers::HyperV {
+            vmbus_priority: VMBUS_PRIORITY,
+            irq: network.irq,
+            netvsc_priority: DRIVER_PRIORITY,
+        },
+    };
     println!(
         "{}",
         Started {
-            driver_priority: DRIVER_PRIORITY,
-            irq: network.irq,
+            drivers,
             client: if probe.is_some() {
                 Beside::Probe
             } else {
@@ -181,6 +223,7 @@ fn start(bi: &BootInfo, test: &str, probe: bool) -> Running {
     Running {
         ipc,
         me,
+        platform,
         network,
         config,
         probe,

@@ -9,10 +9,12 @@
 //! From M9, `start_network` starts the network servers ("Networking",
 //! "Where the network servers run"): on QEMU `virtio-net` and `net`, the
 //! driver's VSpace with its DMA frame, its device regions' pages,
-//! uncached, and the frame queues' frame, `net`'s with a copy of it.
-//! Nothing here prints but `start_network`'s `pci:` lines, so a test on a
-//! kernel without `debug` can start the other servers before it has a
-//! console.
+//! uncached, and the frame queues' frame, `net`'s with a copy of it; on
+//! Hyper-V `vmbus`, with the SynIC frames, `netvsc`, with its channel
+//! frame, the frame queues' frame and with `netvsc.mnf=1` the monitor
+//! window, and `net`. Nothing here prints but `start_network`'s `pci:`
+//! and `servers: Hyper-V:` lines, so a test on a kernel without `debug`
+//! can start the other servers before it has a console.
 
 use core::fmt::Write;
 
@@ -21,7 +23,8 @@ use libsys::bootinfo::{
     CAP_HYPERVISOR, CAP_INIT_TCB, CAP_INIT_VSPACE, CAP_IO_PORT_CONTROL, CAP_IRQ_CONTROL,
 };
 use libsys::device::{
-    IsaIrq, ioport_control_issue, irq_control_get_isa, irq_handler_set_notification,
+    IsaIrq, ioport_control_issue, irq_control_get_isa, irq_control_get_sint,
+    irq_handler_set_notification,
 };
 use libsys::frames;
 use libsys::invoke::{
@@ -31,7 +34,7 @@ use libsys::invoke::{
 use libsys::mem::{Mmio, Shared};
 use libsys::objects::Carver;
 use libsys::output::{EXIT_FAILURE, EXIT_PORT_NUMBER, IoPort, Polled};
-use libsys::proto::{FRAMES, IRQ, KEYS, RX_READY, TERM_CLIENT};
+use libsys::proto::{CHANNEL, FRAMES, IRQ, KEYS, RX_READY, SINT, TERM_CLIENT, VMBUS_CLIENT};
 use libsys::vspace::{
     self, EXECUTE, HUGE_PAGE, READ, READ_WRITE, Table, UNCACHED, WRITE_BACK, WRITE_COMBINING,
 };
@@ -40,9 +43,10 @@ use libsys::{
     println, recv,
 };
 use root::network::{
-    DRIVER_CLIENT, DRIVER_PRIORITY, NET_CLIENT, NET_PRIORITY, Platform, QUEUES,
-    STATS_BADGE as NET_STATS_BADGE, VIRTIO_NET_WINDOWS, Window, check_windows, net_words,
-    virtio_net_start,
+    DRIVER_CLIENT, DRIVER_PRIORITY, HyperVLine, MNF_FRAMES, MONITOR_FRAMES, NET_CLIENT,
+    NET_PRIORITY, NETVSC_CLIENT, NETVSC_WINDOWS, Platform, QUEUES, STATS_BADGE as NET_STATS_BADGE,
+    SYNIC_FRAMES, VIRTIO_NET_WINDOWS, VMBUS_PRIORITY, VMBUS_SINT, VMBUS_WINDOWS, Window,
+    check_windows, net_words, netvsc_start, virtio_net_start, vmbus_start,
 };
 use root::process::{FaultLine, Image, PAGE, PT_SPAN, Plan, Role, UartBurst, fault_badge};
 use virtio_net::{Regions, Which};
@@ -77,6 +81,12 @@ const _: () = assert!(
         && uart::slot::CNODE == net::slot::CNODE
         && uart::slot::GUARD_BITS == virtio_net::slot::GUARD_BITS
         && uart::slot::GUARD_BITS == net::slot::GUARD_BITS
+        && uart::slot::RADIX == vmbus::slot::RADIX
+        && uart::slot::RADIX == netvsc::slot::RADIX
+        && uart::slot::CNODE == vmbus::slot::CNODE
+        && uart::slot::CNODE == netvsc::slot::CNODE
+        && uart::slot::GUARD_BITS == vmbus::slot::GUARD_BITS
+        && uart::slot::GUARD_BITS == netvsc::slot::GUARD_BITS
 );
 // console's raw client is term.
 const _: () = assert!(libsys::proto::CONSOLE_RAW_CLIENT == 4);
@@ -692,11 +702,18 @@ pub enum Peer {
 /// stays in its CNode; these are the ones its tests use.
 #[derive(Clone, Copy, Debug)]
 pub struct Network {
-    /// The driver's TCB, which `test=virtio_net_fault` makes fault.
+    /// The driver's TCB, which `test=virtio_net_fault` makes fault:
+    /// virtio-net's, or on Hyper-V netvsc's.
     pub driver_tcb: CPtr,
-    /// Endpoint VN with badge 2, for virtio-net's `Stats`.
+    /// Endpoint VN with badge 2, for virtio-net's `Stats`; on Hyper-V
+    /// endpoint NS with badge 2, for netvsc's.
     pub driver_stats: CPtr,
-    /// The MSI's IRQ; root keeps its handler, bound to NV with `IRQ`.
+    /// On Hyper-V, endpoint VB with badge 2, for vmbus's `Stats`; 0 on
+    /// QEMU.
+    pub bus_stats: CPtr,
+    /// The MSI's IRQ; root keeps its handler, bound to NV with `IRQ`. On
+    /// Hyper-V SINT 2's, whose handler root keeps bound to NB with
+    /// `SINT`.
     pub irq: u8,
     /// net's TCB and endpoint NE with badge 2, for its `Stats`; 0 with
     /// the probe.
@@ -724,9 +741,9 @@ pub fn platform(bi: &BootInfo) -> Platform {
 /// Starts the network servers on `platform` (`docs/design.md`, "Where
 /// the network servers run"): on QEMU `virtio-net` (140) over the
 /// virtio-net function root sets up with the crate `pci`, and `net` (130)
-/// or the probe beside it; on Hyper-V `vmbus`, `netvsc` and `net`
-/// (builder Y). It prints `pci:` lines, so it needs console or a debug
-/// kernel.
+/// or the probe beside it; on Hyper-V `vmbus` (145), `netvsc` (140) and
+/// `net` (130). It prints `pci:` lines, or on Hyper-V one `servers:
+/// Hyper-V:` line, so it needs console or a debug kernel.
 pub fn start_network<'a>(
     bi: &'a BootInfo,
     ipc: Ipc,
@@ -735,11 +752,11 @@ pub fn start_network<'a>(
     platform: Platform,
     peer: Peer,
 ) -> Network {
-    match platform {
-        Platform::Qemu => start_qemu(bi, ipc, objects, s, peer),
-        // The seam for builder Y: vmbus (145), netvsc (140) and net (130).
-        Platform::HyperV => {
-            fail!("servers: a Hypervisor capability in slot 12, but no Hyper-V network servers yet")
+    match (platform, peer) {
+        (Platform::Qemu, _) => start_qemu(bi, ipc, objects, s, peer),
+        (Platform::HyperV, Peer::Net(config)) => start_hyperv(bi, ipc, objects, s, config),
+        (Platform::HyperV, Peer::Probe) => {
+            fail!("servers: test=virtio_net's probe runs beside virtio-net, on QEMU only")
         }
     }
 }
@@ -944,6 +961,7 @@ fn start_qemu<'a>(
     let mut network = Network {
         driver_tcb,
         driver_stats,
+        bus_stats: 0,
         irq: msi.irq,
         net_tcb: 0,
         net_stats: 0,
@@ -952,81 +970,14 @@ fn start_qemu<'a>(
     };
     match peer {
         Peer::Net(config) => {
-            let ne = retype(ipc, objects, ObjectType::Endpoint, 0, 1);
-            let net_tcb = retype(ipc, objects, ObjectType::Tcb, 0, 1);
-            let net_cnode = retype(ipc, objects, ObjectType::CNode, net::slot::RADIX, 1);
-            let mine = slots(objects, 2);
-            let (net_stats, f_net) = (mine, mine + 1);
-            for (what, dest, src, badge) in [
-                (
-                    "root's Stats capability to NE",
-                    net_stats,
-                    ne,
-                    NET_STATS_BADGE,
-                ),
-                ("F for net", f_net, s.fault_ep, fault_badge::NET),
-            ] {
-                cnode_mint(ipc, root_slot(dest), root_slot(src), w_gr, badge)
-                    .unwrap_or_else(|e| fail!("servers: minting {what}: {e}"));
-            }
-            let sn = |n| Slot::new(net_cnode, n, net::slot::RADIX);
-            fill(
-                ipc,
-                net_cnode,
-                "net",
-                &[
-                    (
-                        "NE with Read",
-                        sn(net::slot::ENDPOINT),
-                        ne,
-                        Rights::READ,
-                        None,
-                    ),
-                    (
-                        "NV badged FRAMES",
-                        sn(net::slot::DRIVER),
-                        nv,
-                        Rights::WRITE,
-                        Some(FRAMES),
-                    ),
-                    ("F badged NET", sn(net::slot::FAULT), f_net, w_gr, None),
-                    (
-                        "C badged 8",
-                        sn(net::slot::CONSOLE),
-                        s.console_ep,
-                        w_gr,
-                        Some(NET_CLIENT),
-                    ),
-                ],
-            );
-            // Its one window: the frame queues' copy.
-            let net_space = vspace(ipc, objects, &image, scratch);
-            vspace::frame_map(
-                ipc,
-                copy,
-                frames::WINDOW,
-                READ_WRITE,
-                WRITE_BACK,
-                net_space.pml4,
-            )
-            .unwrap_or_else(|e| fail!("servers: mapping net's frame queues: {e}"));
             // net first: it waits for the driver's first signal.
-            spawn_server(
-                ipc,
-                &image,
-                Server {
-                    tcb: net_tcb,
-                    cnode: net_cnode,
-                    space: net_space,
-                    fault_ep: net::slot::FAULT,
-                    ntfn: Some(nn),
-                    priority: NET_PRIORITY,
-                    entry: net_main,
-                    args: net_words(&config),
-                },
-            );
-            network.net_tcb = net_tcb;
-            network.net_stats = net_stats;
+            let net = Net {
+                config,
+                queues: copy,
+                driver: (nv, "NV badged FRAMES"),
+                nn,
+            };
+            (network.net_tcb, network.net_stats) = start_net(ipc, objects, s, &image, scratch, net);
         }
         Peer::Probe => {
             vspace::frame_map(
@@ -1058,6 +1009,393 @@ fn start_qemu<'a>(
         },
     );
     network
+}
+
+/// What `net` runs over: its configuration, the frame queues' copy, its
+/// driver's notification (NV or NH) with its name for a failure's line,
+/// and its own notification NN, made with the driver's objects.
+struct Net {
+    config: net::Config,
+    queues: CPtr,
+    driver: (CPtr, &'static str),
+    nn: CPtr,
+}
+
+/// Starts `net` (130) beside either driver (`docs/design.md`, "Where the
+/// network servers run"): NE, its TCB and CNode, root's `Stats`
+/// capability to NE and F badged `NET`; its CNode from `net::slot`, its
+/// VSpace with one window, the frame queues' copy; bound to NN before it
+/// starts, with its configuration's words. Returns its TCB and root's
+/// `Stats` capability.
+fn start_net(
+    ipc: Ipc,
+    objects: &mut ObjectAlloc,
+    s: &Servers,
+    image: &Plan,
+    scratch: u64,
+    n: Net,
+) -> (CPtr, CPtr) {
+    let w_gr = Rights(Rights::WRITE.0 | Rights::GRANT_REPLY.0);
+    let ne = retype(ipc, objects, ObjectType::Endpoint, 0, 1);
+    let net_tcb = retype(ipc, objects, ObjectType::Tcb, 0, 1);
+    let net_cnode = retype(ipc, objects, ObjectType::CNode, net::slot::RADIX, 1);
+    let mine = slots(objects, 2);
+    let (net_stats, f_net) = (mine, mine + 1);
+    for (what, dest, src, badge) in [
+        (
+            "root's Stats capability to NE",
+            net_stats,
+            ne,
+            NET_STATS_BADGE,
+        ),
+        ("F for net", f_net, s.fault_ep, fault_badge::NET),
+    ] {
+        cnode_mint(ipc, root_slot(dest), root_slot(src), w_gr, badge)
+            .unwrap_or_else(|e| fail!("servers: minting {what}: {e}"));
+    }
+    let sn = |i| Slot::new(net_cnode, i, net::slot::RADIX);
+    let (driver, driver_name) = n.driver;
+    fill(
+        ipc,
+        net_cnode,
+        "net",
+        &[
+            (
+                "NE with Read",
+                sn(net::slot::ENDPOINT),
+                ne,
+                Rights::READ,
+                None,
+            ),
+            (
+                driver_name,
+                sn(net::slot::DRIVER),
+                driver,
+                Rights::WRITE,
+                Some(FRAMES),
+            ),
+            ("F badged NET", sn(net::slot::FAULT), f_net, w_gr, None),
+            (
+                "C badged 8",
+                sn(net::slot::CONSOLE),
+                s.console_ep,
+                w_gr,
+                Some(NET_CLIENT),
+            ),
+        ],
+    );
+    // Its one window: the frame queues' copy.
+    let net_space = vspace(ipc, objects, image, scratch);
+    vspace::frame_map(
+        ipc,
+        n.queues,
+        frames::WINDOW,
+        READ_WRITE,
+        WRITE_BACK,
+        net_space.pml4,
+    )
+    .unwrap_or_else(|e| fail!("servers: mapping net's frame queues: {e}"));
+    spawn_server(
+        ipc,
+        image,
+        Server {
+            tcb: net_tcb,
+            cnode: net_cnode,
+            space: net_space,
+            fault_ep: net::slot::FAULT,
+            ntfn: Some(n.nn),
+            priority: NET_PRIORITY,
+            entry: net_main,
+            args: net_words(&n.config),
+        },
+    );
+    (net_tcb, net_stats)
+}
+
+/// Hyper-V's half of [`start_network`] (`docs/design.md`, "Where the
+/// network servers run", "`vmbus`" and "`netvsc`"), with a Hypervisor
+/// capability in slot 12: SINT 2's handler from `IRQControl_GetSint`,
+/// bound to NB before anything starts, root keeping it; the channel frame
+/// and the frame queues' frame, fresh 2 MiB frames, and the monitor pages
+/// and the event-flags page, three fresh 4 KiB frames from one
+/// `Untyped_Retype`, each located with `Frame_GetAddress` and checked
+/// (`root::network::vmbus_start`, `netvsc_start`); `vmbus`'s VSpace with
+/// the SynIC frames, its CNode with slot 12's copy; `netvsc`'s VSpace with
+/// the channel frame, the frame queues' original and, with
+/// `netvsc.mnf=1`, the monitor window; then `net`, `netvsc` and `vmbus`,
+/// each bound to its notification before it starts. Every decision is in
+/// `root::network`, host-tested: QEMU's TCG has no SynIC, so this runs
+/// first on the owner's machine.
+fn start_hyperv<'a>(
+    bi: &'a BootInfo,
+    ipc: Ipc,
+    objects: &mut ObjectAlloc<'a>,
+    s: &Servers,
+    config: net::Config,
+) -> Network {
+    let mnf = root::network::mnf(bi.cmdline()).unwrap_or_else(|e| fail!("{e}"));
+    let image = Plan::new(image(bi), bi.user_image_frames)
+        .unwrap_or_else(|e| fail!("servers: the root task's image: {e}"));
+    let scratch = image
+        .scratch()
+        .unwrap_or_else(|| fail!("servers: no free page under the root task's page tables"));
+    // Every window against the image's end, in each VSpace that maps one.
+    let end = bi.user_image_end;
+    check_windows(end, &VMBUS_WINDOWS)
+        .and_then(|()| check_windows(end, &NETVSC_WINDOWS))
+        .and_then(|()| check_windows(end, &[QUEUES]))
+        .unwrap_or_else(|e| fail!("servers: {e}"));
+
+    // SINT 2: unmasked now, its handler kept in root's CSpace and bound to
+    // NB below, before vmbus starts; vmbus looks at its slot and flags
+    // once when it starts, for what came before the binding.
+    let sint = slots(objects, 1);
+    let irq = irq_control_get_sint(ipc, CAP_IRQ_CONTROL, VMBUS_SINT, root_slot(sint))
+        .unwrap_or_else(|e| fail!("servers: IRQControl_GetSint({VMBUS_SINT}): {e}"));
+
+    // The objects: VB, NS; NB, NH, NN; vmbus's and netvsc's TCBs and
+    // CNodes; the channel frame, the frame queues' frame and the monitor
+    // pages; the page tables of vmbus's SynIC window and netvsc's monitor
+    // window.
+    let eps = retype(ipc, objects, ObjectType::Endpoint, 0, 2);
+    let (vb, ns) = (eps, eps + 1);
+    let ntfns = retype(ipc, objects, ObjectType::Notification, 0, 3);
+    let (nb, nh, nn) = (ntfns, ntfns + 1, ntfns + 2);
+    let tcbs = retype(ipc, objects, ObjectType::Tcb, 0, 2);
+    let (vmbus_tcb, netvsc_tcb) = (tcbs, tcbs + 1);
+    let cnodes = retype(ipc, objects, ObjectType::CNode, vmbus::slot::RADIX, 2);
+    let (vmbus_cnode, netvsc_cnode) = (cnodes, cnodes + 1);
+    let channel = retype(ipc, objects, ObjectType::Frame2M, 0, 1);
+    let queues = retype(ipc, objects, ObjectType::Frame2M, 0, 1);
+    // One Untyped_Retype: consecutive pages, as vmbus's CONNECT names
+    // them.
+    let monitor = retype(ipc, objects, ObjectType::Frame4K, 0, MONITOR_FRAMES);
+    let synic_table = retype(ipc, objects, ObjectType::PageTable, 0, 1);
+    let mnf_table = mnf.then(|| retype(ipc, objects, ObjectType::PageTable, 0, 1));
+    let mine = slots(objects, 4);
+    let (copy, nb_sint, bus_stats, driver_stats) = (mine, mine + 1, mine + 2, mine + 3);
+    let w_gr = Rights(Rights::WRITE.0 | Rights::GRANT_REPLY.0);
+    cnode_copy(ipc, root_slot(copy), root_slot(queues), Rights::ALL)
+        .unwrap_or_else(|e| fail!("servers: copying the frame queues' frame: {e}"));
+    for (what, dest, src, rights, badge) in [
+        ("NB badged SINT", nb_sint, nb, Rights::WRITE, SINT),
+        (
+            "root's Stats capability to VB",
+            bus_stats,
+            vb,
+            w_gr,
+            NET_STATS_BADGE,
+        ),
+        (
+            "root's Stats capability to NS",
+            driver_stats,
+            ns,
+            w_gr,
+            NET_STATS_BADGE,
+        ),
+    ] {
+        cnode_mint(ipc, root_slot(dest), root_slot(src), rights, badge)
+            .unwrap_or_else(|e| fail!("servers: minting {what}: {e}"));
+    }
+
+    // The physical pages vmbus names to the host, checked as vmbus's and
+    // netvsc's entry stubs check them.
+    let address = |frame, what: &str| {
+        vspace::frame_get_address(frame)
+            .unwrap_or_else(|e| fail!("servers: Frame_GetAddress of {what}: {e}"))
+    };
+    let channel_base = address(channel, "the channel frame");
+    let pages: [u64; MONITOR_FRAMES as usize] =
+        core::array::from_fn(|i| address(monitor + i as u64, "a monitor page"));
+    let bus_start = vmbus_start(channel_base, pages).unwrap_or_else(|e| fail!("servers: {e}"));
+    let nic_start = netvsc_start(channel_base, mnf).unwrap_or_else(|e| fail!("servers: {e}"));
+
+    // SINT 2, bound to NB before vmbus gets anything.
+    irq_handler_set_notification(ipc, sint, nb_sint)
+        .unwrap_or_else(|e| fail!("servers: binding SINT 2's handler to NB: {e}"));
+
+    // vmbus's CNode and VSpace: the image and the SynIC frames, root's
+    // slots 13 and 14 themselves.
+    let sb = |n| Slot::new(vmbus_cnode, n, vmbus::slot::RADIX);
+    fill(
+        ipc,
+        vmbus_cnode,
+        "vmbus",
+        &[
+            (
+                "VB with Read and Grant",
+                sb(vmbus::slot::ENDPOINT),
+                vb,
+                Rights(Rights::READ.0 | Rights::GRANT.0),
+                None,
+            ),
+            (
+                "the Hypervisor capability",
+                sb(vmbus::slot::HYPERVISOR),
+                CAP_HYPERVISOR,
+                Rights::ALL,
+                None,
+            ),
+            (
+                "NH badged CHANNEL",
+                sb(vmbus::slot::NETVSC_NTFN),
+                nh,
+                Rights::WRITE,
+                Some(CHANNEL),
+            ),
+            (
+                "F badged VMBUS",
+                sb(vmbus::slot::FAULT),
+                s.fault_ep,
+                w_gr,
+                Some(fault_badge::VMBUS),
+            ),
+            (
+                "C badged 6",
+                sb(vmbus::slot::CONSOLE),
+                s.console_ep,
+                w_gr,
+                Some(DRIVER_CLIENT),
+            ),
+        ],
+    );
+    let bus_space = vspace(ipc, objects, &image, scratch);
+    vspace::map_table(
+        ipc,
+        synic_table,
+        Table::PageTable,
+        vmbus::layout::SYNIC,
+        bus_space.pml4,
+    )
+    .unwrap_or_else(|e| fail!("servers: mapping vmbus's SynIC window's page table: {e}"));
+    for (frame, addr) in SYNIC_FRAMES {
+        vspace::frame_map(ipc, frame, addr, READ_WRITE, WRITE_BACK, bus_space.pml4)
+            .unwrap_or_else(|e| fail!("servers: mapping SynIC frame {frame} at {addr:#x}: {e}"));
+    }
+
+    // netvsc's CNode and VSpace: the image, the channel frame, the frame
+    // queues' original and, with netvsc.mnf=1, monitor page 2 and the
+    // event-flags page.
+    let sn = |n| Slot::new(netvsc_cnode, n, netvsc::slot::RADIX);
+    fill(
+        ipc,
+        netvsc_cnode,
+        "netvsc",
+        &[
+            (
+                "NS with Read",
+                sn(netvsc::slot::ENDPOINT),
+                ns,
+                Rights::READ,
+                None,
+            ),
+            (
+                "VB badged 1",
+                sn(netvsc::slot::VMBUS),
+                vb,
+                w_gr,
+                Some(VMBUS_CLIENT),
+            ),
+            (
+                "NN badged FRAMES",
+                sn(netvsc::slot::NET_NTFN),
+                nn,
+                Rights::WRITE,
+                Some(FRAMES),
+            ),
+            (
+                "F badged NETVSC",
+                sn(netvsc::slot::FAULT),
+                s.fault_ep,
+                w_gr,
+                Some(fault_badge::NETVSC),
+            ),
+            (
+                "C badged 7",
+                sn(netvsc::slot::CONSOLE),
+                s.console_ep,
+                w_gr,
+                Some(NETVSC_CLIENT),
+            ),
+        ],
+    );
+    let nic_space = vspace(ipc, objects, &image, scratch);
+    let map = |frame, addr, what: &str| {
+        vspace::frame_map(ipc, frame, addr, READ_WRITE, WRITE_BACK, nic_space.pml4)
+            .unwrap_or_else(|e| fail!("servers: mapping netvsc's {what} at {addr:#x}: {e}"));
+    };
+    map(channel, netvsc::layout::CHANNEL, "channel frame");
+    map(queues, frames::WINDOW, "frame queues");
+    if let Some(table) = mnf_table {
+        vspace::map_table(
+            ipc,
+            table,
+            Table::PageTable,
+            netvsc::layout::MNF,
+            nic_space.pml4,
+        )
+        .unwrap_or_else(|e| fail!("servers: mapping netvsc's monitor window's page table: {e}"));
+        for (i, addr) in MNF_FRAMES {
+            map(monitor + i, addr, "monitor window");
+        }
+    }
+
+    println!(
+        "{}",
+        HyperVLine {
+            irq,
+            vmbus: bus_start,
+            mnf
+        }
+    );
+
+    // net first, then netvsc, which calls vmbus's Attach, then vmbus: all
+    // below root, so none runs before root waits.
+    let net = Net {
+        config,
+        queues: copy,
+        driver: (nh, "NH badged FRAMES"),
+        nn,
+    };
+    let (net_tcb, net_stats) = start_net(ipc, objects, s, &image, scratch, net);
+    spawn_server(
+        ipc,
+        &image,
+        Server {
+            tcb: netvsc_tcb,
+            cnode: netvsc_cnode,
+            space: nic_space,
+            fault_ep: netvsc::slot::FAULT,
+            ntfn: Some(nh),
+            priority: DRIVER_PRIORITY,
+            entry: netvsc_main,
+            args: nic_start.to_words(),
+        },
+    );
+    spawn_server(
+        ipc,
+        &image,
+        Server {
+            tcb: vmbus_tcb,
+            cnode: vmbus_cnode,
+            space: bus_space,
+            fault_ep: vmbus::slot::FAULT,
+            ntfn: Some(nb),
+            priority: VMBUS_PRIORITY,
+            entry: vmbus_main,
+            args: bus_start.to_words(),
+        },
+    );
+    Network {
+        driver_tcb: netvsc_tcb,
+        driver_stats,
+        bus_stats,
+        irq,
+        net_tcb,
+        net_stats,
+        nn: 0,
+        nv_frames: 0,
+    }
 }
 
 type Fill<'a> = (&'a str, Slot, CPtr, Rights, Option<u64>);
@@ -1345,6 +1683,73 @@ extern "C" fn net_main(rdi: u64, rsi: u64, rdx: u64, rcx: u64) -> ! {
     // reached only through `Shared`.
     let queues = unsafe { Shared::new(frames::WINDOW as *mut u8, frames::SIZE) };
     net::run(config, frames::Net::new(queues))
+}
+
+/// vmbus's entry: checks the words root passed again
+/// (`vmbus::Start::from_words`), then makes its windows on the SynIC
+/// frames `start_hyperv` mapped and runs it.
+extern "C" fn vmbus_main(rdi: u64, rsi: u64, rdx: u64, rcx: u64) -> ! {
+    // Before anything can panic, as for virtio-net.
+    libsys::output::reset();
+    let Some(start) = vmbus::Start::from_words([rdi, rsi, rdx, rcx]) else {
+        panic!("vmbus: words it refuses: {rdi:#x} {rsi:#x} {rdx:#x} {rcx:#x}")
+    };
+    let page = vmbus::layout::PAGE as usize;
+    // SAFETY: `start_hyperv` mapped the SynIC message frame, root's slot
+    // 13, a 4 KiB RAM frame outside every untyped, read-write and
+    // write-back at `vmbus::layout::SIM` in this VSpace, its only mapping
+    // anywhere; it stays mapped for the thread's life. The hypervisor
+    // writes it behind the compiler's back, so nothing holds a reference
+    // into it: it is reached only through `Shared`.
+    let sim = unsafe { Shared::new(vmbus::layout::SIM as *mut u8, page) };
+    // SAFETY: the same for the SynIC event-flag frame, root's slot 14, at
+    // `vmbus::layout::SIEF`, the page above the message frame's.
+    let sief = unsafe { Shared::new(vmbus::layout::SIEF as *mut u8, page) };
+    vmbus::run(start, sim, sief)
+}
+
+/// netvsc's entry: checks the words root passed again
+/// (`netvsc::Start::from_words`), then makes its windows on the channel
+/// frame, the frame queues' original and, with `netvsc.mnf=1`, the
+/// monitor window, which `start_hyperv` mapped, and runs it.
+extern "C" fn netvsc_main(rdi: u64, rsi: u64, rdx: u64, rcx: u64) -> ! {
+    // Before anything can panic, as for virtio-net.
+    libsys::output::reset();
+    let Some(start) = netvsc::Start::from_words([rdi, rsi, rdx, rcx]) else {
+        panic!("netvsc: words it refuses: {rdi:#x} {rsi:#x} {rdx:#x} {rcx:#x}")
+    };
+    // SAFETY: `start_hyperv` mapped the channel frame, a fresh 2 MiB RAM
+    // frame zeroed by its retype, read-write and write-back at
+    // `netvsc::layout::CHANNEL` in this VSpace and no other; it stays
+    // mapped for the thread's life. The host writes it behind the
+    // compiler's back, so nothing holds a reference into it: it is reached
+    // only through `Shared`.
+    let channel = unsafe {
+        Shared::new(
+            netvsc::layout::CHANNEL as *mut u8,
+            netvsc::layout::CHANNEL_SIZE,
+        )
+    };
+    let mnf = if start.mnf {
+        // SAFETY: with `netvsc.mnf=1`, the one case root passes `rsi` 1,
+        // `start_hyperv` mapped monitor page 2 and the event-flags page,
+        // fresh 4 KiB RAM frames, read-write and write-back at
+        // `netvsc::layout::MNF` and the page above it in this VSpace and no
+        // other; they stay mapped for the thread's life. The host reads
+        // and writes them behind the compiler's back, so nothing holds a
+        // reference into them: they are reached only through `Shared`.
+        Some(unsafe { Shared::new(netvsc::layout::MNF as *mut u8, netvsc::layout::MNF_SIZE) })
+    } else {
+        None
+    };
+    // SAFETY: `start_hyperv` mapped the frame queues' frame, a fresh 2 MiB
+    // RAM frame zeroed by its retype, read-write and write-back at
+    // `libsys::frames::WINDOW` here, and its one copy in net's VSpace; it
+    // stays mapped for the thread's life. net writes it behind the
+    // compiler's back, so nothing holds a reference into it: it is reached
+    // only through `Shared`.
+    let queues = unsafe { Shared::new(frames::WINDOW as *mut u8, frames::SIZE) };
+    netvsc::run(start, channel, mnf, frames::Driver::new(queues))
 }
 
 /// `watch`: receives the servers' faults on F and ends the run with

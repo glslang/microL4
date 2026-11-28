@@ -4,18 +4,27 @@
 //! and what the counters must hold once the harness's datagrams are
 //! echoed (`root::check::net`): no bad queue entry or used element, no IP
 //! or UDP checksum error, no frame dropped for want of a buffer on either
-//! side, and at least the datagrams the scenario sends echoed.
+//! side, and at least the datagrams the scenario sends echoed. On Hyper-V
+//! (the M9 Hyper-V check) the drivers are `vmbus` and `netvsc`: the
+//! netvsc channel open, no packet that broke a ring, and, beside the
+//! datagrams, the script's four pings answered.
 
 use core::fmt;
 
 use libsys::frames::Mac;
-use libsys::proto::VirtioNetStats;
+use libsys::proto::{NetvscStats, VirtioNetStats, VmbusStats};
 use net::Ip;
 pub use net::link::Report;
+
+use crate::network::VMBUS_SINT;
 
 /// The datagrams the `net` scenario sends (`udp_echo: 100`), each of
 /// which must come back.
 pub const DATAGRAMS: u64 = 100;
+
+/// The pings `Send-L4Udp.ps1` sends the guest before its datagrams, on
+/// Hyper-V, each of which `net` must answer.
+pub const PINGS: u64 = 4;
 
 /// What runs beside the driver: `net`, or `test=virtio_net`'s probe, a
 /// thread of root's own.
@@ -34,12 +43,28 @@ impl Client {
     }
 }
 
+/// The drivers the `servers:` line names, with their priorities and
+/// interrupt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drivers {
+    /// QEMU's: `virtio-net (priority 140, MSI-X IRQ <irq>)`.
+    VirtioNet { priority: u64, irq: u8 },
+    /// Hyper-V's: `vmbus (priority 145, SINT 2 IRQ <irq>), netvsc
+    /// (priority 140)`.
+    HyperV {
+        vmbus_priority: u64,
+        irq: u8,
+        netvsc_priority: u64,
+    },
+}
+
 /// `servers: virtio-net (priority 140, MSI-X IRQ <irq>), net (priority
-/// 130); root CNode <used> of <slots> slots used`, once both run.
+/// 130); root CNode <used> of <slots> slots used`, once both run; on
+/// Hyper-V `servers: vmbus (priority 145, SINT 2 IRQ <irq>), netvsc
+/// (priority 140), net (priority 130); ...`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Started {
-    pub driver_priority: u64,
-    pub irq: u8,
+    pub drivers: Drivers,
     pub client: Client,
     pub client_priority: u64,
     pub used: u64,
@@ -48,11 +73,23 @@ pub struct Started {
 
 impl fmt::Display for Started {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("servers: ")?;
+        match self.drivers {
+            Drivers::VirtioNet { priority, irq } => {
+                write!(f, "virtio-net (priority {priority}, MSI-X IRQ {irq})")?
+            }
+            Drivers::HyperV {
+                vmbus_priority,
+                irq,
+                netvsc_priority,
+            } => write!(
+                f,
+                "vmbus (priority {vmbus_priority}, SINT {VMBUS_SINT} IRQ {irq}), netvsc (priority {netvsc_priority})"
+            )?,
+        }
         write!(
             f,
-            "servers: virtio-net (priority {}, MSI-X IRQ {}), {} (priority {}); root CNode {} of {} slots used",
-            self.driver_priority,
-            self.irq,
+            ", {} (priority {}); root CNode {} of {} slots used",
             self.client.name(),
             self.client_priority,
             self.used,
@@ -84,6 +121,24 @@ pub struct DriverLine(pub VirtioNetStats);
 impl fmt::Display for DriverLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "virtio-net: stats: {}", self.0)
+    }
+}
+
+/// `vmbus: stats: <its counters>` (Hyper-V).
+pub struct VmbusLine(pub VmbusStats);
+
+impl fmt::Display for VmbusLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "vmbus: stats: {}", self.0)
+    }
+}
+
+/// `netvsc: stats: <its counters>` (Hyper-V).
+pub struct NetvscLine(pub NetvscStats);
+
+impl fmt::Display for NetvscLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "netvsc: stats: {}", self.0)
     }
 }
 
@@ -122,6 +177,17 @@ pub enum Failure {
     /// The probe's run: the driver received or sent no frame, or was
     /// never signalled.
     Probe(&'static str),
+    /// Hyper-V: vmbus opened no netvsc channel.
+    NoChannel,
+    /// netvsc found a ring broken, which it then no longer uses; its own
+    /// line said which and why.
+    Broken(u64),
+    /// netvsc's side of the frame queues skipped bad entries.
+    NetvscBadEntries(u64),
+    /// netvsc dropped received frames with no receive buffer free.
+    NetvscDropped(u64),
+    /// Fewer ICMP echo requests answered than the Hyper-V script sends.
+    TooFewPings { answered: u64, want: u64 },
 }
 
 impl fmt::Display for Failure {
@@ -153,6 +219,21 @@ impl fmt::Display for Failure {
                 write!(f, "net echoed {echoed} datagrams, fewer than {want}")
             }
             Failure::Probe(what) => write!(f, "virtio-net's Stats: {what}"),
+            Failure::NoChannel => f.write_str("vmbus opened no netvsc channel"),
+            Failure::Broken(n) => write!(
+                f,
+                "netvsc counted {n} broken packets and stopped using the ring they broke"
+            ),
+            Failure::NetvscBadEntries(n) => {
+                write!(f, "netvsc skipped {n} bad frame-queue entries")
+            }
+            Failure::NetvscDropped(n) => {
+                write!(f, "netvsc dropped {n} frames for want of a receive buffer")
+            }
+            Failure::TooFewPings { answered, want } => write!(
+                f,
+                "net answered {answered} ICMP echo requests, fewer than {want}"
+            ),
         }
     }
 }
@@ -206,6 +287,54 @@ pub fn stack(r: &Report, want: u64) -> Result<(), Failure> {
 pub fn net(driver: &VirtioNetStats, report: &Report) -> Result<(), Failure> {
     virtio_net(driver)?;
     stack(report, DATAGRAMS)
+}
+
+/// vmbus's counters: the netvsc channel open. Its stray events and
+/// ignored messages are no failure: a real host may send what vmbus does
+/// not use, and netvsc's and net's counters show whether anything was
+/// lost.
+pub fn vmbus(s: &VmbusStats) -> Result<(), Failure> {
+    if s.netvsc_channel == 0 {
+        return Err(Failure::NoChannel);
+    }
+    Ok(())
+}
+
+/// netvsc's counters: no packet that broke a ring, no bad queue entry, no
+/// frame dropped for want of a receive buffer. Its ignored messages are
+/// no failure: the host's notes (`TXTBL_NOTE`, `VFASSOC_NOTE`) are
+/// counted there (`docs/design.md`, "`netvsc`"), and so is a send
+/// completion with a status other than OK, a frame the host says it did
+/// not send, which the echoes then miss. Packets skipped (over 4 KiB, or
+/// ranges outside the receive buffer) are printed but no failure either:
+/// a datagram they held is missing from the echoes.
+pub fn netvsc(s: &NetvscStats) -> Result<(), Failure> {
+    if s.broken != 0 {
+        return Err(Failure::Broken(s.broken));
+    }
+    if s.bad_entries != 0 {
+        return Err(Failure::NetvscBadEntries(s.bad_entries));
+    }
+    if s.dropped != 0 {
+        return Err(Failure::NetvscDropped(s.dropped));
+    }
+    Ok(())
+}
+
+/// `test=net` on Hyper-V: vmbus's and netvsc's counters, then net's with
+/// [`DATAGRAMS`] echoed and the script's [`PINGS`] answered.
+pub fn hyperv(bus: &VmbusStats, driver: &NetvscStats, report: &Report) -> Result<(), Failure> {
+    vmbus(bus)?;
+    netvsc(driver)?;
+    stack(report, DATAGRAMS)?;
+    let answered = report.stack.icmp_answered;
+    if answered < PINGS {
+        return Err(Failure::TooFewPings {
+            answered,
+            want: PINGS,
+        });
+    }
+    Ok(())
 }
 
 /// `test=virtio_net`: the driver's counters, and frames each way (the
@@ -308,8 +437,10 @@ mod tests {
     #[test]
     fn the_servers_line() {
         let s = Started {
-            driver_priority: 140,
-            irq: 1,
+            drivers: Drivers::VirtioNet {
+                priority: 140,
+                irq: 1,
+            },
             client: Client::Net,
             client_priority: 130,
             used: 1187,
@@ -479,6 +610,183 @@ mod tests {
             format!("{}", Failure::Probe("no frame sent")),
             "virtio-net's Stats: no frame sent"
         );
+    }
+
+    /// vmbus's counters after the M9 Hyper-V check, roughly.
+    fn bus() -> VmbusStats {
+        VmbusStats {
+            version: 0x4_0000,
+            offers: 9,
+            netvsc_channel: 14,
+            messages: 24,
+            events: 310,
+            stray: 0,
+            eoms: 0,
+            retries: 0,
+            ignored: 0,
+        }
+    }
+
+    /// netvsc's: the host's ARP request and four pings besides the 100
+    /// datagrams each way, and one TXTBL_NOTE, ignored.
+    fn netvsc_stats() -> NetvscStats {
+        NetvscStats {
+            nvsp: 0x5_0000,
+            ndis: 0x6_001E,
+            rxbuf_packets: 106,
+            received: 106,
+            dropped: 0,
+            acks: 106,
+            acks_waiting: 0,
+            sent: 106,
+            max_in_flight: 8,
+            completions: 106,
+            status: 1,
+            broken: 0,
+            skipped: 0,
+            ignored: 1,
+            bad_entries: 0,
+        }
+    }
+
+    fn hyperv_report() -> Report {
+        let mut r = report();
+        r.stack.icmp_answered = 4;
+        r.stack.arp_answered = 1;
+        r
+    }
+
+    #[test]
+    fn the_hyperv_servers_line() {
+        let s = Started {
+            drivers: Drivers::HyperV {
+                vmbus_priority: 145,
+                irq: 1,
+                netvsc_priority: 140,
+            },
+            client: Client::Net,
+            client_priority: 130,
+            used: 1320,
+            slots: 4096,
+        };
+        assert_eq!(
+            s.to_string(),
+            "servers: vmbus (priority 145, SINT 2 IRQ 1), netvsc (priority 140), net (priority 130); root CNode 1320 of 4096 slots used"
+        );
+        // What the Hyper-V scenarios expect of it.
+        let line = s.to_string();
+        assert!(line.starts_with("servers: vmbus (priority 145, SINT 2 IRQ "));
+        assert!(line.contains("), netvsc (priority 140), net (priority 130); root CNode "));
+    }
+
+    #[test]
+    fn the_hyperv_stats_lines() {
+        let v = VmbusLine(bus()).to_string();
+        assert_eq!(
+            v,
+            "vmbus: stats: version 4.0, 9 offers, netvsc channel 14, 24 messages, 310 events relayed, 0 stray events, 0 Eoms, 0 post retries, 0 ignored messages"
+        );
+        let n = NetvscLine(netvsc_stats()).to_string();
+        assert!(n.starts_with("netvsc: stats: NVSP 5, NDIS 6.30, "), "{n}");
+        for want in [
+            ", 0 dropped for no buffer,",
+            ", 0 broken packets,",
+            ", 0 packets skipped,",
+            ", 0 bad queue entries",
+        ] {
+            assert!(n.contains(want), "{n} has no {want:?}");
+        }
+        assert!(n.ends_with(", 0 bad queue entries"), "{n}");
+        let net = NetLine(hyperv_report()).to_string();
+        // The two the scenarios expect, in the order they come.
+        let pings = net.find(", 4 ICMP echo requests answered,").unwrap();
+        let echoed = net.find(", 100 datagrams echoed,").unwrap();
+        assert!(pings < echoed, "{net}");
+    }
+
+    #[test]
+    fn the_hyperv_verdict() {
+        assert_eq!(hyperv(&bus(), &netvsc_stats(), &hyperv_report()), Ok(()));
+        // Ignored messages, stray events and skipped packets are no
+        // failure on either side; more pings than four are none either.
+        let mut b = bus();
+        b.ignored = 3;
+        b.stray = 2;
+        let mut n = netvsc_stats();
+        n.ignored = 5;
+        n.skipped = 1;
+        let mut r = hyperv_report();
+        r.stack.icmp_answered = 9;
+        assert_eq!(hyperv(&b, &n, &r), Ok(()));
+        let mut b = bus();
+        b.netvsc_channel = 0;
+        assert_eq!(
+            hyperv(&b, &netvsc_stats(), &hyperv_report()),
+            Err(Failure::NoChannel)
+        );
+        for (f, why) in [
+            (
+                (|s: &mut NetvscStats| s.broken = 1) as fn(&mut NetvscStats),
+                Failure::Broken(1),
+            ),
+            (|s| s.bad_entries = 2, Failure::NetvscBadEntries(2)),
+            (|s| s.dropped = 3, Failure::NetvscDropped(3)),
+        ] {
+            let mut n = netvsc_stats();
+            f(&mut n);
+            assert_eq!(hyperv(&bus(), &n, &hyperv_report()), Err(why));
+        }
+        // net's own verdict holds on Hyper-V too.
+        let mut r = hyperv_report();
+        r.stack.udp_echoed = 99;
+        assert_eq!(
+            hyperv(&bus(), &netvsc_stats(), &r),
+            Err(Failure::TooFewEchoed {
+                echoed: 99,
+                want: 100
+            })
+        );
+        let mut r = hyperv_report();
+        r.queues.bad = 1;
+        assert_eq!(
+            hyperv(&bus(), &netvsc_stats(), &r),
+            Err(Failure::NetBadEntries(1))
+        );
+        let mut r = hyperv_report();
+        r.stack.icmp_answered = 3;
+        assert_eq!(
+            hyperv(&bus(), &netvsc_stats(), &r),
+            Err(Failure::TooFewPings {
+                answered: 3,
+                want: 4
+            })
+        );
+        for (f, text) in [
+            (Failure::NoChannel, "vmbus opened no netvsc channel"),
+            (
+                Failure::Broken(1),
+                "netvsc counted 1 broken packets and stopped using the ring they broke",
+            ),
+            (
+                Failure::NetvscBadEntries(2),
+                "netvsc skipped 2 bad frame-queue entries",
+            ),
+            (
+                Failure::NetvscDropped(3),
+                "netvsc dropped 3 frames for want of a receive buffer",
+            ),
+            (
+                Failure::TooFewPings {
+                    answered: 0,
+                    want: 4,
+                },
+                "net answered 0 ICMP echo requests, fewer than 4",
+            ),
+        ] {
+            assert_eq!(f.to_string(), text);
+        }
+        // The replies root asks for on Hyper-V: 9, 15 and 41 words.
+        assert_eq!((VmbusStats::WORDS, NetvscStats::WORDS), (9, 15));
     }
 
     #[test]

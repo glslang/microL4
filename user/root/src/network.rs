@@ -2,12 +2,17 @@
 //! (`docs/design.md`, "Where the network servers run", "PCI on QEMU" and
 //! "Network scenarios"): which platform's drivers root starts, the
 //! windows it maps in their VSpaces and where they may lie, the words it
-//! passes `virtio-net` and `net` in their registers, and the ARP request
-//! and reply of `test=virtio_net`'s probe. The root task's `servers.rs`
-//! and `net.rs` do the invocations.
+//! passes `virtio-net`, `vmbus`, `netvsc` and `net` in their registers,
+//! the frames it maps for `vmbus` and `netvsc` and the checks of their
+//! physical addresses, the command line's `netvsc.mnf=`, and the ARP
+//! request and reply of `test=virtio_net`'s probe. The root task's
+//! `servers.rs` and `net.rs` do the invocations; on Hyper-V no test runs
+//! them before the owner's machine (QEMU's TCG has no SynIC), so every
+//! decision they make is here.
 
 use core::fmt;
 
+use libsys::bootinfo::{CAP_SYNIC_EVENT_FRAME, CAP_SYNIC_MESSAGE_FRAME};
 use libsys::frames::{self, Mac};
 use net::arp::{self, Packet};
 use net::ethernet::{self, Header};
@@ -48,7 +53,7 @@ const _: () = {
 pub enum Platform {
     /// `virtio-net` on PCI, found through ECAM.
     Qemu,
-    /// `vmbus` and `netvsc` through the Hypervisor capability (builder Y).
+    /// `vmbus` and `netvsc` through the Hypervisor capability.
     HyperV,
 }
 
@@ -240,6 +245,203 @@ pub fn virtio_net_start(plan: &pci::Plan, dma: u64) -> Result<Start, StartError>
 /// lays it out and `net`'s entry stub checks it again.
 pub fn net_words(config: &Config) -> [u64; 4] {
     config.to_words()
+}
+
+/// The SINT VMBus sends its messages and channel events on (FreeBSD's
+/// `VMBUS_SINT_MESSAGE`), which root issues with `IRQControl_GetSint`.
+pub const VMBUS_SINT: u64 = vmbus::synic::SINT as u64;
+
+/// `vmbus`'s one window: the SynIC frames (initial slots 13 and 14), each
+/// a 4 KiB page under a page table of its own.
+pub const VMBUS_WINDOWS: [Window; 1] = [Window {
+    name: "the SynIC frames",
+    start: vmbus::layout::SYNIC,
+    bytes: 2 * PAGE,
+    huge: false,
+}];
+
+/// `netvsc`'s windows: the channel frame, the monitor window (mapped only
+/// with `netvsc.mnf=1`, but checked always) and the frame queues'
+/// original.
+pub const NETVSC_WINDOWS: [Window; 3] = [
+    Window {
+        name: "the channel frame",
+        start: netvsc::layout::CHANNEL,
+        bytes: netvsc::layout::CHANNEL_SIZE as u64,
+        huge: true,
+    },
+    Window {
+        name: "the monitor window",
+        start: netvsc::layout::MNF,
+        bytes: netvsc::layout::MNF_SIZE as u64,
+        huge: false,
+    },
+    QUEUES,
+];
+
+/// Where root maps the SynIC frames in `vmbus`'s VSpace: the root slot
+/// of each and its address, the message frame at `vmbus::layout::SIM`,
+/// the event-flag frame at `vmbus::layout::SIEF`.
+pub const SYNIC_FRAMES: [(u64, u64); 2] = [
+    (CAP_SYNIC_MESSAGE_FRAME, vmbus::layout::SIM),
+    (CAP_SYNIC_EVENT_FRAME, vmbus::layout::SIEF),
+];
+
+/// The pages `vmbus` names to the host in CONNECT besides its GPADLs:
+/// monitor page 1, monitor page 2 and the event-flags page, three 4 KiB
+/// frames root retypes in one `Untyped_Retype`, which places them at
+/// consecutive physical addresses in that order.
+pub const MONITOR_FRAMES: u64 = 3;
+
+/// Where root maps two of them in `netvsc`'s VSpace with `netvsc.mnf=1`:
+/// each frame's index among the [`MONITOR_FRAMES`] and its address.
+/// Monitor page 2 (the guest-to-host one) at the window's start, the
+/// event-flags page a page above it, as `netvsc::layout` reads them.
+pub const MNF_FRAMES: [(u64, u64); 2] = [
+    (1, netvsc::layout::MNF + netvsc::layout::MNF_MONITOR as u64),
+    (
+        2,
+        netvsc::layout::MNF + netvsc::layout::MNF_EVENT_FLAGS as u64,
+    ),
+];
+
+// vmbus's and netvsc's layouts agree with what root maps and passes.
+const _: () = {
+    assert!(VMBUS_SINT == 2);
+    assert!(vmbus::layout::SIM == vmbus::layout::SYNIC);
+    assert!(vmbus::layout::SIEF == vmbus::layout::SYNIC + PAGE);
+    assert!(vmbus::layout::PAGE == PAGE);
+    assert!(netvsc::layout::PAGE as u64 == PAGE);
+    assert!(netvsc::layout::CHANNEL_SIZE as u64 == vmbus::Start::CHANNEL_SIZE);
+    assert!(netvsc::layout::CHANNEL_SIZE as u64 == PT_SPAN);
+    assert!(netvsc::layout::MNF_SIZE as u64 == 2 * PAGE);
+    assert!(netvsc::layout::MNF_MONITOR == 0);
+    assert!(netvsc::layout::MNF_EVENT_FLAGS as u64 == PAGE);
+};
+
+/// The command line's `netvsc.mnf=<v>` word (`docs/design.md`, "Where the
+/// network servers run"): `1` has `netvsc` signal the host as FreeBSD's
+/// `vmbus_chan_signal` does, through the event-flags page and monitor
+/// page 2, which root then maps in its VSpace; `0`, or no word,
+/// `SignalEvent`. Any other value fails the test, so that a command line
+/// written by hand (`Set-L4Cmdline.ps1`) cannot run the other way
+/// unnoticed.
+pub fn mnf(cmdline: &str) -> Result<bool, BadMnf<'_>> {
+    match libsys::cmdline::value(cmdline, BadMnf::KEY) {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(v) => Err(BadMnf(v)),
+    }
+}
+
+/// A `netvsc.mnf=` value other than 0 or 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadMnf<'a>(pub &'a str);
+
+impl BadMnf<'_> {
+    /// The word's key.
+    pub const KEY: &'static str = "netvsc.mnf";
+}
+
+impl fmt::Display for BadMnf<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "servers: {}={:?}: not 0 or 1", Self::KEY, self.0)
+    }
+}
+
+/// Why root's words for `vmbus` or `netvsc` would be refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HyperVError {
+    /// The monitor pages and the event-flags page, by their physical
+    /// addresses, are not three consecutive pages.
+    Pages([u64; MONITOR_FRAMES as usize]),
+    /// Words `vmbus::Start::from_words` refuses.
+    Vmbus([u64; 4]),
+    /// Words `netvsc::Start::from_words` refuses.
+    Netvsc([u64; 4]),
+}
+
+impl fmt::Display for HyperVError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            HyperVError::Pages([a, b, c]) => write!(
+                f,
+                "the monitor pages and the event-flags page are at {a:#x}, {b:#x} and {c:#x}, not three consecutive pages"
+            ),
+            HyperVError::Vmbus([a, b, c, d]) => {
+                write!(f, "vmbus would refuse {a:#x} {b:#x} {c:#x} {d:#x}")
+            }
+            HyperVError::Netvsc([a, b, c, d]) => {
+                write!(f, "netvsc would refuse {a:#x} {b:#x} {c:#x} {d:#x}")
+            }
+        }
+    }
+}
+
+/// `vmbus`'s arguments for the channel frame at physical `channel` and
+/// the [`MONITOR_FRAMES`] at `pages`, as `Frame_GetAddress` gave them:
+/// the pages must be consecutive (one `Untyped_Retype` placed them, and
+/// `netvsc` maps the second as monitor page 2), and the words are checked
+/// as `vmbus`'s entry stub checks them, so a word it would refuse fails in
+/// root instead.
+pub fn vmbus_start(
+    channel: u64,
+    pages: [u64; MONITOR_FRAMES as usize],
+) -> Result<vmbus::Start, HyperVError> {
+    let [monitor, monitor2, event_flags] = pages;
+    if monitor.checked_add(PAGE) != Some(monitor2)
+        || monitor2.checked_add(PAGE) != Some(event_flags)
+    {
+        return Err(HyperVError::Pages(pages));
+    }
+    let words = vmbus::Start {
+        channel,
+        monitor,
+        event_flags,
+    }
+    .to_words();
+    vmbus::Start::from_words(words).ok_or(HyperVError::Vmbus(words))
+}
+
+/// `netvsc`'s arguments for the channel frame at physical `channel`, with
+/// `netvsc.mnf=1`'s signalling if `mnf`, checked as its entry stub checks
+/// them.
+pub fn netvsc_start(channel: u64, mnf: bool) -> Result<netvsc::Start, HyperVError> {
+    let words = netvsc::Start { channel, mnf }.to_words();
+    netvsc::Start::from_words(words).ok_or(HyperVError::Netvsc(words))
+}
+
+/// The line root prints once the Hyper-V servers' frames are made and
+/// checked, before it starts them: `servers: Hyper-V: SINT 2 is IRQ <n>;
+/// channel frame <a>, monitor pages <m> and <m + 0x1000>, event flags
+/// <e>; netvsc signals the host with SignalEvent` (or `through monitor
+/// page 2 and the event flags (netvsc.mnf=1)`): the pages `vmbus` names
+/// to the host, and which way `netvsc` rings it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HyperVLine {
+    pub irq: u8,
+    pub vmbus: vmbus::Start,
+    pub mnf: bool,
+}
+
+impl fmt::Display for HyperVLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = &self.vmbus;
+        write!(
+            f,
+            "servers: Hyper-V: SINT {VMBUS_SINT} is IRQ {}; channel frame {:#x}, monitor pages {:#x} and {:#x}, event flags {:#x}; netvsc signals the host ",
+            self.irq,
+            s.channel,
+            s.monitor,
+            s.monitor2(),
+            s.event_flags
+        )?;
+        if self.mnf {
+            f.write_str("through monitor page 2 and the event flags (netvsc.mnf=1)")
+        } else {
+            f.write_str("with SignalEvent")
+        }
+    }
 }
 
 /// The addresses `test=virtio_net`'s probe uses: `config`'s address and
@@ -607,6 +809,167 @@ mod tests {
             ),
             Ok(c)
         );
+    }
+
+    /// The Hyper-V servers' windows fit above an image that ends below
+    /// `0xC0_0000`, as M8's does, each in its own VSpace's list, and the
+    /// frames root maps lie in them.
+    #[test]
+    fn the_hyperv_windows() {
+        let end = 0xBF_F000;
+        assert_eq!(check_windows(end, &VMBUS_WINDOWS), Ok(()));
+        assert_eq!(check_windows(end, &NETVSC_WINDOWS), Ok(()));
+        let inside = |w: &Window, addr: u64| w.start <= addr && addr + PAGE <= w.start + w.bytes;
+        for (slot, addr) in SYNIC_FRAMES {
+            assert!(inside(&VMBUS_WINDOWS[0], addr), "slot {slot} at {addr:#x}");
+        }
+        assert_eq!(SYNIC_FRAMES.map(|(slot, _)| slot), [13, 14]);
+        assert_ne!(SYNIC_FRAMES[0].1, SYNIC_FRAMES[1].1);
+        for (i, addr) in MNF_FRAMES {
+            assert!(i < MONITOR_FRAMES);
+            assert!(inside(&NETVSC_WINDOWS[1], addr), "frame {i} at {addr:#x}");
+        }
+        assert_ne!(MNF_FRAMES[0].1, MNF_FRAMES[1].1);
+        // An image whose last pages reach the SynIC window's 2 MiB.
+        assert_eq!(
+            check_windows(vmbus::layout::SYNIC - 2 * PAGE, &VMBUS_WINDOWS),
+            Err(WindowError::Image {
+                window: "the SynIC frames",
+                image_end: vmbus::layout::SYNIC - 2 * PAGE
+            })
+        );
+    }
+
+    /// `netvsc.mnf=`: 1 or 0, or no word; anything else is refused.
+    #[test]
+    fn the_netvsc_mnf_word() {
+        assert_eq!(mnf("test=net net.ip=192.168.77.2/24"), Ok(false));
+        assert_eq!(mnf("test=net netvsc.mnf=1"), Ok(true));
+        assert_eq!(mnf("netvsc.mnf=0 test=net"), Ok(false));
+        // The first word wins, as for every key.
+        assert_eq!(mnf("netvsc.mnf=1 netvsc.mnf=0"), Ok(true));
+        // Other keys are not it.
+        assert_eq!(mnf("netvsc.mnfx=1 xnetvsc.mnf=1"), Ok(false));
+        for v in ["", "2", "01", "yes", "true", "1,", "0x1"] {
+            let line = std::format!("test=net netvsc.mnf={v}");
+            assert_eq!(mnf(&line), Err(BadMnf(v)), "{line:?}");
+        }
+        // A bare key has the empty value.
+        assert_eq!(mnf("test=net netvsc.mnf"), Err(BadMnf("")));
+        assert_eq!(
+            BadMnf("yes").to_string(),
+            "servers: netvsc.mnf=\"yes\": not 0 or 1"
+        );
+    }
+
+    /// vmbus's and netvsc's words, as `docs/design.md`'s "Arguments"
+    /// table gives them and their entry stubs take them back, and the
+    /// pages netvsc maps with `netvsc.mnf=1` are the ones vmbus names to
+    /// the host.
+    #[test]
+    fn vmbus_and_netvscs_words() {
+        let channel = 0x1_4000_0000;
+        let m = 0x0FF3_D000;
+        let pages = [m, m + PAGE, m + 2 * PAGE];
+        let s = vmbus_start(channel, pages).unwrap();
+        assert_eq!(s.to_words(), [channel, m, m + 2 * PAGE, 0]);
+        assert_eq!(vmbus::Start::from_words(s.to_words()), Some(s));
+        assert_eq!(s.monitor2(), m + PAGE);
+        // netvsc's monitor window: monitor page 2, then the event flags,
+        // as vmbus told the host they are.
+        for (i, addr) in MNF_FRAMES {
+            let want = match addr - netvsc::layout::MNF {
+                0 => s.monitor2(),
+                PAGE => s.event_flags,
+                o => panic!("offset {o:#x} in the monitor window"),
+            };
+            assert_eq!(pages[i as usize], want, "frame {i}");
+        }
+        for mnf in [false, true] {
+            let n = netvsc_start(channel, mnf).unwrap();
+            assert_eq!(n.to_words(), [channel, mnf as u64, 0, 0]);
+            assert_eq!(netvsc::Start::from_words(n.to_words()), Some(n));
+            assert_eq!(n.channel_page(0), s.channel_page(0));
+        }
+    }
+
+    /// What vmbus or netvsc would refuse, root refuses first, and pages
+    /// out of order are refused before vmbus sees them.
+    #[test]
+    fn vmbus_and_netvscs_words_refused() {
+        let channel = 0x1_4000_0000;
+        let m = 0x0FF3_D000;
+        for pages in [
+            [m, m + 2 * PAGE, m + 3 * PAGE],
+            [m, m + PAGE, m + 3 * PAGE],
+            [m + 2 * PAGE, m + PAGE, m],
+            [m, m, m],
+            [u64::MAX - PAGE + 1, 0, PAGE],
+        ] {
+            assert_eq!(
+                vmbus_start(channel, pages),
+                Err(HyperVError::Pages(pages)),
+                "{pages:x?}"
+            );
+        }
+        let pages = [m, m + PAGE, m + 2 * PAGE];
+        for bad in [0, channel + PAGE, channel + (1 << 20), 1 << 52] {
+            assert_eq!(
+                vmbus_start(bad, pages),
+                Err(HyperVError::Vmbus([bad, m, m + 2 * PAGE, 0])),
+                "{bad:#x}"
+            );
+        }
+        // The pages inside the channel frame, or at 0.
+        let inside = [channel + PAGE, channel + 2 * PAGE, channel + 3 * PAGE];
+        assert!(matches!(
+            vmbus_start(channel, inside),
+            Err(HyperVError::Vmbus(_))
+        ));
+        assert!(matches!(
+            vmbus_start(channel, [0, PAGE, 2 * PAGE]),
+            Err(HyperVError::Vmbus(_))
+        ));
+        for bad in [0, 0x1000, 0x30_0000] {
+            assert_eq!(
+                netvsc_start(bad, true),
+                Err(HyperVError::Netvsc([bad, 1, 0, 0]))
+            );
+        }
+        assert_eq!(
+            HyperVError::Pages([0x5000, 0x7000, 0x8000]).to_string(),
+            "the monitor pages and the event-flags page are at 0x5000, 0x7000 and 0x8000, not three consecutive pages"
+        );
+        assert_eq!(
+            HyperVError::Vmbus([0x1000, 0x5000, 0x7000, 0]).to_string(),
+            "vmbus would refuse 0x1000 0x5000 0x7000 0x0"
+        );
+        assert_eq!(
+            HyperVError::Netvsc([0x1000, 1, 0, 0]).to_string(),
+            "netvsc would refuse 0x1000 0x1 0x0 0x0"
+        );
+    }
+
+    #[test]
+    fn the_hyperv_line() {
+        let s = vmbus_start(0x1_4000_0000, [0xFF3_D000, 0xFF3_E000, 0xFF3_F000]).unwrap();
+        let line = |mnf| {
+            HyperVLine {
+                irq: 1,
+                vmbus: s,
+                mnf,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            line(false),
+            "servers: Hyper-V: SINT 2 is IRQ 1; channel frame 0x140000000, monitor pages 0xff3d000 and 0xff3e000, event flags 0xff3f000; netvsc signals the host with SignalEvent"
+        );
+        assert!(line(true).ends_with(
+            "; netvsc signals the host through monitor page 2 and the event flags (netvsc.mnf=1)"
+        ));
+        // Not the servers: line the scenarios expect.
+        assert!(!line(false).starts_with("servers: vmbus ("));
     }
 
     #[test]
