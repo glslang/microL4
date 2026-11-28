@@ -110,8 +110,21 @@ impl<'a> Chan<'a> {
     /// room, asks the guest for a signal once there is (the pending send
     /// size) and returns `Full`; a later write that fits clears it.
     pub fn send(&self, kind: u16, flags: u16, xid: u64, body: &[u8]) -> Result<(), Full> {
+        self.send_ext(kind, flags, xid, &[], body)
+    }
+
+    /// As [`Chan::send`], with `ext` inside the header's length
+    /// ([`Ring::write_ext`]): what a receive-buffer packet needs.
+    pub fn send_ext(
+        &self,
+        kind: u16,
+        flags: u16,
+        xid: u64,
+        ext: &[u8],
+        body: &[u8],
+    ) -> Result<(), Full> {
         let ring = self.inbound();
-        match ring.write(kind, flags, xid, body) {
+        match ring.write_ext(kind, flags, xid, ext, body) {
             Ok(w) => {
                 if ring.pending_send_size() != 0 {
                     ring.set_pending_send_size(0);

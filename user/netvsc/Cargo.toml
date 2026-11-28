@@ -1,0 +1,27 @@
+[package]
+name = "netvsc"
+description = "microL4's Hyper-V synthetic network adapter driver: the channel's rings, NVSP, RNDIS and the copies between the host's buffers and the frame queues to net, host-tested against the mock VMBus host's netvsc device, and the netvsc server the root task runs in a VSpace of its own"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+bench = false
+doctest = false
+
+[dependencies]
+# The Memory trait the channel frame is reached through, the frame queues'
+# driver side, the netvsc protocol's label and Stats, vmbus's Attach reply,
+# and on the target the invocations.
+libsys = { path = "../libsys" }
+
+[dev-dependencies]
+# The mock VMBus host and its netvsc device, which the tests run netvsc
+# against, and vmbus, which opens netvsc's channel on it as on Hyper-V.
+hvmock = { path = "../hvmock" }
+vmbus = { path = "../vmbus" }
+# The proptest of hostile host packets. `std` alone: no forking, timeouts
+# or failure files, which Miri forbids.
+proptest = { version = "1", default-features = false, features = ["std"] }

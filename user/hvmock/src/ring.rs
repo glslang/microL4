@@ -207,8 +207,29 @@ impl<M: Memory> Ring<M> {
     /// order. `Full` if the free space does not exceed the packet and its
     /// trailer.
     pub fn write(&self, kind: u16, flags: u16, xid: u64, body: &[u8]) -> Result<Written, Full> {
+        self.write_ext(kind, flags, xid, &[], body)
+    }
+
+    /// As [`Ring::write`], with `ext` after the 16 bytes and inside the
+    /// header's length: a receive-buffer packet's ID, count and ranges
+    /// (`vmbus_chanpkt_rxbuf`), or a GPA packet's (`vmbus_chanpkt_sglist`).
+    /// Panics unless `ext` is a multiple of 8 bytes.
+    pub fn write_ext(
+        &self,
+        kind: u16,
+        flags: u16,
+        xid: u64,
+        ext: &[u8],
+        body: &[u8],
+    ) -> Result<Written, Full> {
+        assert!(
+            ext.len().is_multiple_of(8),
+            "hvmock: a header extension of {} bytes",
+            ext.len()
+        );
+        let header = HEADER + ext.len();
         let padded = body.len().div_ceil(8) * 8;
-        let total = HEADER + padded;
+        let total = header + padded;
         let need = total + TRAILER;
         let free = self.free().map_err(|_| Full { need, free: 0 })?;
         let tlen = u16::try_from(total / 8).map_err(|_| Full { need, free })?;
@@ -219,10 +240,11 @@ impl<M: Memory> Ring<M> {
         let was_empty = old == self.read_index();
         let mut p = Vec::with_capacity(need);
         p.extend_from_slice(&kind.to_le_bytes());
-        p.extend_from_slice(&((HEADER / 8) as u16).to_le_bytes());
+        p.extend_from_slice(&((header / 8) as u16).to_le_bytes());
         p.extend_from_slice(&tlen.to_le_bytes());
         p.extend_from_slice(&flags.to_le_bytes());
         p.extend_from_slice(&xid.to_le_bytes());
+        p.extend_from_slice(ext);
         p.extend_from_slice(body);
         p.resize(total, 0);
         p.extend_from_slice(&(u64::from(old) << 32).to_le_bytes());

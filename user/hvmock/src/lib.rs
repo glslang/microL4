@@ -26,20 +26,21 @@
 //! notification would, and lets the host run ([`Host::step`]) until
 //! neither does anything.
 //!
-//! **netvsc's device** plugs in at [`Device`]: `Host::attach(channel,
-//! Box::new(device))` before the guest opens the channel; the host calls
-//! [`Device::opened`], then [`Device::signalled`] after each guest signal
-//! and [`Device::poll`] on each step, with a [`Chan`] that reads the
-//! outbound ring, writes the inbound one by FreeBSD's signal rule, and
-//! finds the receive and send buffers' GPADLs. netvsc's restricted
-//! capability signals through [`Host::signal_restricted`] with the
-//! [`Restriction`] vmbus minted.
+//! **netvsc's device** ([`Netvsc`], [`netvsc`]) plugs in at [`Device`]:
+//! `Host::attach(channel, Box::new(nic.clone()))` before the guest opens
+//! the channel; the host calls [`Device::opened`], then
+//! [`Device::signalled`] after each guest signal and [`Device::poll`] on
+//! each step, with a [`Chan`] that reads the outbound ring, writes the
+//! inbound one by FreeBSD's signal rule, and finds the receive and send
+//! buffers' GPADLs. netvsc's restricted capability signals through
+//! [`Host::signal_restricted`] with the [`Restriction`] vmbus minted.
 
 #![forbid(unsafe_code)]
 
 pub mod device;
 mod host;
 pub mod machine;
+pub mod netvsc;
 pub mod ring;
 #[cfg(test)]
 mod tests;
@@ -51,3 +52,4 @@ pub use host::{
 };
 pub use libsys::hyperv::{Restriction, Status};
 pub use machine::{Machine, Page, View};
+pub use netvsc::Netvsc;

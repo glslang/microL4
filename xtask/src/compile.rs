@@ -47,6 +47,7 @@ pub const USER_CRATES: &[&str] = &[
     "net",
     "virtio-net",
     "vmbus",
+    "netvsc",
     "root",
 ];
 /// The variable whose path the kernel's `include_bytes!` embeds.
@@ -250,6 +251,8 @@ pub fn clippy() -> Result<()> {
             "virtio-net",
             "--package",
             "vmbus",
+            "--package",
+            "netvsc",
             "--package",
             "hvmock",
             "--package",
