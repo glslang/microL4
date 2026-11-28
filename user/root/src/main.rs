@@ -50,7 +50,16 @@
 //! - `test=pci`: root reaches ECAM through device frames it carves,
 //!   enumerates PCI, finds the virtio-net function, sizes its BARs, checks
 //!   its regions and MSI-X, reads its MAC through the region pages it
-//!   carved, and unmaps configuration space ([`pci`]).
+//!   carved, and unmaps configuration space ([`pci`]);
+//! - `test=virtio_net`: root sets up PCI and starts `virtio-net` in a
+//!   VSpace of its own, and a probe thread of its own sends an ARP request
+//!   for the gateway through the frame queues and reports the reply
+//!   ([`net`], [`servers`]);
+//! - `test=net`: M9's done-when on QEMU: `virtio-net` and `net`, which
+//!   echoes the harness's UDP datagrams, then both servers' `Stats` and
+//!   their verdict ([`net`]);
+//! - `test=virtio_net_fault` (review): once `net` is up, the driver
+//!   faults, and the run ends with failure through `watch` ([`net`]).
 //!
 //! Every test ends the run with `libsys::exit`: status 0 after `TEST
 //! PASS`, 1 after a `TEST FAIL` line, through `DebugHalt` unless the test
@@ -68,6 +77,7 @@ mod ioport;
 mod ipcntfn;
 mod irq;
 mod isolation;
+mod net;
 mod nofb;
 mod pci;
 mod pingpong;
@@ -133,6 +143,9 @@ fn main(bi: &'static BootInfo) -> ! {
         Some("tui_fault") => tui::fault(bi, tui::Victim::Tui),
         Some("nofb") => nofb::run(bi),
         Some("pci") => pci::run(bi),
+        Some("virtio_net") => net::virtio_net(bi),
+        Some("net") => net::run(bi),
+        Some("virtio_net_fault") => net::fault(bi),
         Some(name) if name.starts_with("redteam-") => redteam::run(bi, name),
         Some(other) => fail!("unknown test {other:?}"),
     }

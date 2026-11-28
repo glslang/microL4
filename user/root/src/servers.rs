@@ -6,27 +6,46 @@
 //! `root::process::Plan`; `watch` in the root task's own spaces, receiving
 //! the servers' faults on endpoint F. term's VSpace also maps its state
 //! window and the framebuffer's frames, write-combining, from `fb::Plan`.
-//! Nothing here prints, so a test on a kernel without `debug` can start
-//! the servers before it has a console.
+//! From M9, `start_network` starts the network servers ("Networking",
+//! "Where the network servers run"): on QEMU `virtio-net` and `net`, the
+//! driver's VSpace with its DMA frame, its device regions' pages,
+//! uncached, and the frame queues' frame, `net`'s with a copy of it.
+//! Nothing here prints but `start_network`'s `pci:` lines, so a test on a
+//! kernel without `debug` can start the other servers before it has a
+//! console.
 
 use core::fmt::Write;
 
-use libsys::bootinfo::{CAP_INIT_TCB, CAP_INIT_VSPACE, CAP_IO_PORT_CONTROL, CAP_IRQ_CONTROL};
+use ::pci::{Config as _, Segment};
+use libsys::bootinfo::{
+    CAP_HYPERVISOR, CAP_INIT_TCB, CAP_INIT_VSPACE, CAP_IO_PORT_CONTROL, CAP_IRQ_CONTROL,
+};
 use libsys::device::{
     IsaIrq, ioport_control_issue, irq_control_get_isa, irq_handler_set_notification,
 };
+use libsys::frames;
 use libsys::invoke::{
     cnode_copy, cnode_mint, tcb_bind_notification, tcb_configure, tcb_resume, tcb_set_sched_params,
     tcb_write_registers,
 };
+use libsys::mem::{Mmio, Shared};
+use libsys::objects::Carver;
 use libsys::output::{EXIT_FAILURE, EXIT_PORT_NUMBER, IoPort, Polled};
-use libsys::proto::{IRQ, KEYS, RX_READY, TERM_CLIENT};
-use libsys::vspace::{self, EXECUTE, READ, READ_WRITE, Table, WRITE_BACK, WRITE_COMBINING};
+use libsys::proto::{FRAMES, IRQ, KEYS, RX_READY, TERM_CLIENT};
+use libsys::vspace::{
+    self, EXECUTE, HUGE_PAGE, READ, READ_WRITE, Table, UNCACHED, WRITE_BACK, WRITE_COMBINING,
+};
 use libsys::{
     BootInfo, CPtr, Ipc, IpcBufferFrame, ObjectAlloc, ObjectType, Registers, Rights, Slot, UserReg,
-    recv,
+    println, recv,
+};
+use root::network::{
+    DRIVER_CLIENT, DRIVER_PRIORITY, NET_CLIENT, NET_PRIORITY, Platform, QUEUES,
+    STATS_BADGE as NET_STATS_BADGE, VIRTIO_NET_WINDOWS, Window, check_windows, net_words,
+    virtio_net_start,
 };
 use root::process::{FaultLine, Image, PAGE, PT_SPAN, Plan, Role, UartBurst, fault_badge};
+use virtio_net::{Regions, Which};
 
 use crate::fail;
 use crate::spawn::{self, STACKS, Thread};
@@ -52,6 +71,12 @@ const _: () = assert!(
         && uart::slot::RADIX == tui::slot::RADIX
         && uart::slot::CNODE == term::slot::CNODE
         && uart::slot::CNODE == tui::slot::CNODE
+        && uart::slot::RADIX == virtio_net::slot::RADIX
+        && uart::slot::RADIX == net::slot::RADIX
+        && uart::slot::CNODE == virtio_net::slot::CNODE
+        && uart::slot::CNODE == net::slot::CNODE
+        && uart::slot::GUARD_BITS == virtio_net::slot::GUARD_BITS
+        && uart::slot::GUARD_BITS == net::slot::GUARD_BITS
 );
 // console's raw client is term.
 const _: () = assert!(libsys::proto::CONSOLE_RAW_CLIENT == 4);
@@ -287,7 +312,7 @@ pub fn start(
             priority: UART_PRIORITY,
             entry: uart_main,
             // From M9: the command line's cap on its burst, 0 for none.
-            args: [UartBurst::parse(bi.cmdline()).cap().to_word(), 0, 0],
+            args: [UartBurst::parse(bi.cmdline()).cap().to_word(), 0, 0, 0],
         },
     );
 
@@ -340,7 +365,7 @@ pub fn start(
             ntfn: Some(nc),
             priority: CONSOLE_PRIORITY,
             entry: console_main,
-            args: [0; 3],
+            args: [0; 4],
         },
     );
 
@@ -597,7 +622,7 @@ pub fn start_terminal(
             ntfn: Some(s.nt),
             priority: TERM_PRIORITY,
             entry: term_main,
-            args: [rdi, rsi, rdx],
+            args: [rdi, rsi, rdx, 0],
         },
     );
 
@@ -643,7 +668,7 @@ pub fn start_terminal(
             ntfn: None,
             priority: TUI_PRIORITY,
             entry: tui_main,
-            args: [0; 3],
+            args: [0; 4],
         },
     );
     Terminal {
@@ -651,6 +676,388 @@ pub fn start_terminal(
         term_tcb,
         tui_tcb,
     }
+}
+
+/// What runs beside the network driver: `net`, with its configuration,
+/// or, for `test=virtio_net`, root's probe thread, for which root maps
+/// the frame queues' copy in its own VSpace instead of `net`'s.
+#[derive(Clone, Copy, Debug)]
+pub enum Peer {
+    Net(net::Config),
+    Probe,
+}
+
+/// What the root task keeps of the network servers (`docs/design.md`,
+/// "Capabilities" under "Networking", "`root` keeps"): every capability
+/// stays in its CNode; these are the ones its tests use.
+#[derive(Clone, Copy, Debug)]
+pub struct Network {
+    /// The driver's TCB, which `test=virtio_net_fault` makes fault.
+    pub driver_tcb: CPtr,
+    /// Endpoint VN with badge 2, for virtio-net's `Stats`.
+    pub driver_stats: CPtr,
+    /// The MSI's IRQ; root keeps its handler, bound to NV with `IRQ`.
+    pub irq: u8,
+    /// net's TCB and endpoint NE with badge 2, for its `Stats`; 0 with
+    /// the probe.
+    pub net_tcb: CPtr,
+    pub net_stats: CPtr,
+    /// For the probe: notification NN's original, which the driver
+    /// signals with `FRAMES`, and a copy of NV with Write and `FRAMES`, to
+    /// signal the driver; 0 with `net`.
+    pub nn: CPtr,
+    pub nv_frames: CPtr,
+}
+
+/// The platform whose network servers root starts
+/// (`root::network::Platform::choose`): Hyper-V with a Hypervisor
+/// capability in slot 12, else QEMU with an ECAM range; neither fails the
+/// test. Decide it before `net::Config::parse`, whose defaults are the
+/// platform's (`root::network::default_config`).
+pub fn platform(bi: &BootInfo) -> Platform {
+    // An invocation on slot 12 tells a Hypervisor capability from the
+    // null capability QEMU's root task has there: VpIndex changes nothing.
+    let hypervisor = libsys::hyperv::vp_index(CAP_HYPERVISOR).is_ok();
+    Platform::choose(hypervisor, bi.interrupts.ecam_count.into()).unwrap_or_else(|e| fail!("{e}"))
+}
+
+/// Starts the network servers on `platform` (`docs/design.md`, "Where
+/// the network servers run"): on QEMU `virtio-net` (140) over the
+/// virtio-net function root sets up with the crate `pci`, and `net` (130)
+/// or the probe beside it; on Hyper-V `vmbus`, `netvsc` and `net`
+/// (builder Y). It prints `pci:` lines, so it needs console or a debug
+/// kernel.
+pub fn start_network<'a>(
+    bi: &'a BootInfo,
+    ipc: Ipc,
+    objects: &mut ObjectAlloc<'a>,
+    s: &Servers,
+    platform: Platform,
+    peer: Peer,
+) -> Network {
+    match platform {
+        Platform::Qemu => start_qemu(bi, ipc, objects, s, peer),
+        // The seam for builder Y: vmbus (145), netvsc (140) and net (130).
+        Platform::HyperV => {
+            fail!("servers: a Hypervisor capability in slot 12, but no Hyper-V network servers yet")
+        }
+    }
+}
+
+/// QEMU's half of [`start_network`] (`docs/design.md`, "PCI on QEMU"):
+/// finds and checks the virtio-net function, binds its MSI to NV and
+/// programs MSI-X entry 0, builds the driver's VSpace (the DMA frame, the
+/// frame queues' original and its regions' pages, uncached), turns bus
+/// mastering on, unmaps configuration space, and starts `net` or maps the
+/// probe's copy, then the driver.
+fn start_qemu<'a>(
+    bi: &'a BootInfo,
+    ipc: Ipc,
+    objects: &mut ObjectAlloc<'a>,
+    s: &Servers,
+    peer: Peer,
+) -> Network {
+    let image = Plan::new(image(bi), bi.user_image_frames)
+        .unwrap_or_else(|e| fail!("servers: the root task's image: {e}"));
+    let scratch = image
+        .scratch()
+        .unwrap_or_else(|| fail!("servers: no free page under the root task's page tables"));
+    // Every window against the image's end, in each VSpace that maps one:
+    // the driver's, net's, and with the probe root's, beside its ECAM and
+    // MSI-X windows.
+    let end = bi.user_image_end;
+    let roots = [
+        QUEUES,
+        Window {
+            name: "ECAM",
+            start: crate::pci::WINDOW,
+            bytes: crate::pci::ECAM_FRAMES as u64 * HUGE_PAGE,
+            huge: true,
+        },
+        Window {
+            name: "the MSI-X table",
+            start: crate::pci::MSIX_WINDOW,
+            bytes: PAGE,
+            huge: false,
+        },
+    ];
+    let windows: &[Window] = match peer {
+        Peer::Net(_) => &[QUEUES],
+        Peer::Probe => &roots,
+    };
+    check_windows(end, &VIRTIO_NET_WINDOWS)
+        .and_then(|()| check_windows(end, windows))
+        .unwrap_or_else(|e| fail!("servers: {e}"));
+
+    let range = crate::pci::ecam_range(bi);
+    let mut carver = Carver::new(bi, &objects.untyped);
+    // A page table for root's MSI-X window.
+    let msix_table = retype(ipc, objects, ObjectType::PageTable, 0, 1);
+    vspace::map_table(
+        ipc,
+        msix_table,
+        Table::PageTable,
+        crate::pci::MSIX_WINDOW,
+        CAP_INIT_VSPACE,
+    )
+    .unwrap_or_else(|e| fail!("servers: mapping root's MSI-X window's page table: {e}"));
+
+    let mut ecam = crate::pci::Ecam::new(ipc, objects, &mut carver, &range);
+    let f = crate::pci::find_virtio_net(&mut ecam);
+    let plan = crate::pci::plan(&ecam, &f);
+    let pages = crate::pci::carve_pages(&mut ecam, &plan);
+    let (handler, msi) = crate::pci::get_msi(ipc, ecam.objects);
+
+    // The driver's objects: VN, NV, NN, its TCB and CNode, the DMA frame,
+    // the frame queues' frame and its copy, and its regions' page table.
+    let o = &mut *ecam.objects;
+    let vn = retype(ipc, o, ObjectType::Endpoint, 0, 1);
+    let ntfns = retype(ipc, o, ObjectType::Notification, 0, 2);
+    let (nv, nn) = (ntfns, ntfns + 1);
+    let driver_tcb = retype(ipc, o, ObjectType::Tcb, 0, 1);
+    let driver_cnode = retype(ipc, o, ObjectType::CNode, virtio_net::slot::RADIX, 1);
+    let dma = retype(ipc, o, ObjectType::Frame2M, 0, 1);
+    let queues = retype(ipc, o, ObjectType::Frame2M, 0, 1);
+    let regions_table = retype(ipc, o, ObjectType::PageTable, 0, 1);
+    let mine = slots(o, 5);
+    let (copy, nv_irq, nv_frames, driver_stats, f_driver) =
+        (mine, mine + 1, mine + 2, mine + 3, mine + 4);
+    let w_gr = Rights(Rights::WRITE.0 | Rights::GRANT_REPLY.0);
+    cnode_copy(ipc, root_slot(copy), root_slot(queues), Rights::ALL)
+        .unwrap_or_else(|e| fail!("servers: copying the frame queues' frame: {e}"));
+    for (what, dest, src, rights, badge) in [
+        ("NV badged IRQ", nv_irq, nv, Rights::WRITE, IRQ),
+        ("NV badged FRAMES", nv_frames, nv, Rights::WRITE, FRAMES),
+        (
+            "root's Stats capability to VN",
+            driver_stats,
+            vn,
+            w_gr,
+            NET_STATS_BADGE,
+        ),
+        (
+            "F for virtio-net",
+            f_driver,
+            s.fault_ep,
+            w_gr,
+            fault_badge::VIRTIO_NET,
+        ),
+    ] {
+        cnode_mint(ipc, root_slot(dest), root_slot(src), rights, badge)
+            .unwrap_or_else(|e| fail!("servers: minting {what}: {e}"));
+    }
+
+    // The MSI, bound to NV before the driver gets anything; root keeps
+    // the handler. Then MSI-X entry 0, with memory decode on and bus
+    // mastering still off: the table answers, the device sends nothing.
+    irq_handler_set_notification(ipc, handler, nv_irq)
+        .unwrap_or_else(|e| fail!("servers: binding the MSI handler to NV: {e}"));
+    {
+        let cfg = ecam.function(f.address);
+        ::pci::enable_memory(&cfg, false);
+        crate::pci::program_msix(ipc, &cfg, &plan, &pages, &msi);
+    }
+
+    // virtio-net's CNode and VSpace: the image, the DMA frame, the frame
+    // queues' original and its regions' pages, uncached.
+    let sv = |n| Slot::new(driver_cnode, n, virtio_net::slot::RADIX);
+    fill(
+        ipc,
+        driver_cnode,
+        "virtio-net",
+        &[
+            (
+                "VN with Read",
+                sv(virtio_net::slot::ENDPOINT),
+                vn,
+                Rights::READ,
+                None,
+            ),
+            (
+                "NN badged FRAMES",
+                sv(virtio_net::slot::NET),
+                nn,
+                Rights::WRITE,
+                Some(FRAMES),
+            ),
+            (
+                "F badged VIRTIO_NET",
+                sv(virtio_net::slot::FAULT),
+                f_driver,
+                w_gr,
+                None,
+            ),
+            (
+                "C badged 6",
+                sv(virtio_net::slot::CONSOLE),
+                s.console_ep,
+                w_gr,
+                Some(DRIVER_CLIENT),
+            ),
+        ],
+    );
+    let space = vspace(ipc, ecam.objects, &image, scratch);
+    let map = |frame, addr, attrs, what: &str| {
+        vspace::frame_map(ipc, frame, addr, READ_WRITE, attrs, space.pml4)
+            .unwrap_or_else(|e| fail!("servers: mapping virtio-net's {what} at {addr:#x}: {e}"));
+    };
+    map(dma, virtio_net::layout::DMA, WRITE_BACK, "DMA frame");
+    map(queues, frames::WINDOW, WRITE_BACK, "frame queues");
+    vspace::map_table(
+        ipc,
+        regions_table,
+        Table::PageTable,
+        virtio_net::layout::REGIONS,
+        space.pml4,
+    )
+    .unwrap_or_else(|e| fail!("servers: mapping virtio-net's regions' page table: {e}"));
+    for (p, &frame) in plan.pages().zip(&pages.regions[..pages.count]) {
+        map(
+            frame,
+            virtio_net::layout::REGIONS + p.offset,
+            UNCACHED,
+            p.kind.name(),
+        );
+    }
+    let dma_base = vspace::frame_get_address(dma)
+        .unwrap_or_else(|e| fail!("servers: Frame_GetAddress of the DMA frame: {e}"));
+    let start = virtio_net_start(&plan, dma_base)
+        .unwrap_or_else(|e| fail!("servers: virtio-net's arguments: {e}"));
+
+    // Bus mastering, now that every frame the device may reach is mapped
+    // in the driver's VSpace; then configuration space goes away.
+    {
+        let cfg = ecam.function(f.address);
+        ::pci::enable_memory(&cfg, true);
+        let command = cfg.read16(::pci::reg::COMMAND);
+        let want = ::pci::command::MEMORY | ::pci::command::BUS_MASTER;
+        if command & (want | ::pci::command::IO) != want {
+            fail!("pci: virtio-net: the command register reads back {command:#x}");
+        }
+    }
+    ecam.unmap();
+    println!(
+        "pci: virtio-net: MSI-X entry 0 sends IRQ {} (address {:#x}, data {:#x}); bus mastering on; configuration space and the MSI-X table unmapped",
+        msi.irq, msi.address, msi.data
+    );
+
+    let mut network = Network {
+        driver_tcb,
+        driver_stats,
+        irq: msi.irq,
+        net_tcb: 0,
+        net_stats: 0,
+        nn: 0,
+        nv_frames: 0,
+    };
+    match peer {
+        Peer::Net(config) => {
+            let ne = retype(ipc, objects, ObjectType::Endpoint, 0, 1);
+            let net_tcb = retype(ipc, objects, ObjectType::Tcb, 0, 1);
+            let net_cnode = retype(ipc, objects, ObjectType::CNode, net::slot::RADIX, 1);
+            let mine = slots(objects, 2);
+            let (net_stats, f_net) = (mine, mine + 1);
+            for (what, dest, src, badge) in [
+                (
+                    "root's Stats capability to NE",
+                    net_stats,
+                    ne,
+                    NET_STATS_BADGE,
+                ),
+                ("F for net", f_net, s.fault_ep, fault_badge::NET),
+            ] {
+                cnode_mint(ipc, root_slot(dest), root_slot(src), w_gr, badge)
+                    .unwrap_or_else(|e| fail!("servers: minting {what}: {e}"));
+            }
+            let sn = |n| Slot::new(net_cnode, n, net::slot::RADIX);
+            fill(
+                ipc,
+                net_cnode,
+                "net",
+                &[
+                    (
+                        "NE with Read",
+                        sn(net::slot::ENDPOINT),
+                        ne,
+                        Rights::READ,
+                        None,
+                    ),
+                    (
+                        "NV badged FRAMES",
+                        sn(net::slot::DRIVER),
+                        nv,
+                        Rights::WRITE,
+                        Some(FRAMES),
+                    ),
+                    ("F badged NET", sn(net::slot::FAULT), f_net, w_gr, None),
+                    (
+                        "C badged 8",
+                        sn(net::slot::CONSOLE),
+                        s.console_ep,
+                        w_gr,
+                        Some(NET_CLIENT),
+                    ),
+                ],
+            );
+            // Its one window: the frame queues' copy.
+            let net_space = vspace(ipc, objects, &image, scratch);
+            vspace::frame_map(
+                ipc,
+                copy,
+                frames::WINDOW,
+                READ_WRITE,
+                WRITE_BACK,
+                net_space.pml4,
+            )
+            .unwrap_or_else(|e| fail!("servers: mapping net's frame queues: {e}"));
+            // net first: it waits for the driver's first signal.
+            spawn_server(
+                ipc,
+                &image,
+                Server {
+                    tcb: net_tcb,
+                    cnode: net_cnode,
+                    space: net_space,
+                    fault_ep: net::slot::FAULT,
+                    ntfn: Some(nn),
+                    priority: NET_PRIORITY,
+                    entry: net_main,
+                    args: net_words(&config),
+                },
+            );
+            network.net_tcb = net_tcb;
+            network.net_stats = net_stats;
+        }
+        Peer::Probe => {
+            vspace::frame_map(
+                ipc,
+                copy,
+                frames::WINDOW,
+                READ_WRITE,
+                WRITE_BACK,
+                CAP_INIT_VSPACE,
+            )
+            .unwrap_or_else(|e| fail!("servers: mapping the frame queues in root's VSpace: {e}"));
+            network.nn = nn;
+            network.nv_frames = nv_frames;
+        }
+    }
+
+    spawn_server(
+        ipc,
+        &image,
+        Server {
+            tcb: driver_tcb,
+            cnode: driver_cnode,
+            space,
+            fault_ep: virtio_net::slot::FAULT,
+            ntfn: Some(nv),
+            priority: DRIVER_PRIORITY,
+            entry: virtio_net_main,
+            args: start.to_words(),
+        },
+    );
+    network
 }
 
 type Fill<'a> = (&'a str, Slot, CPtr, Rights, Option<u64>);
@@ -775,9 +1182,10 @@ struct Server {
     ntfn: Option<CPtr>,
     priority: u64,
     entry: spawn::Entry,
-    /// Its arguments, in `rdi`, `rsi` and `rdx`: term's geometry, uart's
-    /// cap on its burst in `rdi` (M9); 0 for the others.
-    args: [u64; 3],
+    /// Its arguments, in `rdi`, `rsi`, `rdx` and `rcx`: term's geometry,
+    /// uart's cap on its burst in `rdi` (M9), and from M9 the network
+    /// servers' words from their crates' `to_words`; 0 for the others.
+    args: [u64; 4],
 }
 
 /// Configures and starts a server: its CSpace with the guard, its VSpace
@@ -793,7 +1201,7 @@ fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
         ntfn,
         priority,
         entry,
-        args: [a0, a1, a2],
+        args: [a0, a1, a2, a3],
     } = s;
     let end = plan.image().end;
     let buffer = IpcBufferFrame {
@@ -806,7 +1214,8 @@ fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
         .with(UserReg::Rflags, RFLAGS)
         .with(UserReg::Rdi, a0)
         .with(UserReg::Rsi, a1)
-        .with(UserReg::Rdx, a2);
+        .with(UserReg::Rdx, a2)
+        .with(UserReg::Rcx, a3);
     tcb_configure(
         ipc,
         tcb,
@@ -818,7 +1227,7 @@ fn spawn_server(ipc: Ipc, plan: &Plan, s: Server) {
     )
     .and_then(|()| tcb_set_sched_params(ipc, tcb, CAP_INIT_TCB, priority, priority))
     .and_then(|()| ntfn.map_or(Ok(()), |n| tcb_bind_notification(ipc, tcb, n)))
-    // Words 0 to 8: rip to rdi, so rdx and rsi too.
+    // Words 0 to 8: rip to rdi, so rcx, rdx and rsi too.
     .and_then(|()| tcb_write_registers(ipc, tcb, false, &regs, UserReg::Rdi.index() + 1))
     .and_then(|()| tcb_resume(tcb))
     .unwrap_or_else(|e| fail!("servers: starting the thread in TCB slot {tcb}: {e}"));
@@ -866,6 +1275,76 @@ extern "C" fn term_main(size: u64, format: u64, offset: u64, _: u64) -> ! {
 
 extern "C" fn tui_main(_: u64, _: u64, _: u64, _: u64) -> ! {
     tui::run()
+}
+
+/// virtio-net's entry: checks the words root passed again
+/// (`virtio_net::Start::from_words`), then makes its windows over what
+/// `start_qemu` mapped and runs it.
+extern "C" fn virtio_net_main(rdi: u64, rsi: u64, rdx: u64, rcx: u64) -> ! {
+    // Before anything can panic: the statics are a copy of the root
+    // task's, whose print! may name a console capability of its CSpace.
+    libsys::output::reset();
+    let start = virtio_net::Start::from_words([rdi, rsi, rdx, rcx]).unwrap_or_else(|e| {
+        panic!("virtio-net: words it refuses: {rdi:#x} {rsi:#x} {rdx:#x} {rcx:#x}: {e}")
+    });
+    let window = |which: Which| {
+        let (addr, len) = start.window(which);
+        // SAFETY: `start_qemu` mapped every page of region `which`
+        // read-write and uncached at `virtio_net::layout::REGIONS` + its
+        // window's offset + the page's, in this VSpace alone, from the
+        // device frames it carved for the region (`pci::Plan::pages`);
+        // `from_words` checked that the region starts in its window's
+        // first page and ends inside the window, and root passed its
+        // offset in its page and its length, so these `len` bytes from
+        // `addr` are mapped device registers. They stay mapped for the
+        // thread's life, and nothing holds a reference into them: they
+        // are reached only through `Mmio`.
+        unsafe { Mmio::new(addr as *mut u8, len) }
+    };
+    let regions = Regions {
+        common: window(Which::Common),
+        notify: window(Which::Notify),
+        device: window(Which::Device),
+    };
+    // SAFETY: `start_qemu` mapped the DMA frame, a fresh 2 MiB RAM frame,
+    // read-write and write-back at `virtio_net::layout::DMA` in this
+    // VSpace and no other; it stays mapped for the thread's life. The
+    // device writes it behind the compiler's back, so nothing holds a
+    // reference into it: it is reached only through `Shared`.
+    let dma = unsafe {
+        Shared::new(
+            virtio_net::layout::DMA as *mut u8,
+            virtio_net::layout::DMA_SIZE,
+        )
+    };
+    // SAFETY: `start_qemu` mapped the frame queues' frame, a fresh 2 MiB
+    // RAM frame zeroed by its retype, read-write and write-back at
+    // `libsys::frames::WINDOW` here, and its one copy in net's VSpace (or
+    // root's, for test=virtio_net's probe); it stays mapped for the
+    // thread's life. The other side writes it behind the compiler's back,
+    // so nothing holds a reference into it: it is reached only through
+    // `Shared`.
+    let queues = unsafe { Shared::new(frames::WINDOW as *mut u8, frames::SIZE) };
+    virtio_net::run(start, regions, dma, frames::Driver::new(queues))
+}
+
+/// net's entry: checks the words root passed again
+/// (`net::Config::from_words`), then makes its window on the frame queues'
+/// copy and runs it.
+extern "C" fn net_main(rdi: u64, rsi: u64, rdx: u64, rcx: u64) -> ! {
+    // Before anything can panic, as for virtio-net.
+    libsys::output::reset();
+    let Some(config) = net::Config::from_words([rdi, rsi, rdx, rcx]) else {
+        panic!("net: words it refuses: {rdi:#x} {rsi:#x} {rdx:#x} {rcx:#x}")
+    };
+    // SAFETY: `start_qemu` mapped a copy of the frame queues' frame, the
+    // one the driver maps, read-write and write-back at
+    // `libsys::frames::WINDOW` in this VSpace, its only mapping here; it
+    // stays mapped for the thread's life. The driver writes it behind the
+    // compiler's back, so nothing holds a reference into it: it is
+    // reached only through `Shared`.
+    let queues = unsafe { Shared::new(frames::WINDOW as *mut u8, frames::SIZE) };
+    net::run(config, frames::Net::new(queues))
 }
 
 /// `watch`: receives the servers' faults on F and ends the run with

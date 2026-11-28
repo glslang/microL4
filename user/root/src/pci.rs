@@ -43,7 +43,7 @@ pub const MSIX_WINDOW: u64 = 0x3400_0000;
 const REGIONS_WINDOW: u64 = MSIX_WINDOW + 0x10_0000;
 /// 2 MiB frames ECAM can need: 256 MiB of buses from a base 1 MiB into a
 /// 2 MiB page.
-const ECAM_FRAMES: usize = 129;
+pub const ECAM_FRAMES: usize = 129;
 const _: () = assert!(WINDOW + ECAM_FRAMES as u64 * HUGE_PAGE <= MSIX_WINDOW);
 const _: () = assert!(REGIONS_WINDOW + 3 * ::pci::virtio::REGION_WINDOW <= MSIX_WINDOW + HUGE_PAGE);
 
