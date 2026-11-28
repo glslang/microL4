@@ -306,6 +306,77 @@ requests.
 The network scripts were written without a Windows host to run them. If
 one fails, paste its error into the PR with the log.
 
+### Then: the network runs
+
+CI builds `microl4-vhdx-m9-check` for M9's done-when on Hyper-V:
+`net/disk.vhdx` boots `test=net net.ip=192.168.77.2/24
+net.gw=192.168.77.1` on the selftest kernel, `net-mnf/disk.vhdx` the same
+with `netvsc.mnf=1`, and beside them are the two scenarios the script
+follows, `m9-net.scenario` and `m9-net-mnf.scenario`. With the VM's
+adapter on the switch (`New-L4Switch.ps1`, above), run each once:
+
+```powershell
+gh run download --repo glslang/microL4 --name microl4-vhdx-m9-check --dir m9-check <run-id>
+
+.\Test-L4Vhdx.ps1 -VhdxPath .\m9-check\net\disk.vhdx -Scenario .\m9-check\m9-net.scenario `
+    -TimeoutSeconds 120 -LogPath m9-net.log
+.\Test-L4Vhdx.ps1 -VhdxPath .\m9-check\net-mnf\disk.vhdx -Scenario .\m9-check\m9-net-mnf.scenario `
+    -TimeoutSeconds 120 -LogPath m9-net-mnf.log
+```
+
+Root starts `vmbus`, `netvsc` and `net`; once `net` prints `echo:
+listening on UDP port 7`, the script runs `Send-L4Udp.ps1` against
+`192.168.77.2` (four pings, then 100 datagrams, each echo checked, its
+lines logged as `l4:` lines), then types Enter, and root prints
+`vmbus`'s, `netvsc`'s and `net`'s counters and its verdict. The
+exchange comes before the gateway's line in the scenario, though `net`
+prints that line first, so that a host that never answers still leaves
+root's counters in the log. Paste both logs into the PR.
+
+| Run | The log must show | It settles |
+| --- | --- | --- |
+| `m9-net` | `cpu: hypervisor Hyper-V`; root's `servers: Hyper-V: SINT 2 is IRQ <n>; channel frame ..., monitor pages ... and ..., event flags ...; netvsc signals the host with SignalEvent` and `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130); root CNode <k> of 4096 slots used`; `vmbus: version 4.0` (or 3.0 or 2.4); every `vmbus: offer`, netvsc's among them; `vmbus: netvsc channel <id> open, connection <c>`; `netvsc: up: NVSP <v>, NDIS <v>, MAC 00:15:5d:..., link up, <n> send sections of <m> bytes`; `net: up: 192.168.77.2/24 via 192.168.77.1`; `echo: listening on UDP port 7`; the script's four ping replies and `udp_echo: 100 sent, 100 echoed`, and the guest's MAC in the host's neighbour table equal to the VM adapter's and to `netvsc: up`'s; `net: gateway 192.168.77.1 is at <mac>`; root's `vmbus: stats:`, `netvsc: stats:` with 0 broken packets, 0 dropped and 0 bad queue entries, and `net: stats:` with `, 4 ICMP echo requests answered,` and `, 100 datagrams echoed,`; `TEST PASS`. Record the versions, the offers, the section counts and sizes, and `netvsc`'s ignored messages (the host's notes count there) | the done-when on Hyper-V; the Hypervisor capability, SINT 2 and the SynIC frames on a real host; contact with no UNLOAD first; `SignalEvent` on a channel the host may monitor; the buffer sizes; the MAC Hyper-V assigned |
+| `m9-net-mnf` | the same, with `through monitor page 2 and the event flags (netvsc.mnf=1)` in root's first `servers:` line | FreeBSD's monitor-page signalling; with `m9-net`, which of the two the host takes |
+
+Read a failed log from the top, since each server waits for the one
+before it; the first of these that is missing says where it stopped:
+
+1. `servers: Hyper-V: ...`. Without it, root's `TEST FAIL: servers: ...`
+   names the invocation refused. `servers: no network: no Hypervisor
+   capability in slot 12` means the kernel made none: its boot lines
+   before root's say why (a privilege missing, or a hypercall page that
+   did not enable).
+2. `vmbus: version`. `vmbus: the host accepts none of VMBus 4.0, 3.0,
+   2.4` or `vmbus: PostMessage of CONNECT: <status>` say what the host
+   answered. No `vmbus:` line at all after root's `servers:` lines means
+   no SINT 2 interrupt reached `vmbus`, or the host never answered
+   CONNECT.
+3. `vmbus: offer ...: netvsc` and `vmbus: netvsc channel ... open`.
+   `vmbus: no netvsc offer` means the VM has no network adapter;
+   `vmbus: netvsc channel <id>: the host refused <step> (status <s>)`
+   names the GPADL or the open the host refused.
+4. `netvsc: up`. A refused step is a `USER PANIC` line naming it, such as
+   `netvsc: the host refused the receive buffer: ...`, after which the
+   kernel halts and the script reads on until its timeout. The receive
+   buffer's answer is a risk on a real host: `netvsc` checks that each
+   section the host lays out lies inside its 1 MiB buffer, and the line
+   gives the section's start, end, slot size and count and which of the
+   three checks it failed. NVSP 4 or 2 in the up line means the host
+   refused 5. In `m9-net-mnf`, nothing after the open line means the host
+   did not take the monitor page's signal.
+5. `net: gateway 192.168.77.1 is at`, the host's answer to `net`'s ARP
+   request, the first frame `netvsc` sends. Missing while the pings and
+   datagrams fail too, nothing `netvsc` sent reached the host. The other
+   risk is there: from NVSP 5 FreeBSD adds a hash value to every frame it
+   sends, which `netvsc` does not. `netvsc: stats:` then tells sent from
+   lost: its `frames sent` against its `send completions`, and its
+   `ignored messages`, where a send completion with a status other than
+   OK is counted.
+6. The `l4:` lines: a ping or datagram missing while the gateway's line
+   came means frames from the host were lost; `netvsc: stats:` shows
+   `packets skipped` and `dropped for no buffer`, and `net: stats:` the
+   stack's drops by reason.
+
 ## Optional: the M4 check
 
 The M4 self-test still runs on Hyper-V, though CI no longer uploads its
@@ -362,6 +433,7 @@ tables.
 | `Set-L4Cmdline.ps1` | (M9) writes another kernel command line into a VHDX, for a host whose network overlaps `192.168.77.0/24` |
 | `m8-tui.scenario`, `m8-release.scenario` | the M8 check's scenarios; `golden/` holds the screens `m8-tui` must show |
 | `m9-release-burst1.scenario`, `m9-release-burst15.scenario` | the M9 check's COM1 runs, with `uart`'s burst capped at 1 and at 15 and root's flood |
+| `m9-net.scenario`, `m9-net-mnf.scenario` | the M9 check's network runs, M9's done-when on Hyper-V, with `netvsc` signalling the host by `SignalEvent` and through the monitor page |
 
 To watch COM1 by hand instead, start the VM and run `.\Read-L4Com1.ps1`, or
 connect PuTTY to the serial line `\\.\pipe\l4-com1`.

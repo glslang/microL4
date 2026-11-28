@@ -1746,6 +1746,162 @@ udp_echo: 1000
         }
     }
 
+    /// The M9 Hyper-V check's network runs, `m9-net` and `m9-net-mnf`, are
+    /// QEMU's `net` on Hyper-V: `test=net` on the selftest kernel with the
+    /// note's addresses, the mnf run differing only in `netvsc.mnf=1` and
+    /// the line that says how netvsc signals the host; `nic:`, so that
+    /// `udp_echo:` parses; one exchange of QEMU's count followed by root's
+    /// Enter, released once echo listens; the lines naming the addresses
+    /// agree with the command line's `net.ip=` and `net.gw=`; QEMU's
+    /// checks of net's Stats, with the script's 4 pings answered, before
+    /// `TEST PASS`; and CI builds the images with these command lines and
+    /// puts the scenarios beside them.
+    #[test]
+    fn the_network_runs_are_net_on_hyperv() {
+        let load = |dir: &str, name: &str| {
+            let path = crate::root().join(dir).join(format!("{name}.scenario"));
+            parse(name, &fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let qemu = load("tests/qemu", "net");
+        let net = load("tools/hyperv", "m9-net");
+        let mnf = load("tools/hyperv", "m9-net-mnf");
+        let addresses = "net.ip=192.168.77.2/24 net.gw=192.168.77.1";
+        assert_eq!(net.cmdline, format!("test=net {addresses}"));
+        assert_eq!(mnf.cmdline, format!("test=net {addresses} netvsc.mnf=1"));
+        let exchange = |sc: &Scenario| {
+            let at: Vec<usize> = (0..sc.steps.len())
+                .filter(|&i| matches!(sc.steps[i], Step::UdpEcho(_)))
+                .collect();
+            assert_eq!(at.len(), 1, "{}: one udp_echo:", sc.name);
+            at[0]
+        };
+        let q = exchange(&qemu);
+        // Each step of `want` among `steps`, in this order.
+        let in_order = |name: &str, steps: &[Step], want: &[Step]| {
+            let mut rest = steps.iter();
+            for w in want {
+                assert!(rest.any(|s| s == w), "{name}: no {w:?} in order");
+            }
+        };
+        for sc in [&net, &mnf] {
+            let name = sc.name.as_str();
+            assert_eq!(
+                (sc.kernel, sc.exit, sc.nic),
+                (Kernel::Selftest, qemu.exit, qemu.nic),
+                "{name}"
+            );
+            assert!(sc.qemu_args.is_empty(), "{name}");
+            let word = |key: &str| {
+                sc.cmdline
+                    .split_whitespace()
+                    .find_map(|w| w.strip_prefix(key))
+                    .unwrap()
+            };
+            let (ip, gw) = (word("net.ip="), word("net.gw="));
+            let i = exchange(sc);
+            assert_eq!(
+                sc.steps[i..i + 2],
+                qemu.steps[q..q + 2],
+                "{name}: QEMU's exchange and Enter"
+            );
+            assert_eq!(
+                sc.steps[i - 1],
+                expect("echo: listening on UDP port 7"),
+                "{name}"
+            );
+            let before = [
+                expect("cpu: hypervisor Hyper-V"),
+                expect(&format!("root: cmdline {:?}", sc.cmdline)),
+                expect("servers: vmbus (priority 145, SINT 2 IRQ"),
+                expect("), netvsc (priority 140), net (priority 130); root CNode"),
+                expect("vmbus: version"),
+                expect(": netvsc, connection"),
+                expect("netvsc: up: NVSP"),
+                expect(&format!("net: up: {ip} via {gw}, MAC 00:15:5d:")),
+            ];
+            in_order(name, &sc.steps[..i], &before);
+            // After the exchange: the gateway, which net prints only after
+            // echo's line, then the Stats and the verdict.
+            in_order(
+                name,
+                &sc.steps[i..],
+                &[
+                    Step::UdpEcho(100),
+                    expect(&format!("net: gateway {gw} is at")),
+                    expect("vmbus: stats: version"),
+                    expect("netvsc: stats: NVSP"),
+                    expect(", 0 broken packets,"),
+                    expect("net: stats:"),
+                    expect(", 4 ICMP echo requests answered,"),
+                    expect(", 100 datagrams echoed,"),
+                    expect(", 0 frames dropped, 0 bad entries,"),
+                    expect("TEST PASS"),
+                ],
+            );
+            // QEMU's checks of net's Stats, in QEMU's order.
+            let nets: Vec<Step> = qemu.steps[q..]
+                .iter()
+                .skip_while(|s| **s != expect("net: stats:"))
+                .filter(|s| !matches!(s, Step::Expect(t) if t.starts_with("DEBUG HALT")))
+                .cloned()
+                .collect();
+            assert_eq!(nets.len(), 4, "net: stats: to TEST PASS on QEMU");
+            in_order(name, &sc.steps[i..], &nets);
+            let mut forbid = qemu.forbid.clone();
+            forbid.push("USER PANIC".into());
+            assert_eq!(sc.forbid, forbid, "{name}");
+        }
+        // The two differ in the command line's line and the signalling
+        // line alone.
+        assert_eq!(net.steps.len(), mnf.steps.len());
+        let differ: Vec<(&Step, &Step)> = net
+            .steps
+            .iter()
+            .zip(&mnf.steps)
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(
+            differ,
+            [
+                (
+                    &expect(&format!("root: cmdline {:?}", net.cmdline)),
+                    &expect(&format!("root: cmdline {:?}", mnf.cmdline))
+                ),
+                (
+                    &expect("; netvsc signals the host with SignalEvent"),
+                    &expect(
+                        "; netvsc signals the host through monitor page 2 and the event flags (netvsc.mnf=1)"
+                    )
+                ),
+            ]
+        );
+        // CI builds the images with the scenarios' command lines and puts
+        // the scenarios beside them.
+        let ci = fs::read_to_string(crate::root().join(".github/workflows/ci.yml")).unwrap();
+        for text in [
+            format!("cargo xtask image --cmdline \"{}\"", net.cmdline),
+            "mv target/xtask/image/disk.vhdx target/xtask/m9-check/net/disk.vhdx".into(),
+            format!("cargo xtask image --cmdline \"{}\"", mnf.cmdline),
+            "mv target/xtask/image/disk.vhdx target/xtask/m9-check/net-mnf/disk.vhdx".into(),
+            "cp tools/hyperv/m9-net.scenario tools/hyperv/m9-net-mnf.scenario target/xtask/m9-check/"
+                .into(),
+            "name: microl4-vhdx-m9-check".into(),
+        ] {
+            assert!(ci.contains(&text), "ci.yml has no {text:?}");
+        }
+        // The README runs each with its scenario.
+        let readme = fs::read_to_string(crate::root().join("tools/hyperv/README.md")).unwrap();
+        for text in [
+            "microl4-vhdx-m9-check",
+            "m9-check\\net\\disk.vhdx",
+            "m9-check\\net-mnf\\disk.vhdx",
+            "m9-check\\m9-net.scenario",
+            "m9-check\\m9-net-mnf.scenario",
+        ] {
+            assert!(readme.contains(text), "README.md has no {text:?}");
+        }
+    }
+
     #[test]
     fn screendump_names_are_unique_across_scenarios() {
         let a = parse("a", "exit: success\nexpect: x\nscreendump: one\n").unwrap();
