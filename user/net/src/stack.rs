@@ -183,11 +183,7 @@ impl<S: Service> Stack<S> {
 
     /// Whether the stack may answer or learn `ip`.
     fn is_peer(&self, ip: Ip) -> bool {
-        ip != Ip::UNSPECIFIED
-            && ip != Ip::BROADCAST
-            && !ip.is_multicast()
-            && ip != self.config.address()
-            && ip != self.config.broadcast()
+        ip.is_unicast() && ip != self.config.address() && ip != self.config.broadcast()
     }
 
     fn arp(&mut self, body: &[u8], tx: &mut impl Tx) -> Outcome {
@@ -317,7 +313,7 @@ impl<S: Service> Stack<S> {
         if d.dst_port != S::PORT {
             return Outcome::UdpPort;
         }
-        if broadcast || d.src_port == 0 || d.src_port == S::PORT {
+        if broadcast || d.src_port < udp::FIRST_CLIENT_PORT {
             return Outcome::UdpRefused;
         }
         let from = Endpoint {

@@ -2,8 +2,8 @@
 //! `docs/redteam/m9-echo-service-loop.md`): what a frame from the wire
 //! makes `net` answer.
 //!
-//! The two findings' tests are `#[ignore]`d, so the default run passes;
-//! `cargo test -p net --lib redteam -- --ignored` shows them fail. The
+//! The two findings' tests failed until the fix round (Ip::is_unicast,
+//! udp::FIRST_CLIENT_PORT); they now pass and stay as regressions. The
 //! rest are the pass's strongest attacks that held, kept as ordinary
 //! tests: pings of every length, total-length lies, and checksums that
 //! sum to 0 or `0xFFFF`.
@@ -67,7 +67,6 @@ const MARTIANS: &[[u8; 4]] = &[
 ];
 
 #[test]
-#[ignore = "red team: net answers pings and datagrams from martian sources (docs/redteam/m9-martian-sources.md)"]
 fn martian_sources_are_never_answered() {
     let (mut answered, mut learnt) = (Vec::new(), Vec::new());
     for &src in MARTIANS {
@@ -107,7 +106,6 @@ fn martian_sources_are_never_answered() {
 /// source ports 0 and 7 (`Outcome::UdpRefused`), so it keeps an
 /// echo-to-echo loop out, not this one.
 #[test]
-#[ignore = "red team: one spoofed datagram starts an endless echo-chargen loop (docs/redteam/m9-echo-service-loop.md)"]
 fn one_spoofed_datagram_cannot_start_an_endless_loop() {
     let (mut s, mut w) = up();
     // PEER is resolved: it asks first, as a host on the subnet would.

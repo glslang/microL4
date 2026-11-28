@@ -11,7 +11,7 @@ and goes to the request's source, so it is a loop, not an amplifier.
 d.src_port == S::PORT` is the only port check); `docs/design.md`, "`net`",
 the UDP row ("to port 7 from source port 0 or 7 ... refused").
 
-**Status:** open. Found by the M9 red team at `3e22091`.
+**Status:** fixed in the M9 fix round: the echo answers no source port below 1024 (`udp::FIRST_CLIENT_PORT`); the test `one_spoofed_datagram_cannot_start_an_endless_loop` passes and stays, with goldens `echo/refuses_source_port_19` and `echo/refuses_source_port_1023`, and `echo/from_port_1` replaced by `echo/from_port_1024`. Found by the M9 red team at `3e22091`.
 
 ## What breaks
 

@@ -10,7 +10,7 @@ reserved class E. It also answers their ARP requests and caches them.
 (the sender) and `Stack::ipv4` (the source) both use; `docs/design.md`,
 "`net`", the ARP and IPv4 rows of the layer table.
 
-**Status:** open. Found by the M9 red team at `3e22091`.
+**Status:** fixed in the M9 fix round: a shared `Ip::is_unicast` (not in `0.0.0.0/8` or `127.0.0.0/8`, nor from `224.0.0.0` up) that both the stack's peer check and `Config::new` use; the test `martian_sources_are_never_answered` passes and stays, with three new goldens, `echo/refuses_a_{loopback,this_network,reserved}_source`. Found by the M9 red team at `3e22091`.
 
 ## What breaks
 

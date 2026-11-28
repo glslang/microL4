@@ -108,8 +108,7 @@ impl Config {
             prefix,
             gateway,
         };
-        let first = address.0[0];
-        if first == 0 || first == 127 || first >= 224 || !c.is_host(address) {
+        if !address.is_unicast() || !c.is_host(address) {
             return Err(ConfigError::Address(address, prefix));
         }
         if !c.is_host(gateway) || gateway == address {

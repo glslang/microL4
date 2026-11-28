@@ -55,6 +55,15 @@ impl Ip {
         self.0[0] >> 4 == 0xE
     }
 
+    /// An address a host may have or talk to: not in `0.0.0.0/8` ("this
+    /// network"), `127.0.0.0/8` (loopback), `224.0.0.0/4` (multicast) or
+    /// `240.0.0.0/4` (reserved, the limited broadcast with it). RFC 1122
+    /// 3.2.1.3 has a host drop a datagram from any of them.
+    pub const fn is_unicast(self) -> bool {
+        let first = self.0[0];
+        first != 0 && first != 127 && first < 224
+    }
+
     /// The four bytes at the start of `bytes`, which holds at least four.
     pub fn read(bytes: &[u8]) -> Ip {
         Ip([bytes[0], bytes[1], bytes[2], bytes[3]])

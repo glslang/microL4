@@ -15,6 +15,14 @@ pub const MAX_PAYLOAD: usize = ipv4::MAX_PACKET - ipv4::HEADER - HEADER;
 
 const _: () = assert!(MAX_PAYLOAD == 1472);
 
+/// The lowest source port the stack answers. Ports 0 to 1023 are the
+/// well-known ones (RFC 6335's system ports), where every small service
+/// that answers a datagram lives (echo 7, daytime 13, qotd 17, chargen
+/// 19, time 37): a forged datagram from one of them would start an
+/// exchange between it and the echo that never ends (CVE-1999-0103). A
+/// client sends from an ephemeral port.
+pub const FIRST_CLIENT_PORT: u16 = 1024;
+
 /// An address and a port.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Endpoint {

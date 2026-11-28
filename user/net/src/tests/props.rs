@@ -454,7 +454,14 @@ fn payload_len() -> impl Strategy<Value = usize> {
 
 fn datagram() -> impl Strategy<Value = Datagram> {
     (
-        prop_oneof![Just(1u16), Just(8u16), Just(65535u16), 1u16..=65535],
+        // A client's port: the stack answers none below 1024
+        // (`udp::FIRST_CLIENT_PORT`).
+        prop_oneof![
+            Just(1024u16),
+            Just(1025u16),
+            Just(65535u16),
+            1024u16..=65535
+        ],
         payload_len(),
         any::<u8>(),
         any::<bool>(),
@@ -463,7 +470,6 @@ fn datagram() -> impl Strategy<Value = Datagram> {
         bytes(if cfg!(miri) { 4 } else { 40 }),
         any::<u16>(),
     )
-        .prop_filter("source port 7", |d| d.0 != 7)
         .prop_map(
             |(sport, len, seed, checksum, words, trailer, padding, ident)| {
                 let payload = (0..len).map(|j| seed.wrapping_add((3 * j) as u8)).collect();
