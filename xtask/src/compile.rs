@@ -34,9 +34,10 @@ pub const LOADER_TARGET: &str = "x86_64-unknown-uefi";
 /// User programs build for the kernel's target, so they use no SSE either
 /// (`docs/design.md`, "The kernel never touches SSE; the user target").
 pub const USER_TARGET: &str = "x86_64-unknown-none";
-/// The user crates, linted by `cargo xtask clippy`.
+/// The user crates, linted by `cargo xtask clippy` for their target;
+/// `hvmock`, host only, is not one.
 pub const USER_CRATES: &[&str] = &[
-    "libsys", "fb", "pci", "uart", "console", "term", "tui", "net", "root",
+    "libsys", "fb", "pci", "uart", "console", "term", "tui", "net", "vmbus", "root",
 ];
 /// The variable whose path the kernel's `include_bytes!` embeds.
 pub const ROOT_IMAGE_ENV: &str = "MICROL4_ROOT_IMAGE";
@@ -235,6 +236,10 @@ pub fn clippy() -> Result<()> {
             "tui",
             "--package",
             "net",
+            "--package",
+            "vmbus",
+            "--package",
+            "hvmock",
             "--package",
             "root",
             "--lib",
