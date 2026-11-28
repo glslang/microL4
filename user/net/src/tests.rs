@@ -5,7 +5,8 @@
 //! model, the configuration and its words, and the pump over a model of
 //! the frame queues; and [`e2e`], the stack against the end-to-end tests'
 //! scripted peer ([`peer`]), straight and over the frame queues with a
-//! model driver preempting `net` ([`preempt`], [`owners`]).
+//! model driver preempting `net` ([`preempt`], [`owners`]); and
+//! [`redteam`], M9's red-team attacks, two of them findings `#[ignore]`d.
 
 mod e2e;
 mod golden;
@@ -15,6 +16,7 @@ pub mod owners;
 pub mod peer;
 pub mod preempt;
 mod props;
+mod redteam;
 mod unit;
 pub mod wire;
 
