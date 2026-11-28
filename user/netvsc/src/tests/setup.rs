@@ -201,6 +201,16 @@ fn a_malformed_init_answer_tries_the_next_version() {
     assert_eq!(r.nic.seen().nvsp, Some(hn::V4));
 }
 
+/// A section as RXBUF_CONNRESP lays it out: start, slot size, slots, end.
+fn section([start, slot_size, slots, end]: [u32; 4]) -> crate::nvs::RxSection {
+    crate::nvs::RxSection {
+        start,
+        slot_size,
+        slots,
+        end,
+    }
+}
+
 #[test]
 fn every_refusal_of_the_receive_buffer() {
     let mb = layout::RECEIVE_SIZE as u32;
@@ -225,7 +235,7 @@ fn every_refusal_of_the_receive_buffer() {
                     rxbuf_sections: Some(vec![[0, 1728, 100, 1728 * 100], [0, 1, 1, mb + 1]]),
                     ..nic::Config::default()
                 },
-                NvsBad::Section(1),
+                NvsBad::Section(1, section([0, 1, 1, mb + 1])),
             ),
             (
                 nic::Config {
@@ -233,7 +243,7 @@ fn every_refusal_of_the_receive_buffer() {
                     rxbuf_sections: Some(vec![[4096, 1728, 606, 4096]]),
                     ..nic::Config::default()
                 },
-                NvsBad::Section(0),
+                NvsBad::Section(0, section([4096, 1728, 606, 4096])),
             ),
             (
                 nic::Config {
@@ -241,7 +251,7 @@ fn every_refusal_of_the_receive_buffer() {
                     rxbuf_sections: Some(vec![[8, 0, 0, 4]]),
                     ..nic::Config::default()
                 },
-                NvsBad::Section(0),
+                NvsBad::Section(0, section([8, 0, 0, 4])),
             ),
             (
                 nic::Config {
@@ -280,6 +290,31 @@ fn every_refusal_of_the_receive_buffer() {
         format!("{f}"),
         "netvsc: the host refused the receive buffer: status 0x2"
     );
+    // A refused section's line gives its fields and the check it failed,
+    // so one run on a real host tells which.
+    for (s, why) in [
+        (
+            [8, 0, 0, 4],
+            "section 0 (start 0x8, end 0x4, 0 slots of 0 bytes): it starts after it ends",
+        ),
+        (
+            [0, 1, 1, mb + 1],
+            "section 0 (start 0x0, end 0x100001, 1 slots of 1 bytes): it ends past the 0x100000-byte receive buffer",
+        ),
+        (
+            [4096, 1728, 606, 4096],
+            "section 0 (start 0x1000, end 0x1000, 606 slots of 1728 bytes): its slots reach 0x100a80, past the 0x100000-byte receive buffer",
+        ),
+    ] {
+        let (f, _) = refused(nic::Config {
+            rxbuf_sections: Some(vec![s]),
+            ..nic::Config::default()
+        });
+        assert_eq!(
+            format!("{f}"),
+            format!("netvsc: the host refused the receive buffer: {why}")
+        );
+    }
 }
 
 #[test]

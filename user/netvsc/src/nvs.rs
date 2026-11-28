@@ -175,8 +175,9 @@ pub enum Bad {
     Status(u32),
     /// RXBUF_CONNRESP: no section, or more than its length holds.
     Sections(u32),
-    /// RXBUF_CONNRESP: section `n` reaches past the receive buffer.
-    Section(u32),
+    /// RXBUF_CONNRESP: section `n`, as the host laid it out, is not
+    /// inside the receive buffer ([`RxSection::outside`] says why).
+    Section(u32, RxSection),
     /// CHIM_CONNRESP: a section size netvsc cannot use.
     SectionSize(u32),
 }
@@ -188,7 +189,26 @@ impl fmt::Display for Bad {
             Bad::Kind(k) => write!(f, "an answer of type {k}"),
             Bad::Status(s) => write!(f, "status {s:#x}"),
             Bad::Sections(n) => write!(f, "{n} sections"),
-            Bad::Section(i) => write!(f, "section {i} outside the receive buffer"),
+            Bad::Section(i, s) => {
+                write!(
+                    f,
+                    "section {i} (start {:#x}, end {:#x}, {} slots of {} bytes)",
+                    s.start, s.end, s.slots, s.slot_size
+                )?;
+                let size = layout::RECEIVE_SIZE;
+                match s.outside() {
+                    Some(Outside::StartPastEnd) => f.write_str(": it starts after it ends"),
+                    Some(Outside::EndPastBuffer) => {
+                        write!(f, ": it ends past the {size:#x}-byte receive buffer")
+                    }
+                    Some(Outside::SlotsPastBuffer) => write!(
+                        f,
+                        ": its slots reach {:#x}, past the {size:#x}-byte receive buffer",
+                        s.slots_end()
+                    ),
+                    None => f.write_str(" outside the receive buffer"),
+                }
+            }
             Bad::SectionSize(s) => write!(f, "a section size of {s} bytes"),
         }
     }
@@ -226,6 +246,42 @@ pub struct RxSection {
     pub end: u32,
 }
 
+/// Why a section is not inside the receive buffer: the first of
+/// [`RxSection::outside`]'s checks it fails, which a refusal's line names,
+/// so that one run on a real host shows which field the check refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outside {
+    /// Its start is past its end.
+    StartPastEnd,
+    /// Its end is past the 1 MiB buffer.
+    EndPastBuffer,
+    /// Its slots, from its start, reach past the buffer.
+    SlotsPastBuffer,
+}
+
+impl RxSection {
+    /// Where its slots end: its start plus the slots' bytes.
+    pub const fn slots_end(&self) -> u64 {
+        self.start as u64 + self.slot_size as u64 * self.slots as u64
+    }
+
+    /// Why it is not inside the receive buffer, or `None` if it is: its
+    /// start at or before its end, its end and its slots within the
+    /// buffer.
+    pub const fn outside(&self) -> Option<Outside> {
+        let size = layout::RECEIVE_SIZE as u64;
+        if self.start > self.end {
+            Some(Outside::StartPastEnd)
+        } else if self.end as u64 > size {
+            Some(Outside::EndPastBuffer)
+        } else if self.slots_end() > size {
+            Some(Outside::SlotsPastBuffer)
+        } else {
+            None
+        }
+    }
+}
+
 /// RXBUF_CONNRESP (`hn_nvs_rxbuf_connresp`): the status at 4, the section
 /// count at 8, then 16 bytes a section. At least one section, every one
 /// the body holds, each inside the 1 MiB buffer: its start at or before
@@ -236,7 +292,6 @@ pub fn rxbuf_connresp(body: &[u8]) -> Result<RxSection, Bad> {
     if n == 0 || 12 + 16 * u64::from(n) > body.len() as u64 {
         return Err(Bad::Sections(n));
     }
-    let size = layout::RECEIVE_SIZE as u64;
     let mut first = None;
     for i in 0..n {
         let at = 12 + 16 * i as usize;
@@ -247,9 +302,8 @@ pub fn rxbuf_connresp(body: &[u8]) -> Result<RxSection, Bad> {
             slots: f(2),
             end: f(3),
         };
-        let slots_end = u64::from(s.start) + u64::from(s.slot_size) * u64::from(s.slots);
-        if s.start > s.end || u64::from(s.end) > size || slots_end > size {
-            return Err(Bad::Section(i));
+        if s.outside().is_some() {
+            return Err(Bad::Section(i, s));
         }
         first.get_or_insert(s);
     }
