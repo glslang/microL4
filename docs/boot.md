@@ -94,6 +94,24 @@ log into a test file in `core/tests/acpi/` (on Hyper-V, see
 `tools/hyperv/README.md`). The kernel ignores the word. The `acpidump`
 scenario checks it.
 
+From M9 the root task reads a few words of its own, each with
+`l4core::cmdline::value` through `libsys::cmdline`, so the first word with
+the key counts; the kernel ignores them. None changes the ABI:
+
+| Word | Read by | Effect |
+| --- | --- | --- |
+| `uart.burst=<n>` | `root::process::UartBurst` | `n` decimal from 1 to 15 caps uart's burst at the smaller of `n` and what its setup found; root prints `root: uart.burst=<n>: uart's burst capped at <n>` after its command line and passes `n` to uart in `rdi`. Any other value prints `root: uart.burst="<v>" ignored: not a number from 1 to 15` and changes nothing |
+| `release.flood=<n>` | `root::flood::Flood`, in `test=release` | `n` decimal from 1 to 64: root prints `n` numbered lines of 75 bytes with CR LF right after its summary (`release: flood 01/32 ...`). Any other value prints `release: release.flood="<v>" ignored: not a number from 1 to 64` and no flood |
+| `net.ip=<a.b.c.d>/<n>` | `net::Config::parse`, in `test=net`, `virtio_net` and `virtio_net_fault` | `net`'s address and prefix length, 8 to 30; on QEMU it defaults to `10.0.2.15/24`, on Hyper-V it is required |
+| `net.gw=<a.b.c.d>` | the same | `net`'s gateway, another host of the same subnet; on QEMU it defaults to `10.0.2.2`, on Hyper-V it is required |
+| `netvsc.mnf=1` | root's Hyper-V half (M9, not yet built) | `netvsc` signals the host through the monitor page and event flags, as FreeBSD does, rather than `SignalEvent` |
+
+A `net.ip=` or `net.gw=` that `net::Config` refuses fails the test with
+the reason (`net: no address: pass net.ip=<a.b.c.d>/<n>
+net.gw=<a.b.c.d>`, for one, when neither has a default). `docs/design.md`
+has the details: "Transmit and receive" (uart), "The M9 Hyper-V check"
+(the flood), "`net`" and "`netvsc`".
+
 QEMU scenarios choose a test by writing `cmdline.txt`; there is one kernel
 binary for every scenario. `cargo xtask image`, and so the CI-built VHDX, uses
 `test=hello`. From M5 the root task reads the same bytes from BootInfo's
