@@ -19,7 +19,8 @@ pub const VENDOR: u16 = 0x1AF4;
 /// The network device's ID: `0x1040` plus virtio device ID 1.
 pub const DEVICE: u16 = 0x1041;
 /// The network device's transitional ID, which QEMU gives a
-/// `virtio-net-pci` on q35's root bus (from memory).
+/// `virtio-net-pci` on q35's root bus: the `pci` scenario finds
+/// `1af4:1000`, subsystem `1af4:0001`.
 pub const TRANSITIONAL_DEVICE: u16 = 0x1000;
 /// A transitional device's subsystem device ID is its virtio device ID:
 /// 1, network.

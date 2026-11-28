@@ -368,7 +368,9 @@ fn turn_off_leftovers(p: &Privileges, info: &mut Info) {
         if let Some(w) = HypercallMsr::off(v) {
             // SAFETY: AccessHypercallMsrs allows the MSR, and it is not
             // locked. Clearing the enable bit removes the hypercall
-            // overlay; the kernel makes no hypercall before M9.
+            // overlay; the kernel makes no hypercall until
+            // `set_up_hypercalls` has pointed the MSR at `.hvcall` and read
+            // it back enabled.
             unsafe { write_msr(hv::MSR_HYPERCALL, w) };
             off += 1;
         }

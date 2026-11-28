@@ -2,8 +2,8 @@
 //! "PCI on QEMU", "The virtio-net function"): its modern interface's
 //! common, notify and device regions, found through virtio's
 //! vendor-specific capabilities (`struct virtio_pci_cap` and
-//! `virtio_pci_notify_cap`, as Linux's BSD-licensed
-//! `include/uapi/linux/virtio_pci.h` lays them out; from memory), and its
+//! `virtio_pci_notify_cap`, as virtio 1.2, 4.1.4, lays them out, which
+//! `virtio_net::pci` was written from), and its
 //! MSI-X table, each checked against the BAR that holds it. The ISR region
 //! is not needed with MSI-X, and the legacy I/O BAR is never used.
 
@@ -13,7 +13,7 @@ use crate::{Address, Bar, Bars, Bytes, Config, Function, HEADER_BYTES, LAYOUT_DE
 
 /// The virtio vendor ID, and virtio-net's device IDs: modern, and
 /// transitional with subsystem device 1, the network device (virtio 1.2,
-/// 4.1.2, from memory).
+/// 4.1.2).
 pub const VENDOR: u16 = 0x1AF4;
 pub const DEVICE_NET: u16 = 0x1041;
 pub const DEVICE_TRANSITIONAL_NET: u16 = 0x1000;
@@ -211,8 +211,10 @@ pub enum Refusal {
         kind: Kind,
         length: u32,
     },
-    /// `notify_off_multiplier` is odd, which virtio forbids (0 or even;
-    /// virtio 1.2, 4.1.4.4, from memory).
+    /// `notify_off_multiplier` is odd. Virtio asks for 0 or an even power
+    /// of 2 (virtio 1.2, 4.1.4.4); the plan refuses an odd one, and
+    /// `virtio_net::Start::from_words`, which root runs on its words, the
+    /// rest.
     OddMultiplier(u32),
     /// A page of the region is also a page of `with`.
     SharesPage {
