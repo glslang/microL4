@@ -4,20 +4,16 @@
 //! include this file by path.
 
 use core::sync::atomic::Ordering::Acquire;
-use std::format;
-use std::string::String;
 
 use libsys::frames::{BUFFERS, Entry, Owned, Pool, Queue};
 use libsys::mem::Memory;
 
-/// Where a buffer is.
-fn place(q: Queue) -> &'static str {
-    match q {
-        Queue::RxFilled => "RX_FILLED",
-        Queue::RxFree => "RX_FREE",
-        Queue::TxFilled => "TX_FILLED",
-        Queue::TxFree => "TX_FREE",
-    }
+/// Where a buffer is: held by a side, or named by a queue's entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    Driver,
+    Net,
+    Entry(Queue, u32),
 }
 
 /// Asserts that each buffer of each pool is in exactly one place: held by
@@ -29,20 +25,20 @@ fn place(q: Queue) -> &'static str {
 #[track_caller]
 pub fn owned_once(mem: &impl Memory, driver: [Owned; 2], net: [Owned; 2]) {
     for (p, pool) in Pool::ALL.into_iter().enumerate() {
-        let mut seen: [Option<String>; BUFFERS] = core::array::from_fn(|_| None);
-        let mut put = |i: usize, what: String| {
-            assert!(i < BUFFERS, "{pool:?} buffer {i} named in {what}");
-            if let Some(before) = &seen[i] {
-                panic!("{pool:?} buffer {i} is both {before} and {what}");
+        let mut seen: [Option<Place>; BUFFERS] = [None; BUFFERS];
+        let mut put = |i: usize, what: Place| {
+            assert!(i < BUFFERS, "{pool:?} buffer {i} named at {what:?}");
+            if let Some(before) = seen[i] {
+                panic!("{pool:?} buffer {i} is both at {before:?} and at {what:?}");
             }
             seen[i] = Some(what);
         };
         for i in 0..BUFFERS as u16 {
             if driver[p].has(i) {
-                put(i.into(), "the driver's".into());
+                put(i.into(), Place::Driver);
             }
             if net[p].has(i) {
-                put(i.into(), "net's".into());
+                put(i.into(), Place::Net);
             }
         }
         for q in [pool.filled(), pool.free()] {
@@ -51,18 +47,13 @@ pub fn owned_once(mem: &impl Memory, driver: [Owned; 2], net: [Owned; 2]) {
             let n = head.wrapping_sub(tail);
             assert!(
                 n <= BUFFERS as u32,
-                "{} holds {n} entries (tail {tail}, head {head})",
-                place(q)
+                "{q:?} holds {n} entries (tail {tail}, head {head})"
             );
             for k in 0..n {
                 let at = tail.wrapping_add(k);
                 let e = Entry::from_word(mem.load32(q.entry(at), Acquire));
-                assert!(
-                    e.fits(q.is_filled()),
-                    "{}'s entry {at} is bad: {e:?}",
-                    place(q)
-                );
-                put(e.index.into(), format!("in {} (entry {at})", place(q)));
+                assert!(e.fits(q.is_filled()), "{q:?}'s entry {at} is bad: {e:?}");
+                put(e.index.into(), Place::Entry(q, at));
             }
         }
         if let Some(i) = seen.iter().position(Option::is_none) {
