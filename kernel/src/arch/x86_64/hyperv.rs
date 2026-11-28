@@ -194,6 +194,14 @@ fn set_up_hypercalls(p: &Privileges, kernel_phys_base: u64) -> Result<(), Unavai
         hv::GUEST_OS_ID
     );
     if !hv::hypercall_enabled_at(read_back, page) {
+        if let Some(w) = HypercallMsr::off(read_back) {
+            // SAFETY: AccessHypercallMsrs allows the MSR, and it is not
+            // locked. The page reads back enabled somewhere other than
+            // `.hvcall`, an overlay over memory that may become untyped;
+            // clearing the enable bit removes it, and the kernel makes no
+            // hypercall without the page at `.hvcall`.
+            unsafe { write_msr(hv::MSR_HYPERCALL, w) };
+        }
         return Err(Unavailable::NotEnabled { read_back });
     }
     let input_gpa = to_phys(INPUT.0.get() as u64);
