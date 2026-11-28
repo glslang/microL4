@@ -229,10 +229,12 @@ dependencies = [
  "console",
  "fb",
  "libsys",
+ "net",
  "pci",
  "term",
  "tui",
  "uart",
+ "virtio-net",
 ]
 
 [[package]]

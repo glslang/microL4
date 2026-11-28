@@ -1,6 +1,6 @@
 //! The verdicts of `test=threads` and `test=fault`, from what the threads
-//! recorded and the messages they received; M6's, M7's and M8's tests have a
-//! module each.
+//! recorded and the messages they received; M6's, M7's, M8's and M9's tests
+//! have a module each.
 
 use core::fmt;
 
@@ -11,6 +11,7 @@ pub mod badge;
 pub mod captransfer;
 pub mod console;
 pub mod ipcntfn;
+pub mod net;
 pub mod pingpong;
 pub mod tui;
 

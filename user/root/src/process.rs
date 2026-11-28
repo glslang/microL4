@@ -321,6 +321,12 @@ pub mod fault_badge {
     pub const CONSOLE: u64 = 2;
     /// From M8: a term fault ends the run as a uart or console fault does.
     pub const TERM: u64 = 3;
+    /// From M9, the network servers (`docs/design.md`, "Failures" under
+    /// "Networking"): any of their faults ends the run too.
+    pub const VIRTIO_NET: u64 = 4;
+    pub const VMBUS: u64 = 5;
+    pub const NETVSC: u64 = 6;
+    pub const NET: u64 = 7;
 
     /// The server a badge names.
     pub const fn name(badge: u64) -> &'static str {
@@ -328,6 +334,10 @@ pub mod fault_badge {
             UART => "uart",
             CONSOLE => "console",
             TERM => "term",
+            VIRTIO_NET => "virtio-net",
+            VMBUS => "vmbus",
+            NETVSC => "netvsc",
+            NET => "net",
             _ => "an unknown server",
         }
     }
@@ -679,9 +689,40 @@ mod tests {
             line(3, 2),
             "TEST FAIL: term fault 2 (UnknownSyscall), MR0 to MR3 0x401234 0xdead 0x0 0x6"
         );
+        // From M9, the network servers.
         assert_eq!(
-            line(7, 0x130),
-            "TEST FAIL: an unknown server fault 304, MR0 to MR3 0x401234 0xdead 0x0 0x6"
+            line(4, 5),
+            "TEST FAIL: virtio-net fault 5 (VMFault), MR0 to MR3 0x401234 0xdead 0x0 0x6"
         );
+        assert_eq!(
+            line(5, 1),
+            "TEST FAIL: vmbus fault 1 (CapFault), MR0 to MR3 0x401234 0xdead 0x0 0x6"
+        );
+        assert_eq!(
+            line(6, 3),
+            "TEST FAIL: netvsc fault 3 (UserException), MR0 to MR3 0x401234 0xdead 0x0 0x6"
+        );
+        assert_eq!(
+            line(7, 2),
+            "TEST FAIL: net fault 2 (UnknownSyscall), MR0 to MR3 0x401234 0xdead 0x0 0x6"
+        );
+        // The line virtio_net_fault expects.
+        assert_eq!(
+            format!(
+                "{}",
+                FaultLine {
+                    badge: fault_badge::VIRTIO_NET,
+                    label: 5,
+                    mr: [0, 0, 1, 0x14]
+                }
+            ),
+            "TEST FAIL: virtio-net fault 5 (VMFault), MR0 to MR3 0x0 0x0 0x1 0x14"
+        );
+        for badge in [0, 8, 1 << 32] {
+            assert_eq!(
+                line(badge, 0x130),
+                "TEST FAIL: an unknown server fault 304, MR0 to MR3 0x401234 0xdead 0x0 0x6"
+            );
+        }
     }
 }
