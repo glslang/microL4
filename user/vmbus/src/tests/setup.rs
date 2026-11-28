@@ -617,6 +617,56 @@ fn a_failed_post_is_a_panic() {
     r.bus.start(&mut Refuses(&mut r.host), &mut r.sys);
 }
 
+/// M9 fix-round recheck: a failure other than full buffers is retried
+/// with the same waits, and contact goes on once a post succeeds.
+/// `a_failed_post_is_a_panic` alone passes when only
+/// `HV_STATUS_INSUFFICIENT_BUFFERS` is retried and any other status is a
+/// panic at once (its message names `MAX_RETRIES`, not the count), which
+/// was the policy before the fix round.
+#[test]
+fn a_post_failing_with_any_status_is_retried() {
+    struct Fails<'a, 'm> {
+        host: &'a mut Host<'m>,
+        statuses: Vec<Status>,
+    }
+    impl Hypervisor for Fails<'_, '_> {
+        fn post_message(&mut self, c: u32, t: u32, payload: &[u8]) -> Status {
+            match self.statuses.pop() {
+                Some(s) => s,
+                None => self.host.post_message(c, t, payload),
+            }
+        }
+        fn signal_event(&mut self, c: u32, f: u16) -> Status {
+            self.host.signal_event(c, f)
+        }
+        fn eom(&mut self) {
+            self.host.eom()
+        }
+        fn vp_index(&mut self) -> u32 {
+            Hypervisor::vp_index(self.host)
+        }
+    }
+    let m = Machine::new();
+    let mut r = Rig::new(&m, Config::default());
+    let statuses = vec![
+        Status(0x1234),
+        Status::INVALID_PORT_ID,
+        Status::INVALID_CONNECTION_ID,
+    ];
+    r.bus.start(
+        &mut Fails {
+            host: &mut r.host,
+            statuses,
+        },
+        &mut r.sys,
+    );
+    r.run();
+    r.honest();
+    assert_eq!(r.bus.stats().retries, 3);
+    assert_eq!(r.sys.back_offs, [1, 2, 4]);
+    assert!(r.bus.attached().is_some());
+}
+
 #[test]
 fn chopen_names_the_vp_index() {
     let m = Machine::new();

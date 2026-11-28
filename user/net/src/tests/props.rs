@@ -307,6 +307,31 @@ fn is_peer(ip: [u8; 4]) -> bool {
     ip != [0; 4] && ip != [255; 4] && ip[0] >> 4 != 0xE && ip != US && ip != [10, 0, 2, 255]
 }
 
+/// M9 fix-round recheck: the oracle of
+/// `random_and_mutated_frames_keep_the_invariants` still has the rules
+/// from before the fix round, so with `Stack::is_peer` or the echo's port
+/// refusal reverted that proptest still passes (only the goldens and
+/// `redteam.rs` fail), although design.md's Invariants row on drop rules
+/// and echo loops names it as backing both. Frames the stack sent before
+/// the fix: an echo reply to a loopback, a "this network" and a class E
+/// address, through the gateway, and an echo to chargen's port.
+#[test]
+#[ignore = "recheck: the invariant proptest's oracle (is_peer, check_sent) predates the fix round's drop rules"]
+fn the_invariant_oracle_refuses_what_the_fix_round_refuses() {
+    let mut passed = Vec::new();
+    for dst in [[127, 0, 0, 1], [0, 1, 2, 3], [240, 0, 0, 1]] {
+        let reply = V4::new(US, dst, 1).packet(&icmp_echo(0, 0x77, 1, b"martian"));
+        if check_sent(&padded(eth(GW_MAC, MAC, 0x0800, &reply))).is_ok() {
+            passed.push(std::format!("an echo reply to {dst:?}"));
+        }
+    }
+    let echo = V4::new(US, GW, 17).packet(&udp(US, GW, 7, 19, b"loop", true));
+    if check_sent(&padded(eth(GW_MAC, MAC, 0x0800, &echo))).is_ok() {
+        passed.push("an echo to port 19".into());
+    }
+    assert!(passed.is_empty(), "the oracle passes {passed:?}");
+}
+
 fn is_unicast_mac(m: &[u8]) -> bool {
     m[0] & 1 == 0 && m[..6] != [0; 6]
 }
