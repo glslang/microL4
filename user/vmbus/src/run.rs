@@ -90,7 +90,7 @@ impl System for Os<'_> {
         } else {
             self.tsc_hz
         };
-        let ticks = hz / 1000 * u64::from(ms);
+        let ticks = (hz / 1000).saturating_mul(u64::from(ms));
         let start = libsys::cpu::rdtsc();
         while libsys::cpu::rdtsc().wrapping_sub(start) < ticks {
             libsys::yield_now();

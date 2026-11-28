@@ -56,6 +56,11 @@ const ADDRS: &[[u8; 4]] = &[
     [10, 0, 2, 0],
     [224, 0, 0, 1],
     [239, 1, 2, 3],
+    // Martian sources (the M9 red team): loopback, "this network",
+    // reserved.
+    [127, 0, 0, 1],
+    [0, 1, 2, 3],
+    [240, 0, 0, 1],
 ];
 
 const MACS: &[[u8; 6]] = &[
@@ -302,21 +307,20 @@ fn input() -> impl Strategy<Value = Vec<u8>> {
     ]
 }
 
-/// Not 0, a broadcast, multicast or the stack's own address.
+/// A unicast address a host may have (RFC 1122 3.2.1.3: not in 0/8,
+/// 127/8 or from 224 up, multicast, reserved and the limited broadcast
+/// among them), other than the stack's own and its subnet's broadcast.
+/// Written from the RFC, not from `Ip::is_unicast`.
 fn is_peer(ip: [u8; 4]) -> bool {
-    ip != [0; 4] && ip != [255; 4] && ip[0] >> 4 != 0xE && ip != US && ip != [10, 0, 2, 255]
+    !matches!(ip[0], 0 | 127 | 224..=255) && ip != US && ip != [10, 0, 2, 255]
 }
 
-/// M9 fix-round recheck: the oracle of
-/// `random_and_mutated_frames_keep_the_invariants` still has the rules
-/// from before the fix round, so with `Stack::is_peer` or the echo's port
-/// refusal reverted that proptest still passes (only the goldens and
-/// `redteam.rs` fail), although design.md's Invariants row on drop rules
-/// and echo loops names it as backing both. Frames the stack sent before
-/// the fix: an echo reply to a loopback, a "this network" and a class E
-/// address, through the gateway, and an echo to chargen's port.
+/// The oracle of `random_and_mutated_frames_keep_the_invariants` refuses
+/// what the M9 fix round's rules refuse (the M9 re-check found it still on
+/// the old ones, so the proptest passed with either fix reverted): an
+/// echo reply to a loopback, a "this network" and a reserved address,
+/// through the gateway, and an echo to chargen's port.
 #[test]
-#[ignore = "recheck: the invariant proptest's oracle (is_peer, check_sent) predates the fix round's drop rules"]
 fn the_invariant_oracle_refuses_what_the_fix_round_refuses() {
     let mut passed = Vec::new();
     for dst in [[127, 0, 0, 1], [0, 1, 2, 3], [240, 0, 0, 1]] {
@@ -385,7 +389,9 @@ fn check_sent(f: &[u8]) -> Result<(), TestCaseError> {
                     prop_assert_eq!(usize::from(get16(l4, 4)), l4.len());
                     prop_assert_eq!(get16(l4, 0), 7);
                     let dport = get16(l4, 2);
-                    prop_assert!(dport != 0 && dport != 7, "an echo to port {}", dport);
+                    // No echo to a well-known port, where the small
+                    // services that would answer it live (CVE-1999-0103).
+                    prop_assert!(dport >= 1024, "an echo to port {}", dport);
                     let mut d = l4.to_vec();
                     d[6] = 0;
                     d[7] = 0;

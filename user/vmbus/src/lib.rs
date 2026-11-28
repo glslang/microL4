@@ -122,16 +122,17 @@ pub mod layout {
     };
 }
 
-/// `Hypervisor_PostMessage` retries after any failure before vmbus
-/// panics: FreeBSD's `vmbus_msghc_exec` retries every failed post 20
-/// times, waiting 1 ms first and twice as long each time up to 2 s
-/// (`sys/dev/hyperv/vmbus/vmbus.c`), which lets a busy host's buffers
-/// drain; about 20 s in all.
-pub const MAX_RETRIES: u32 = 20;
-/// The wait before the first retry, in milliseconds.
+/// `Hypervisor_PostMessage`s of one message before vmbus panics, as
+/// FreeBSD's `vmbus_msghc_exec` makes them (`HC_RETRY_MAX`,
+/// `sys/dev/hyperv/vmbus/vmbus.c`): whatever the status, it posts at most
+/// 20 times, waiting 1 ms after the first failure and twice as long after
+/// each while the wait is under 2 s, so 1 ms to 2,048 ms, which lets a
+/// busy host's buffers drain; about 18 s of waits in all.
+pub const MAX_POSTS: u32 = 20;
+/// The wait after the first failed post, in milliseconds.
 pub const FIRST_BACK_OFF_MS: u32 = 1;
-/// The longest wait between retries, in milliseconds.
-pub const MAX_BACK_OFF_MS: u32 = 2000;
+/// A wait under this many milliseconds doubles for the next.
+pub const DOUBLE_BELOW_MS: u32 = 2000;
 
 /// The Hypervisor capability's four invocations (`docs/abi.md`,
 /// "Hypervisor"), on the unrestricted capability in slot 3. On the target

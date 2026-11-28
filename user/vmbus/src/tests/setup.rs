@@ -557,36 +557,35 @@ fn a_message_waiting_at_start_is_taken() {
     assert!(r.bus.attached().is_some());
 }
 
-/// FreeBSD's waits between retries: 1 ms, doubling, at most 2 s.
-const BACK_OFFS: [u32; 20] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
-    2000,
+/// FreeBSD's waits between its 20 posts: 1 ms, doubling while under 2 s.
+const BACK_OFFS: [u32; 19] = [
+    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048,
 ];
 
 #[test]
 fn posts_are_retried_while_the_buffers_are_full() {
     let m = Machine::new();
     let cfg = Config {
-        busy_posts: 20,
+        busy_posts: 19,
         ..Config::default()
     };
     let mut r = Rig::new(&m, cfg);
     r.start();
     r.honest();
-    assert_eq!(r.bus.stats().retries, 20);
+    assert_eq!(r.bus.stats().retries, 19);
     assert_eq!(r.sys.back_offs, BACK_OFFS);
-    assert_eq!(r.host.busy(), 20);
+    assert_eq!(r.host.busy(), 19);
     assert!(r.bus.attached().is_some());
 }
 
 #[test]
 #[should_panic(
-    expected = "vmbus: PostMessage of CONNECT: HV_STATUS_INSUFFICIENT_BUFFERS (0x13), after 20 retries"
+    expected = "vmbus: PostMessage of CONNECT: HV_STATUS_INSUFFICIENT_BUFFERS (0x13), after 20 posts"
 )]
-fn posts_retried_20_times_then_a_panic() {
+fn twenty_failed_posts_then_a_panic() {
     let m = Machine::new();
     let cfg = Config {
-        busy_posts: 21,
+        busy_posts: 20,
         ..Config::default()
     };
     Rig::new(&m, cfg).start();
@@ -594,7 +593,7 @@ fn posts_retried_20_times_then_a_panic() {
 
 #[test]
 #[should_panic(
-    expected = "vmbus: PostMessage of CONNECT: HV_STATUS_INVALID_CONNECTION_ID (0x12), after 20 retries"
+    expected = "vmbus: PostMessage of CONNECT: HV_STATUS_INVALID_CONNECTION_ID (0x12), after 20 posts"
 )]
 fn a_failed_post_is_a_panic() {
     struct Refuses<'a, 'm>(&'a mut Host<'m>);
@@ -621,7 +620,7 @@ fn a_failed_post_is_a_panic() {
 /// with the same waits, and contact goes on once a post succeeds.
 /// `a_failed_post_is_a_panic` alone passes when only
 /// `HV_STATUS_INSUFFICIENT_BUFFERS` is retried and any other status is a
-/// panic at once (its message names `MAX_RETRIES`, not the count), which
+/// panic at once (its message names the limit, not the count), which
 /// was the policy before the fix round.
 #[test]
 fn a_post_failing_with_any_status_is_retried() {

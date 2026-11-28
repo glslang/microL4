@@ -4644,7 +4644,7 @@ interface`, and `GetSint` is `IllegalOperation`.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| No hypervisor overlay page covers untyped memory or any kernel object but its own page | overlay reset before memory reuse; a Locked hypercall page kept out of untyped and the boot region; SynIC frames outside every untyped; hypercall page in the image | M3, M4, M9 |
+| No hypervisor overlay page covers untyped memory or any kernel object but its own page | overlay reset before memory reuse; a Locked hypercall page kept out of untyped and the boot region; SynIC frames outside every untyped; hypercall page in the image; a page that reads back enabled anywhere but `.hvcall` turned off again (`HypercallMsr::off`, by reading: no test, as QEMU has no Hyper-V interface) | M3, M4, M9 |
 | On a user's behalf the hypervisor reads or writes only the kernel's input page and the two SynIC frames, apart from the guest pages a VMBus message names, which the attack surface above accepts | two fixed hypercalls with kernel-built input; red-team brief 8 | M9, M10 |
 | A restricted Hypervisor capability acts only on its own connection and rights; mint never widens | `core::hyperv` check, host tests; capabilities model test of Mint | M9 |
 | User code can neither execute a hypercall nor touch a synthetic MSR | kernel-only hypercall page; `rdmsr`/`wrmsr` fault at CPL 3; red-team brief 8 | M9, M10 |
@@ -7167,7 +7167,9 @@ for every row of the tables above; the expected frames were computed by
 an independent model written for the purpose, not by the stack:
 `tools/net-goldens/` (Python, its own checksum and frame builders, no
 code shared with `net`), whose `gen.py` and then `extra.py` write the
-whole directory (`python3 -I tools/net-goldens/gen.py user/net/golden`).
+whole directory (`python3 -I tools/net-goldens/gen.py user/net/golden`,
+which empties it first, then `python3 -I tools/net-goldens/extra.py
+user/net/golden`).
 A change to the stack's rules changes the model first, so a golden never
 comes from the code it checks; the M9 fix round's echo and source rules
 were made that way.
@@ -7581,11 +7583,14 @@ says only how far contact and the offers went (the version, the offers, or
 the channel open), not which GPADL or open the host left unanswered.
 A failed `PostMessage`, whatever its status, is retried as FreeBSD's
 `vmbus_msghc_exec` retries it (`sys/dev/hyperv/vmbus/vmbus.c`): at most 20
-times (`vmbus::MAX_RETRIES`), waiting 1 ms first and twice as long each
-time up to 2 s, about 20 s in all, then a panic naming the status. The
-wait spins on the time-stamp counter at BootInfo's `tsc_hz`, which root
-passes in `rcx`, yielding meanwhile (a counter of unknown rate is taken
-as 4 GHz, so no wait is shorter than asked). It was a `Yield` after
+posts in all (`vmbus::MAX_POSTS`, FreeBSD's `HC_RETRY_MAX`), waiting 1 ms
+after the first failure and twice as long after each while the wait is
+under 2 s (so 1 ms to 2,048 ms, about 18 s in all), then a panic naming
+the status. The wait spins on the time-stamp counter at BootInfo's
+`tsc_hz`, which root passes in `rcx` (a counter of unknown rate is taken
+as 4 GHz, so no wait is shorter than asked), yielding to threads of
+`vmbus`'s own priority only: nothing below 145 runs during a wait, which
+is harmless, since every post comes before `Attach` is answered. It was a `Yield` after
 `HV_STATUS_INSUFFICIENT_BUFFERS` alone, 100 times, until the M9 review:
 with nothing else at `vmbus`'s priority those took microseconds, and a
 busy host could have failed a GPADL's run of posts.
@@ -7841,7 +7846,8 @@ waiting for its answer; a rescind of `netvsc`'s channel revoking its
 capability, and one during setup stopping it; GPADLs split 26 + 28 + ...
 exactly; every message round trip and refusal; the event scan, a flag set
 before start, the late `MessagePending`, a message waiting at start; post
-retries, 20 with FreeBSD's waits, then a panic; CHOPEN naming the VP index; the channel's rings
+retries, 20 posts with FreeBSD's waits, then a panic, whatever the
+status; CHOPEN naming the VP index; the channel's rings
 through a loopback device; and `random_hostile_messages_never_derail_vmbus`,
 a proptest of random hostile messages under which `vmbus` never panics,
 never reads outside its pages, and never posts a page outside root's. Five
@@ -8363,7 +8369,7 @@ default that touches the ABI needs an ADR. Sorted by milestone.
 | Should `term` keep scrollback? | Lines scrolled off the top are gone | after M10 | No; ED 3 does nothing |
 | Is an IPC fastpath needed? | Round trips go through the general path | after M10 | No; revisit only with Hyper-V timings, since TCG timings mean little |
 | Should paging structures shrink back to 4 KiB once a cheaper reverse map is found? | It halves the paging overhead | after M10 | No; 8 KiB keeps one simple layout |
-| Should user space get a timer? | ARP cannot retry or expire an entry, and `vmbus` cannot give up on a host that never answers | after M10 | No: every retry is driven by an event; a wait that never ends shows as a scenario's timeout, with the log's last line saying how far it got (`vmbus` prints no line per step, so not which GPADL or open waits) |
+| Should user space get a timer? | ARP cannot retry or expire an entry, and `vmbus` cannot give up on a host that never answers | after M10 | No: every retry is driven by an event but `vmbus`'s `PostMessage` retries, timed by spinning on the TSC; a wait that never ends shows as a scenario's timeout, with the log's last line saying how far it got (`vmbus` prints no line per step, so not which GPADL or open waits) |
 | Should the echo service be a process of its own, with a socket protocol? | PLAN.md lists `echo` as a process | after M10 | No: a module of `net`, since a datagram does not fit one IPC message; a second service would bring a socket protocol over a shared region, as the frame queues are |
 | Should `net` reassemble fragments, send ICMP port unreachable, or announce itself with gratuitous ARP? | RFC 1122 asks for port unreachable (SHOULD); a datagram over 1,472 bytes gets no echo | after M10 | No: fragments and other ports are dropped and counted; the harness sends nothing over 1,472 bytes |
 | Should a PCI manager server own configuration space? | A driver that must mask a vector or reset its function while it runs needs it | after M10 | No: root configures the one function at setup and keeps its frames unmapped |

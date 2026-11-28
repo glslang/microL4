@@ -28,7 +28,7 @@ use crate::gpadl::{self, Handles, Pages};
 use crate::msg::{self, Msg};
 use crate::offer::{Offer, Offers};
 use crate::{
-    FIRST_BACK_OFF_MS, Hypervisor, MAX_BACK_OFF_MS, MAX_RETRIES, Start, Status, System, VERSIONS,
+    DOUBLE_BELOW_MS, FIRST_BACK_OFF_MS, Hypervisor, MAX_POSTS, Start, Status, System, VERSIONS,
     layout, synic,
 };
 
@@ -621,30 +621,32 @@ impl<M: Memory> Bus<M> {
         self.phase = Phase::Stopped;
     }
 
-    /// Posts `m` on connection 1, retrying any failure up to
-    /// [`MAX_RETRIES`] times, as FreeBSD does: after
-    /// [`FIRST_BACK_OFF_MS`], then twice as long each time, at most
-    /// [`MAX_BACK_OFF_MS`]. The last retry's failure is a panic.
+    /// Posts `m` on connection 1, at most [`MAX_POSTS`] times whatever
+    /// the failure, as FreeBSD does: waiting [`FIRST_BACK_OFF_MS`] after
+    /// the first failure and twice as long after each while the wait is
+    /// under [`DOUBLE_BELOW_MS`]. The last post's failure is a panic.
     fn post<H: Hypervisor, S: System>(&mut self, m: &Msg, hv: &mut H, sys: &mut S) {
         let mut b = [0u8; msg::MAX];
         let n = m.encode(&mut b);
         let mut wait = FIRST_BACK_OFF_MS;
-        let mut retries = 0;
+        let mut posts = 0;
         loop {
             let s = hv.post_message(msg::CONNECTION, msg::MESSAGE_TYPE, &b[..n]);
             if s == Status::SUCCESS {
                 return;
             }
-            if retries == MAX_RETRIES {
+            posts += 1;
+            if posts == MAX_POSTS {
                 panic!(
-                    "vmbus: PostMessage of {}: {s}, after {MAX_RETRIES} retries",
+                    "vmbus: PostMessage of {}: {s}, after {posts} posts",
                     m.name()
                 );
             }
-            retries += 1;
             self.stats.retries += 1;
             sys.back_off(wait);
-            wait = (wait * 2).min(MAX_BACK_OFF_MS);
+            if wait < DOUBLE_BELOW_MS {
+                wait *= 2;
+            }
         }
     }
 }

@@ -4,8 +4,10 @@
 //! The layers check in order and stop at the first refusal, which names
 //! the frame's [`Outcome`]: Ethernet (length, destination, EtherType),
 //! then ARP or IPv4, then ICMP or UDP. Addresses the stack answers or
-//! learns are unicast peers: never 0, `255.255.255.255`, a multicast
-//! group, the subnet's broadcast or its own address. A packet to a next
+//! learns are unicast peers ([`Ip::is_unicast`]: never in `0.0.0.0/8`,
+//! `127.0.0.0/8` or from `224.0.0.0` up, RFC 1122's martians among them),
+//! never the subnet's broadcast or its own address; the echo answers no
+//! source port below [`udp::FIRST_CLIENT_PORT`]. A packet to a next
 //! hop the ARP cache has not resolved waits in its entry, one per entry
 //! and four in all, and goes out when an ARP packet resolves the address.
 

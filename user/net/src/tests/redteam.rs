@@ -53,11 +53,9 @@ fn ip_dst(f: &[u8]) -> Option<[u8; 4]> {
 /// Sources RFC 1122 (3.2.1.3) says a host MUST silently discard: loopback
 /// (127/8, "MUST NOT appear outside a host"), "this network" with a
 /// non-zero host (0/8), and class E (240/4, reserved; 255.255.255.255
-/// apart, which the stack already refuses). The stack's own
-/// `Config::parse` refuses each as its address ("not in 0.0.0.0/8 or
-/// 127.0.0.0/8, nor from 224.0.0.0 up"), but `Stack::is_peer` takes them
-/// as peers: it answers their pings and datagrams through the gateway,
-/// and caches them from ARP.
+/// apart). `Stack::is_peer` took them as peers until the fix round,
+/// answering their pings and datagrams through the gateway and caching
+/// them from ARP; it now uses `Ip::is_unicast`, as `Config::new` does.
 const MARTIANS: &[[u8; 4]] = &[
     [127, 0, 0, 1],
     [127, 1, 2, 3],
@@ -102,9 +100,9 @@ fn martian_sources_are_never_answered() {
 /// datagram to the stack's port 7 from one of them, its source spoofed by
 /// anyone, is echoed back to that service, whose answer comes back to
 /// port 7 from the same port and is echoed again, forever: the
-/// echo-chargen loop (CVE-1999-0103, "Fraggle"). The stack refuses only
-/// source ports 0 and 7 (`Outcome::UdpRefused`), so it keeps an
-/// echo-to-echo loop out, not this one.
+/// echo-chargen loop (CVE-1999-0103, "Fraggle"). The stack refused only
+/// source ports 0 and 7 until the fix round; it now refuses every one
+/// below `udp::FIRST_CLIENT_PORT` (`Outcome::UdpRefused`).
 #[test]
 fn one_spoofed_datagram_cannot_start_an_endless_loop() {
     let (mut s, mut w) = up();

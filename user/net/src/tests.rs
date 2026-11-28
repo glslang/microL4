@@ -6,7 +6,8 @@
 //! the frame queues; and [`e2e`], the stack against the end-to-end tests'
 //! scripted peer ([`peer`]), straight and over the frame queues with a
 //! model driver preempting `net` ([`preempt`], [`owners`]); and
-//! [`redteam`], M9's red-team attacks, two of them findings `#[ignore]`d.
+//! [`redteam`], M9's red-team attacks, two of them findings fixed in the
+//! fix round and kept as regressions.
 
 mod e2e;
 mod golden;
