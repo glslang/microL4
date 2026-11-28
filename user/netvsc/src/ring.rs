@@ -277,8 +277,7 @@ impl Outbound {
     /// fence, reads the room again: a host that read the ring after the
     /// writer found it full but before it saw the request has made room
     /// and will not signal for it, so true means write now rather than
-    /// wait (Linux's `hv_ringbuffer` and FreeBSD's `vmbus_txbr` check
-    /// again too). Breaks the ring if the host's read index is bad.
+    /// wait. Breaks the ring if the host's read index is bad.
     pub fn ask_room(&mut self, mem: &impl Memory, need: usize) -> Result<bool, Broken> {
         mem.store32(PENDING_SEND_SIZE, need as u32, Release);
         self.asked = true;
