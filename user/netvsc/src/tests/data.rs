@@ -457,3 +457,49 @@ fn the_stats_text_after_traffic() {
         "NVSP 5, NDIS 6.30, 8 receive-buffer packets, 3 frames received, 0 dropped for no buffer, 8 acknowledgements sent, 0 acknowledgements waiting, 3 frames sent, 3 sections in flight at most, 3 send completions, 1 status indications, 0 broken packets, 0 packets skipped, 0 ignored messages, 0 bad queue entries"
     );
 }
+
+/// The outbound ring of a fresh `mem`, written full of 64-byte packets:
+/// the ring and the room the next one needs.
+fn full_outbound(mem: &Ram) -> (ring::Outbound, usize) {
+    let mut out = ring::Outbound::new(mem);
+    for xid in 0.. {
+        match out.write(mem, ring::kind::INBAND, 0, xid, &[], &[0x5A; 48]) {
+            Ok(_) => {}
+            Err(ring::WriteError::Full { need, .. }) => return (out, need),
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    unreachable!()
+}
+
+/// netvsc found the outbound ring full; the host read it all before the
+/// request for room reached it, so it will never signal for that room.
+/// Asking reads the room again after the request, and the write goes
+/// ahead; with no room, the request stands and netvsc waits.
+#[test]
+fn room_made_before_the_request_is_seen_at_once() {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    let mem = Ram::new(ring::CONTROL + layout::PAGE);
+    let (mut out, need) = full_outbound(&mem);
+    assert_eq!(out.ask_room(&mem, need), Ok(false));
+    assert_eq!(mem.load32(ring::PENDING_SEND_SIZE, SeqCst), need as u32);
+
+    let mem = Ram::new(ring::CONTROL + layout::PAGE);
+    let (mut out, need) = full_outbound(&mem);
+    mem.store32(ring::READ_INDEX, out.write_index(), SeqCst);
+    assert_eq!(out.ask_room(&mem, need), Ok(true));
+    assert!(
+        out.write(&mem, ring::kind::INBAND, 0, 0, &[], &[0x5A; 48])
+            .is_ok()
+    );
+    // The write took the request back.
+    assert_eq!(mem.load32(ring::PENDING_SEND_SIZE, SeqCst), 0);
+
+    // A bad read index, found by the second look, breaks the ring.
+    let mem = Ram::new(ring::CONTROL + layout::PAGE);
+    let (mut out, need) = full_outbound(&mem);
+    mem.store32(ring::READ_INDEX, 3, SeqCst);
+    assert_eq!(out.ask_room(&mem, need), Err(ring::Broken::Index(3)));
+    assert_eq!(out.broken(), Some(ring::Broken::Index(3)));
+}

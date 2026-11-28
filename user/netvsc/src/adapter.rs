@@ -607,24 +607,31 @@ impl<Q: Memory> State<Q> {
     ) -> Result<bool, Failure> {
         let out = f.outbound();
         let was_broken = self.out.broken().is_some();
-        match self.out.write(&out, kind, flags, xid, ext, body) {
-            Ok(signal) => {
-                if signal {
-                    self.doorbell(f, host)?;
+        // Twice at most: the second write follows a request for room that
+        // found the host had already made it.
+        for _ in 0..2 {
+            let broken = match self.out.write(&out, kind, flags, xid, ext, body) {
+                Ok(signal) => {
+                    if signal {
+                        self.doorbell(f, host)?;
+                    }
+                    return Ok(true);
                 }
-                Ok(true)
+                Err(ring::WriteError::Full { need, .. }) => match self.out.ask_room(&out, need) {
+                    Ok(true) => continue,
+                    Ok(false) => return Ok(false),
+                    Err(b) => b,
+                },
+                Err(ring::WriteError::Broken(b)) => b,
+            };
+            if !was_broken {
+                self.broke(Ring::Outbound, broken);
             }
-            Err(ring::WriteError::Full { need, .. }) => {
-                self.out.ask_room(&out, need);
-                Ok(false)
-            }
-            Err(ring::WriteError::Broken(b)) => {
-                if !was_broken {
-                    self.broke(Ring::Outbound, b);
-                }
-                Ok(false)
-            }
+            return Ok(false);
         }
+        // The room was there and then was not: only a host that moved its
+        // read index back. Its next signal brings netvsc back.
+        Ok(false)
     }
 
     /// Writes the waiting acknowledgements, in order, while they fit.
@@ -770,10 +777,17 @@ impl<Q: Memory> State<Q> {
             let was_broken = self.out.broken().is_some();
             match self.out.free(&out) {
                 Ok(room) if room > DATA_PACKET => {}
-                Ok(_) => {
-                    self.out.ask_room(&out, DATA_PACKET);
-                    break;
-                }
+                Ok(_) => match self.out.ask_room(&out, DATA_PACKET) {
+                    // The host made room after the check: send.
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(b) => {
+                        if !was_broken {
+                            self.broke(Ring::Outbound, b);
+                        }
+                        break;
+                    }
+                },
                 Err(b) => {
                     if !was_broken {
                         self.broke(Ring::Outbound, b);

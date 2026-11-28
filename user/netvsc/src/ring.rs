@@ -272,11 +272,18 @@ impl Outbound {
         Ok(mem.load32(INTERRUPT_MASK, Acquire) == 0)
     }
 
-    /// Asks the host to signal once `need` bytes are free: the pending
-    /// send size, which the next write clears.
-    pub fn ask_room(&mut self, mem: &impl Memory, need: usize) {
+    /// Asks the host to signal once more than `need` bytes are free: the
+    /// pending send size, which the next write clears. Then, after a full
+    /// fence, reads the room again: a host that read the ring after the
+    /// writer found it full but before it saw the request has made room
+    /// and will not signal for it, so true means write now rather than
+    /// wait (Linux's `hv_ringbuffer` and FreeBSD's `vmbus_txbr` check
+    /// again too). Breaks the ring if the host's read index is bad.
+    pub fn ask_room(&mut self, mem: &impl Memory, need: usize) -> Result<bool, Broken> {
         mem.store32(PENDING_SEND_SIZE, need as u32, Release);
         self.asked = true;
+        mem.fence(SeqCst);
+        Ok(self.free(mem)? > need)
     }
 }
 
