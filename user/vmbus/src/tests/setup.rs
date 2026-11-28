@@ -557,35 +557,45 @@ fn a_message_waiting_at_start_is_taken() {
     assert!(r.bus.attached().is_some());
 }
 
+/// FreeBSD's waits between retries: 1 ms, doubling, at most 2 s.
+const BACK_OFFS: [u32; 20] = [
+    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
+    2000,
+];
+
 #[test]
 fn posts_are_retried_while_the_buffers_are_full() {
     let m = Machine::new();
     let cfg = Config {
-        busy_posts: 100,
+        busy_posts: 20,
         ..Config::default()
     };
     let mut r = Rig::new(&m, cfg);
     r.start();
     r.honest();
-    assert_eq!(r.bus.stats().retries, 100);
-    assert_eq!(r.sys.yields, 100);
-    assert_eq!(r.host.busy(), 100);
+    assert_eq!(r.bus.stats().retries, 20);
+    assert_eq!(r.sys.back_offs, BACK_OFFS);
+    assert_eq!(r.host.busy(), 20);
     assert!(r.bus.attached().is_some());
 }
 
 #[test]
-#[should_panic(expected = "vmbus: PostMessage of CONNECT: the host's buffers stayed full")]
-fn posts_retried_100_times_then_a_panic() {
+#[should_panic(
+    expected = "vmbus: PostMessage of CONNECT: HV_STATUS_INSUFFICIENT_BUFFERS (0x13), after 20 retries"
+)]
+fn posts_retried_20_times_then_a_panic() {
     let m = Machine::new();
     let cfg = Config {
-        busy_posts: 101,
+        busy_posts: 21,
         ..Config::default()
     };
     Rig::new(&m, cfg).start();
 }
 
 #[test]
-#[should_panic(expected = "vmbus: PostMessage of CONNECT: HV_STATUS_INVALID_CONNECTION_ID (0x12)")]
+#[should_panic(
+    expected = "vmbus: PostMessage of CONNECT: HV_STATUS_INVALID_CONNECTION_ID (0x12), after 20 retries"
+)]
 fn a_failed_post_is_a_panic() {
     struct Refuses<'a, 'm>(&'a mut Host<'m>);
     impl Hypervisor for Refuses<'_, '_> {

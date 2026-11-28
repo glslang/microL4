@@ -1207,7 +1207,8 @@ fn start_hyperv<'a>(
     let channel_base = address(channel, "the channel frame");
     let pages: [u64; MONITOR_FRAMES as usize] =
         core::array::from_fn(|i| address(monitor + i as u64, "a monitor page"));
-    let bus_start = vmbus_start(channel_base, pages).unwrap_or_else(|e| fail!("servers: {e}"));
+    let bus_start =
+        vmbus_start(channel_base, pages, bi.tsc_hz).unwrap_or_else(|e| fail!("servers: {e}"));
     let nic_start = netvsc_start(channel_base, mnf).unwrap_or_else(|e| fail!("servers: {e}"));
 
     // SINT 2, bound to NB before vmbus gets anything.
@@ -1497,8 +1498,10 @@ fn fill_page(ipc: Ipc, frame: CPtr, addr: u64, scratch: u64) {
     // mapped readable in this VSpace, and no thread writes it while the
     // servers are built: watch, the one other thread in this VSpace yet,
     // waits in its first Recv on F, which writes nothing but its
-    // registers, and the servers, uart, console and from M8 term and tui,
-    // run in VSpaces of their own. `scratch` is a page nothing else maps,
+    // registers, and the servers, uart, console, from M8 term and tui and
+    // from M9 the network servers, run in VSpaces of their own (M9's
+    // probe, in this VSpace, starts only after the last server's VSpace
+    // is built). `scratch` is a page nothing else maps,
     // where the fresh frame was just mapped read-write. The pages do not
     // overlap.
     unsafe {
@@ -1675,8 +1678,9 @@ extern "C" fn net_main(rdi: u64, rsi: u64, rdx: u64, rcx: u64) -> ! {
     let Some(config) = net::Config::from_words([rdi, rsi, rdx, rcx]) else {
         panic!("net: words it refuses: {rdi:#x} {rsi:#x} {rdx:#x} {rcx:#x}")
     };
-    // SAFETY: `start_qemu` mapped a copy of the frame queues' frame, the
-    // one the driver maps, read-write and write-back at
+    // SAFETY: `start_net`, from `start_qemu` or `start_hyperv`, mapped a
+    // copy of the frame queues' frame, the one the driver maps,
+    // read-write and write-back at
     // `libsys::frames::WINDOW` in this VSpace, its only mapping here; it
     // stays mapped for the thread's life. The driver writes it behind the
     // compiler's back, so nothing holds a reference into it: it is

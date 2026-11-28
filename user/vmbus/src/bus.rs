@@ -27,7 +27,10 @@ use libsys::proto::{Refusal, VMBUS_CLIENT, VmbusAttach, VmbusStats, VmbusVersion
 use crate::gpadl::{self, Handles, Pages};
 use crate::msg::{self, Msg};
 use crate::offer::{Offer, Offers};
-use crate::{Hypervisor, MAX_RETRIES, Start, Status, System, VERSIONS, layout, synic};
+use crate::{
+    FIRST_BACK_OFF_MS, Hypervisor, MAX_BACK_OFF_MS, MAX_RETRIES, Start, Status, System, VERSIONS,
+    layout, synic,
+};
 
 /// A step of netvsc's channel set-up that waits for the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -618,27 +621,30 @@ impl<M: Memory> Bus<M> {
         self.phase = Phase::Stopped;
     }
 
-    /// Posts `m` on connection 1, retrying `HV_STATUS_INSUFFICIENT_BUFFERS`
-    /// after a `Yield` up to [`MAX_RETRIES`] times; any other failure, or
-    /// the last retry's, is a panic.
+    /// Posts `m` on connection 1, retrying any failure up to
+    /// [`MAX_RETRIES`] times, as FreeBSD does: after
+    /// [`FIRST_BACK_OFF_MS`], then twice as long each time, at most
+    /// [`MAX_BACK_OFF_MS`]. The last retry's failure is a panic.
     fn post<H: Hypervisor, S: System>(&mut self, m: &Msg, hv: &mut H, sys: &mut S) {
         let mut b = [0u8; msg::MAX];
         let n = m.encode(&mut b);
+        let mut wait = FIRST_BACK_OFF_MS;
         let mut retries = 0;
         loop {
-            match hv.post_message(msg::CONNECTION, msg::MESSAGE_TYPE, &b[..n]) {
-                Status::SUCCESS => return,
-                Status::INSUFFICIENT_BUFFERS if retries < MAX_RETRIES => {
-                    retries += 1;
-                    self.stats.retries += 1;
-                    sys.yield_now();
-                }
-                Status::INSUFFICIENT_BUFFERS => panic!(
-                    "vmbus: PostMessage of {}: the host's buffers stayed full for {MAX_RETRIES} retries",
-                    m.name()
-                ),
-                s => panic!("vmbus: PostMessage of {}: {s}", m.name()),
+            let s = hv.post_message(msg::CONNECTION, msg::MESSAGE_TYPE, &b[..n]);
+            if s == Status::SUCCESS {
+                return;
             }
+            if retries == MAX_RETRIES {
+                panic!(
+                    "vmbus: PostMessage of {}: {s}, after {MAX_RETRIES} retries",
+                    m.name()
+                );
+            }
+            retries += 1;
+            self.stats.retries += 1;
+            sys.back_off(wait);
+            wait = (wait * 2).min(MAX_BACK_OFF_MS);
         }
     }
 }

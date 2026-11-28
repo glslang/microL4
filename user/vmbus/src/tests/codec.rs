@@ -28,7 +28,6 @@ fn start_words_round_trip_and_refuse_what_root_never_passes() {
         bad(1, machine::MONITOR + 8),
         bad(2, machine::MONITOR + page),
         bad(2, machine::MONITOR + 3 * page),
-        bad(3, 1),
         // The three pages inside the channel frame, at its start, middle
         // and end.
         [START.channel, START.channel, START.channel + 2 * page, 0],
@@ -55,6 +54,13 @@ fn start_words_round_trip_and_refuse_what_root_never_passes() {
     ] {
         let w = [START.channel, monitor, monitor + 2 * page, 0];
         assert!(Start::from_words(w).is_some(), "{w:x?}");
+    }
+    // rcx is BootInfo's tsc_hz, whatever it is: 0 when the kernel did not
+    // measure it.
+    for hz in [0, 1, 2_400_000_000, u64::MAX] {
+        let mut w = START.to_words();
+        w[3] = hz;
+        assert_eq!(Start::from_words(w).map(|s| s.tsc_hz), Some(hz));
     }
     assert_eq!(START.channel_page(3), machine::CHANNEL / page + 3);
     assert_eq!(START.monitor2(), machine::MONITOR + page);

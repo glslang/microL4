@@ -383,10 +383,12 @@ impl fmt::Display for HyperVError {
 /// the pages must be consecutive (one `Untyped_Retype` placed them, and
 /// `netvsc` maps the second as monitor page 2), and the words are checked
 /// as `vmbus`'s entry stub checks them, so a word it would refuse fails in
-/// root instead.
+/// root instead. `tsc_hz`, BootInfo's, times vmbus's waits between
+/// `PostMessage` retries.
 pub fn vmbus_start(
     channel: u64,
     pages: [u64; MONITOR_FRAMES as usize],
+    tsc_hz: u64,
 ) -> Result<vmbus::Start, HyperVError> {
     let [monitor, monitor2, event_flags] = pages;
     if monitor.checked_add(PAGE) != Some(monitor2)
@@ -398,6 +400,7 @@ pub fn vmbus_start(
         channel,
         monitor,
         event_flags,
+        tsc_hz,
     }
     .to_words();
     vmbus::Start::from_words(words).ok_or(HyperVError::Vmbus(words))
@@ -871,8 +874,8 @@ mod tests {
         let channel = 0x1_4000_0000;
         let m = 0x0FF3_D000;
         let pages = [m, m + PAGE, m + 2 * PAGE];
-        let s = vmbus_start(channel, pages).unwrap();
-        assert_eq!(s.to_words(), [channel, m, m + 2 * PAGE, 0]);
+        let s = vmbus_start(channel, pages, 2_400_000_000).unwrap();
+        assert_eq!(s.to_words(), [channel, m, m + 2 * PAGE, 2_400_000_000]);
         assert_eq!(vmbus::Start::from_words(s.to_words()), Some(s));
         assert_eq!(s.monitor2(), m + PAGE);
         // netvsc's monitor window: monitor page 2, then the event flags,
@@ -907,7 +910,7 @@ mod tests {
             [u64::MAX - PAGE + 1, 0, PAGE],
         ] {
             assert_eq!(
-                vmbus_start(channel, pages),
+                vmbus_start(channel, pages, 0),
                 Err(HyperVError::Pages(pages)),
                 "{pages:x?}"
             );
@@ -915,7 +918,7 @@ mod tests {
         let pages = [m, m + PAGE, m + 2 * PAGE];
         for bad in [0, channel + PAGE, channel + (1 << 20), 1 << 52] {
             assert_eq!(
-                vmbus_start(bad, pages),
+                vmbus_start(bad, pages, 0),
                 Err(HyperVError::Vmbus([bad, m, m + 2 * PAGE, 0])),
                 "{bad:#x}"
             );
@@ -923,11 +926,11 @@ mod tests {
         // The pages inside the channel frame, or at 0.
         let inside = [channel + PAGE, channel + 2 * PAGE, channel + 3 * PAGE];
         assert!(matches!(
-            vmbus_start(channel, inside),
+            vmbus_start(channel, inside, 0),
             Err(HyperVError::Vmbus(_))
         ));
         assert!(matches!(
-            vmbus_start(channel, [0, PAGE, 2 * PAGE]),
+            vmbus_start(channel, [0, PAGE, 2 * PAGE], 0),
             Err(HyperVError::Vmbus(_))
         ));
         for bad in [0, 0x1000, 0x30_0000] {
@@ -952,7 +955,7 @@ mod tests {
 
     #[test]
     fn the_hyperv_line() {
-        let s = vmbus_start(0x1_4000_0000, [0xFF3_D000, 0xFF3_E000, 0xFF3_F000]).unwrap();
+        let s = vmbus_start(0x1_4000_0000, [0xFF3_D000, 0xFF3_E000, 0xFF3_F000], 0).unwrap();
         let line = |mnf| {
             HyperVLine {
                 irq: 1,

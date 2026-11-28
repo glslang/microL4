@@ -122,9 +122,16 @@ pub mod layout {
     };
 }
 
-/// `Hypervisor_PostMessage` retries after `HV_STATUS_INSUFFICIENT_BUFFERS`,
-/// each after a `Yield`, before vmbus panics.
-pub const MAX_RETRIES: u32 = 100;
+/// `Hypervisor_PostMessage` retries after any failure before vmbus
+/// panics: FreeBSD's `vmbus_msghc_exec` retries every failed post 20
+/// times, waiting 1 ms first and twice as long each time up to 2 s
+/// (`sys/dev/hyperv/vmbus/vmbus.c`), which lets a busy host's buffers
+/// drain; about 20 s in all.
+pub const MAX_RETRIES: u32 = 20;
+/// The wait before the first retry, in milliseconds.
+pub const FIRST_BACK_OFF_MS: u32 = 1;
+/// The longest wait between retries, in milliseconds.
+pub const MAX_BACK_OFF_MS: u32 = 2000;
 
 /// The Hypervisor capability's four invocations (`docs/abi.md`,
 /// "Hypervisor"), on the unrestricted capability in slot 3. On the target
@@ -158,13 +165,14 @@ pub trait System {
     fn mint(&mut self, data: u64);
     /// Revokes slot 8 and deletes it: netvsc's copies go too.
     fn revoke(&mut self);
-    /// `Yield`, before a `PostMessage` retry.
-    fn yield_now(&mut self);
+    /// Waits `ms` milliseconds before a `PostMessage` retry.
+    fn back_off(&mut self, ms: u32);
 }
 
 /// Root's arguments (`docs/design.md`, "Arguments"): the physical bases of
 /// netvsc's channel frame, of the two monitor pages and of the event-flags
-/// page. `rdi`, `rsi`, `rdx`; `rcx` is 0.
+/// page in `rdi`, `rsi` and `rdx`, and BootInfo's `tsc_hz` in `rcx`, which
+/// times the waits between `PostMessage` retries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Start {
     /// The channel frame's physical base, 2 MiB-aligned.
@@ -174,6 +182,9 @@ pub struct Start {
     /// The event-flags page's: the page after monitor page 2, since root
     /// retypes the three in one `Untyped_Retype`.
     pub event_flags: u64,
+    /// The time-stamp counter's rate, BootInfo's `tsc_hz`; 0 if the
+    /// kernel did not measure it.
+    pub tsc_hz: u64,
 }
 
 impl Start {
@@ -183,16 +194,16 @@ impl Start {
     pub const CHANNEL_SIZE: u64 = layout::CHANNEL_PAGES * layout::PAGE;
 
     pub const fn to_words(&self) -> [u64; 4] {
-        [self.channel, self.monitor, self.event_flags, 0]
+        [self.channel, self.monitor, self.event_flags, self.tsc_hz]
     }
 
     /// The arguments in `w`, or `None` for words root never passes: a
     /// channel base of 0, not 2 MiB-aligned or whose frame reaches 2^52;
     /// a monitor page of 0, not page-aligned or reaching 2^52; an
     /// event-flags page that is not the page after monitor page 2; any of
-    /// those three pages inside the channel frame; or a non-zero `rcx`.
+    /// those three pages inside the channel frame. Any `tsc_hz` is taken.
     pub fn from_words(w: [u64; 4]) -> Option<Start> {
-        let [channel, monitor, event_flags, rest] = w;
+        let [channel, monitor, event_flags, tsc_hz] = w;
         let page = layout::PAGE;
         let frame_ok = channel != 0
             && channel % Self::CHANNEL_SIZE == 0
@@ -208,10 +219,11 @@ impl Start {
         // The three pages are consecutive, so they meet the frame only if
         // one of their ends falls inside it.
         let apart = monitor + 3 * page <= channel || monitor >= channel + Self::CHANNEL_SIZE;
-        (frame_ok && pages_ok && apart && rest == 0).then_some(Start {
+        (frame_ok && pages_ok && apart).then_some(Start {
             channel,
             monitor,
             event_flags,
+            tsc_hz,
         })
     }
 

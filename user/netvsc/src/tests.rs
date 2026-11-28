@@ -72,7 +72,7 @@ impl vmbus::System for Sys {
         self.mints.push(data);
     }
     fn revoke(&mut self) {}
-    fn yield_now(&mut self) {}
+    fn back_off(&mut self, _ms: u32) {}
 }
 
 /// netvsc's restricted capability, on the mock host, which fails a test
@@ -332,6 +332,7 @@ fn vmbus_start() -> vmbus::Start {
         channel: machine::CHANNEL,
         monitor: machine::MONITOR,
         event_flags: machine::EVENT_FLAGS,
+        tsc_hz: 2_000_000_000,
     }
 }
 

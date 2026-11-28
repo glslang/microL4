@@ -9,7 +9,7 @@
 //! host-tested, and sends it by `Call` through [`crate::invoke::invoke`].
 //! A hypercall that the hypervisor refuses still succeeds as an
 //! invocation: its status is the result, and the caller decides, as
-//! `vmbus` retries `HV_STATUS_INSUFFICIENT_BUFFERS`.
+//! `vmbus` retries a failed `PostMessage`.
 
 use core::fmt;
 

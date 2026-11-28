@@ -24,6 +24,7 @@ const START: Start = Start {
     channel: machine::CHANNEL,
     monitor: machine::MONITOR,
     event_flags: machine::EVENT_FLAGS,
+    tsc_hz: 2_000_000_000,
 };
 
 /// netvsc's channel and connection in the mock's default offers.
@@ -51,7 +52,8 @@ struct Recorder {
     signals: u64,
     mints: Vec<u64>,
     revokes: u64,
-    yields: u64,
+    /// Each `back_off`'s wait, in milliseconds.
+    back_offs: Vec<u32>,
 }
 
 impl System for Recorder {
@@ -67,8 +69,8 @@ impl System for Recorder {
     fn revoke(&mut self) {
         self.revokes += 1;
     }
-    fn yield_now(&mut self) {
-        self.yields += 1;
+    fn back_off(&mut self, ms: u32) {
+        self.back_offs.push(ms);
     }
 }
 

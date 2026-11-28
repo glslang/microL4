@@ -44,6 +44,7 @@ impl Hypervisor for Kernel {
 struct Os<'a> {
     ipc: Ipc,
     console: &'a libsys::console::Client,
+    tsc_hz: u64,
 }
 
 fn own(index: u64) -> Slot {
@@ -79,8 +80,21 @@ impl System for Os<'_> {
             .unwrap_or_else(|e| panic!("vmbus: revoking netvsc's capability: {e}"));
     }
 
-    fn yield_now(&mut self) {
-        libsys::yield_now();
+    /// Spins on the time-stamp counter, yielding to any thread of
+    /// vmbus's priority meanwhile; with no rate in BootInfo it takes the
+    /// counter as 4 GHz, so the wait is no shorter than asked on any
+    /// slower one.
+    fn back_off(&mut self, ms: u32) {
+        let hz = if self.tsc_hz == 0 {
+            4_000_000_000
+        } else {
+            self.tsc_hz
+        };
+        let ticks = hz / 1000 * u64::from(ms);
+        let start = libsys::cpu::rdtsc();
+        while libsys::cpu::rdtsc().wrapping_sub(start) < ticks {
+            libsys::yield_now();
+        }
     }
 }
 
@@ -90,7 +104,7 @@ impl System for Os<'_> {
 /// [`Start::from_words`].
 ///
 /// It blocks only in its receive, in calls to console, which always
-/// answer, and in `Yield`; it answers its clients by `ReplyRecv`, or a
+/// answer, and in `Yield` (spinning between `PostMessage` retries); it answers its clients by `ReplyRecv`, or a
 /// saved `Attach` by `Send` on slot 7, never waiting for them.
 pub fn run<M: Memory>(start: Start, sim: M, sief: M) -> ! {
     // The statics are a copy of the root task's, which name its slots.
@@ -107,6 +121,7 @@ pub fn run<M: Memory>(start: Start, sim: M, sief: M) -> ! {
     let mut os = Os {
         ipc,
         console: &console,
+        tsc_hz: start.tsc_hz,
     };
     let mut bus = Bus::new(start, sim, sief);
     bus.start(&mut hv, &mut os);

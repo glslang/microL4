@@ -112,7 +112,7 @@ impl vmbus::System for Sys {
     fn revoke(&mut self) {
         panic!("vmbus revoked netvsc's capability");
     }
-    fn yield_now(&mut self) {}
+    fn back_off(&mut self, _ms: u32) {}
 }
 
 /// netvsc's restricted capability on the shared host, which fails a test
