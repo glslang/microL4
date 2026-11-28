@@ -2,6 +2,8 @@
 //! message codec, the message slot's delivery and `MessagePending`, GPADL
 //! reassembly and its checks, the hypercalls' checks, and the devices.
 
+mod netvsc;
+
 use core::sync::atomic::Ordering::Relaxed;
 
 use libsys::hyperv::{Restriction, Status};

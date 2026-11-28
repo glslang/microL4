@@ -682,7 +682,7 @@ fn start_words_round_trip_and_refuse_what_root_never_passes() {
         [0x10_0000, 0, 0, 0],
         [0x20_1000, 0, 0, 0],
         [Start::PHYSICAL, 0, 0, 0],
-        [u64::MAX & !0x1F_FFFF, 0, 0, 0],
+        [!0x1F_FFFF, 0, 0, 0],
         [0x20_0000, 2, 0, 0],
         [0x20_0000, 0, 1, 0],
         [0x20_0000, 0, 0, 1],

@@ -92,23 +92,13 @@ impl Signal for Cap<'_, '_> {
 }
 
 /// How a rig is made.
+#[derive(Default)]
 struct Setup {
     host: hvmock::Config,
     nic: nic::Config,
     mnf: bool,
     /// Indices to start both rings at, before netvsc reads them.
     ring_start: u32,
-}
-
-impl Default for Setup {
-    fn default() -> Setup {
-        Setup {
-            host: hvmock::Config::default(),
-            nic: nic::Config::default(),
-            mnf: false,
-            ring_start: 0,
-        }
-    }
 }
 
 /// The frame queues' memory: its used part.

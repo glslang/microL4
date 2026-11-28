@@ -417,6 +417,12 @@ impl Netvsc {
         xid
     }
 
+    /// Expects an acknowledgement of `xid`: for a receive-buffer packet a
+    /// test injects whole with [`Netvsc::inject`].
+    pub fn expect_ack(&self, xid: u64) {
+        self.0.borrow_mut().outstanding.insert(xid, Vec::new());
+    }
+
     /// The send completions held back, in the order they would go.
     pub fn held(&self) -> Vec<u64> {
         self.0.borrow().held.clone()
@@ -826,14 +832,17 @@ impl Inner {
                 self.seen
                     .requests
                     .push(format!("RNDIS SET {oid:#x} {:#x}", value.unwrap_or(0)));
-                let status = if oid == rndis::OID_PACKET_FILTER && inlen == 4 && value.is_some() {
-                    if self.cfg.filter_status == rndis::SUCCESS {
-                        self.seen.filter = value.expect("checked");
+                let status = match value {
+                    Some(v) if oid == rndis::OID_PACKET_FILTER && inlen == 4 => {
+                        if self.cfg.filter_status == rndis::SUCCESS {
+                            self.seen.filter = v;
+                        }
+                        self.cfg.filter_status
                     }
-                    self.cfg.filter_status
-                } else {
-                    self.fault(format!("RNDIS SET {oid:#x} of {inlen} bytes at {inoff}"));
-                    rndis::NOT_SUPPORTED
+                    _ => {
+                        self.fault(format!("RNDIS SET {oid:#x} of {inlen} bytes at {inoff}"));
+                        rndis::NOT_SUPPORTED
+                    }
                 };
                 if !self.rndis_up {
                     self.fault("RNDIS SET before INITIALIZE".into());

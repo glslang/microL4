@@ -817,6 +817,9 @@ impl<Q: Memory> State<Q> {
         f: &Frame<'_, M>,
         host: &mut impl Signal,
     ) -> Result<(), Failure> {
+        if self.inb.broken().is_some() {
+            return Ok(());
+        }
         let inb = f.inbound();
         let mut buf = [0u8; MAX_PACKET];
         loop {
