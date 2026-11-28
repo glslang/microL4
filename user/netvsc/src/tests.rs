@@ -10,8 +10,11 @@
 //!   every wrap, and both signalling paths.
 //! - [`hostile`]: what a host may write that netvsc must count and
 //!   refuse, never follow, and a proptest of hostile packets.
+//! - [`e2e`]: the Hyper-V done-when on the host with `vmbus`, `net` and
+//!   the end-to-end tests' scripted peer, and its interleavings.
 
 mod data;
+mod e2e;
 mod hostile;
 mod setup;
 

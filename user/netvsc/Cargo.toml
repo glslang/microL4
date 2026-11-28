@@ -22,6 +22,9 @@ libsys = { path = "../libsys" }
 # against, and vmbus, which opens netvsc's channel on it as on Hyper-V.
 hvmock = { path = "../hvmock" }
 vmbus = { path = "../vmbus" }
+# The end-to-end tests: the stack and its link to the frame queues, which
+# net runs beside netvsc.
+net = { path = "../net" }
 # The proptest of hostile host packets. `std` alone: no forking, timeouts
 # or failure files, which Miri forbids.
 proptest = { version = "1", default-features = false, features = ["std"] }
