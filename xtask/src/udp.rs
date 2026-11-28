@@ -595,6 +595,28 @@ mod tests {
         );
     }
 
+    /// Review (M9, reviewer S): an echo longer than its datagram, its
+    /// datagram's bytes and then more, is altered too: the comparison is
+    /// of the whole echo, not of a prefix.
+    #[test]
+    fn an_echo_longer_than_its_datagram_fails() {
+        let to = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+        let mut r = Report::new(to, 3, Limits::SCENARIO);
+        r.sent = 3;
+        let mut long = payload(1);
+        long.push(0);
+        r.take(&long, to);
+        assert_eq!(
+            r.problems(),
+            ["an altered echo of datagram 1: 10 bytes, not 9"]
+        );
+        assert_eq!((r.echoed, r.missing()), (0, vec![0, 1, 2]));
+        assert!(r.failure().unwrap().contains("missing 0-2"));
+        // The datagram itself still counts once it comes.
+        r.take(&payload(1), to);
+        assert_eq!((r.echoed, r.missing()), (1, vec![0, 2]));
+    }
+
     #[test]
     fn an_echo_from_another_port_fails() {
         let (r, _) = run(Peer::OtherPort(3), 20, SHORT);
