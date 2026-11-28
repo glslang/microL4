@@ -11,6 +11,10 @@
 //!   and `net`, which lose nothing.
 //! - [`model`]: the model's own checks, each failing a driver that breaks
 //!   its rule.
+//! - [`slirp`]: the model network behind the device, libslirp's part
+//!   (ARP and ping for `10.0.2.2`, datagrams to `10.0.2.15` port 7), and
+//!   its tests through the driver: what the end-to-end test with `net`
+//!   needs.
 
 use std::vec::Vec;
 
@@ -24,6 +28,7 @@ mod model;
 mod props;
 mod rings;
 mod setup;
+pub mod slirp;
 
 use device::{Device, Port};
 
