@@ -7164,7 +7164,13 @@ last `stats:` line with every counter that is not 0. 170 cases in eight
 groups: `ethernet` (18), `arp` (33), `ipv4` (32), `icmp` (22), `udp` (16),
 `echo` (31), `checksum` (9) and `held` (9, waiting packets), with a case
 for every row of the tables above; the expected frames were computed by
-an independent model written for the purpose, not by the stack.
+an independent model written for the purpose, not by the stack:
+`tools/net-goldens/` (Python, its own checksum and frame builders, no
+code shared with `net`), whose `gen.py` and then `extra.py` write the
+whole directory (`python3 -I tools/net-goldens/gen.py user/net/golden`).
+A change to the stack's rules changes the model first, so a golden never
+comes from the code it checks; the M9 fix round's echo and source rules
+were made that way.
 `MICROL4_BLESS=1` rewrites a failing case from the stack's output, keeping
 its comments, `config:` and steps (`MICROL4_BLESS=1 cargo xtask test` does
 it too). Beside them: a proptest that feeds random bytes and random mutations of valid

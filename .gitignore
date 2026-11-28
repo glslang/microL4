@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # proptest failure persistence (model/tests/random.rs): minimal
 # reproductions worth keeping become named tests in model/tests/scenarios.rs
 *.regressions
+
+# Python's bytecode, from tools/net-goldens
+__pycache__/
