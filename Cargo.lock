@@ -77,6 +77,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hvmock"
+version = "0.1.0"
+dependencies = [
+ "libsys",
+]
+
+[[package]]
 name = "kernel"
 version = "0.1.0"
 dependencies = [
