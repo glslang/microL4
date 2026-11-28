@@ -281,10 +281,13 @@ pub struct Plan {
 
 impl Plan {
     /// The plan for the virtio-net function `f`, whose BARs `bars` are
-    /// sized: the first capability of each type the driver uses that
-    /// names a memory BAR, and the MSI-X capability, each region, the
-    /// table and the PBA inside its BAR, no region over 60 KiB, and no
-    /// page of a region shared with the table, the PBA or another region.
+    /// sized, checked in this order: the first capability of each type
+    /// the driver uses that names a memory BAR; the MSI-X capability, its
+    /// table and PBA in memory BARs; each region no shorter than the
+    /// driver takes and at most 60 KiB, inside its BAR, whole pages of it
+    /// too; an even `notify_off_multiplier`; the table and the PBA inside
+    /// their BARs, entry 0 in one page; and no page of a region shared
+    /// with the table, the PBA or another region.
     pub fn virtio_net(f: &Function, cfg: &impl Config, bars: &Bars) -> Result<Plan, Refusal> {
         let mut found: [Option<Found>; 3] = [None; 3];
         for at in f.capabilities.with_id(CAP_VENDOR) {
@@ -368,7 +371,7 @@ impl Plan {
             regions[kind.index()] = r;
         }
         let multiplier = caps[Kind::Notify.index()].multiplier;
-        if multiplier % 2 != 0 {
+        if !multiplier.is_multiple_of(2) {
             return Err(Refusal::OddMultiplier(multiplier));
         }
         let table =

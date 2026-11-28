@@ -346,7 +346,7 @@ pub fn run(bi: &BootInfo) -> ! {
     let mut snapshot = [0u8; ::pci::HEADER_BYTES];
     {
         let cfg = ecam.function(f.address);
-        for (i, dword) in snapshot.chunks_exact_mut(4).enumerate() {
+        for (i, dword) in snapshot.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             dword.copy_from_slice(&cfg.read32(4 * i as u16).to_le_bytes());
         }
     }
@@ -375,7 +375,7 @@ pub fn run(bi: &BootInfo) -> ! {
     );
     look_at_regions(ipc, &plan, &pages);
 
-    for (i, row) in snapshot.chunks_exact(16).enumerate() {
+    for (i, row) in snapshot.as_chunks::<16>().0.iter().enumerate() {
         let mut line = Line::new();
         for b in row {
             line.push(" ", format_args!("{b:02x}"));
