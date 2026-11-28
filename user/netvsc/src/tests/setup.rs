@@ -138,11 +138,22 @@ fn nvsp_falls_back_from_5_to_4_and_2_with_ndis_6_1() {
         assert_eq!(r.a.step(), Step::Up);
         let ndis = if inits.len() == 1 { "6.30" } else { "6.1" };
         assert_eq!(r.nic.seen().requests, requests(inits, ndis));
+        // One line for each version the host refused, with why, then up.
+        let (up, fallbacks) = r.lines.split_last().unwrap();
         assert!(
-            r.lines[0].starts_with(&format!("netvsc: up: {line}, ")),
+            up.starts_with(&format!("netvsc: up: {line}, ")),
             "{:?}",
             r.lines
         );
+        assert_eq!(fallbacks.len(), inits.len() - 1, "{:?}", r.lines);
+        for (l, next) in fallbacks.iter().zip(["4", "2"]) {
+            assert!(
+                l.starts_with("netvsc: NVSP ")
+                    && l.contains(" refused (status 0x")
+                    && l.ends_with(&format!("); asking for {next}")),
+                "{l}"
+            );
+        }
         assert_eq!(
             r.a.stats().ndis,
             u64::from(nvs::ndis_for(r.nic.seen().nvsp.unwrap()))

@@ -207,6 +207,14 @@ pub enum Note {
     Link(bool),
     /// A ring is broken and no longer used.
     Broken(Ring, ring::Broken),
+    /// `netvsc: NVSP <v> refused (<why>); asking for <next>`: the host's
+    /// answer to an NVSP INIT that did not take, kept so a fallback on a
+    /// real host says why.
+    Fallback { nvsp: u32, why: nvs::Bad, next: u32 },
+    /// `netvsc: the host failed a send (<status>); further failures are
+    /// counted as ignored`: the first send completion whose status is not
+    /// success, printed once.
+    SendFailed(Option<u32>),
 }
 
 const fn up_down(up: bool) -> &'static str {
@@ -238,6 +246,19 @@ impl fmt::Display for Note {
             Note::Broken(Ring::Outbound, b) => write!(
                 f,
                 "netvsc: the outbound ring is broken ({b}); it is no longer written"
+            ),
+            Note::Fallback { nvsp, why, next } => write!(
+                f,
+                "netvsc: NVSP {} refused ({why}); asking for {}",
+                NvspVersion(nvsp),
+                NvspVersion(next)
+            ),
+            Note::SendFailed(Some(s)) => write!(
+                f,
+                "netvsc: the host failed a send (status {s:#x}); further failures are counted as ignored"
+            ),
+            Note::SendFailed(None) => f.write_str(
+                "netvsc: the host failed a send (a completion that is no RNDIS_ACK); further failures are counted as ignored",
             ),
         }
     }
@@ -331,6 +352,8 @@ struct State<Q> {
     mac: Mac,
     link: bool,
     notes: [Option<Note>; NOTES],
+    /// A failed send completion was noted ([`Note::SendFailed`]).
+    send_failed: bool,
     stats: NetvscStats,
     failure: Option<Failure>,
 }
@@ -399,6 +422,7 @@ impl<M: Memory, Q: Memory> Adapter<M, Q> {
                 mac: Mac::ZERO,
                 link: false,
                 notes: [None; NOTES],
+                send_failed: false,
                 stats: NetvscStats::default(),
                 failure: None,
             },
@@ -890,10 +914,15 @@ impl<Q: Memory> State<Q> {
             if s < self.sections && self.in_flight & bit != 0 {
                 self.in_flight &= !bit;
                 self.stats.completions += 1;
-                if nvs::ack_status(body) != Some(nvs::STATUS_OK) {
+                let status = nvs::ack_status(body);
+                if status != Some(nvs::STATUS_OK) {
                     // The host says it did not send it: counted; the
-                    // section is free all the same.
+                    // section is free all the same. The first is printed.
                     self.stats.ignored += 1;
+                    if !self.send_failed {
+                        self.send_failed = true;
+                        self.note(Note::SendFailed(status));
+                    }
                 }
             } else {
                 self.stats.ignored += 1;
@@ -925,7 +954,12 @@ impl<Q: Memory> State<Q> {
                     self.stats.ndis = u64::from(self.ndis);
                     self.step = Step::NdisConf;
                 }
-                Err(_) if usize::from(i) + 1 < nvs::VERSIONS.len() => {
+                Err(why) if usize::from(i) + 1 < nvs::VERSIONS.len() => {
+                    self.note(Note::Fallback {
+                        nvsp: nvs::VERSIONS[usize::from(i)],
+                        why,
+                        next: nvs::VERSIONS[usize::from(i) + 1],
+                    });
                     self.step = Step::Init(i + 1);
                 }
                 Err(_) => return Err(Failure::NoVersion),

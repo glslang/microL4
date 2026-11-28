@@ -246,10 +246,25 @@ fn completions_of_nothing_are_counted_and_ignored() {
     assert_eq!(r.a.in_flight(), 0);
     let s = r.a.stats();
     assert_eq!((s.completions, s.ignored), (1, 9));
-    r.nic.release(|_| {});
+    // The first failed send is printed with its status, once.
+    let failed = |r: &Rig<'_>| {
+        r.lines
+            .iter()
+            .filter(|l| l.starts_with("netvsc: the host failed a send (status "))
+            .count()
+    };
+    assert_eq!(failed(&r), 1, "{:?}", r.lines);
+    r.send(&frame(PEER, 60, 2));
+    r.run();
+    r.nic
+        .inject(kind::COMP, 0, ring::xid::send(0), &[], &ack(hn::FAILED));
     r.run();
     assert_eq!(r.a.stats().ignored, 10);
-    assert_eq!(r.a.stats().completions, 1);
+    assert_eq!(failed(&r), 1, "{:?}", r.lines);
+    r.nic.release(|_| {});
+    r.run();
+    assert_eq!(r.a.stats().ignored, 12);
+    assert_eq!(r.a.stats().completions, 2);
 }
 
 #[test]
