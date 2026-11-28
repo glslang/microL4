@@ -135,14 +135,22 @@ impl Offer {
     /// Connection IDs have 24 bits (TLFS `HV_CONNECTION_ID`).
     pub const CONNECTIONS: u32 = 1 << 24;
 
+    /// Whether the host may monitor the channel (`HASMNF`).
+    pub fn has_mnf(&self) -> bool {
+        self.flags1 & 1 != 0
+    }
+
     /// Whether it is a primary netvsc channel: the one vmbus opens.
     pub fn is_netvsc(&self) -> bool {
         self.kind == NETVSC && self.subchannel == 0
     }
 }
 
-/// `vmbus: offer <id>: <name>, connection <c>`, and `, sub-channel <n>`
-/// for a sub-channel.
+/// `vmbus: offer <id>: <name>, connection <c>`, then `, sub-channel <n>`
+/// for a sub-channel and `, monitor trigger <t>` for an offer with
+/// `HASMNF`: with `netvsc.mnf=1`, netvsc signals such a channel through
+/// the monitor page and any other with `SignalEvent`, so the log says
+/// which the host took.
 impl fmt::Display for Offer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "vmbus: offer {}: ", self.channel)?;
@@ -153,6 +161,9 @@ impl fmt::Display for Offer {
         write!(f, ", connection {}", self.connection)?;
         if self.subchannel != 0 {
             write!(f, ", sub-channel {}", self.subchannel)?;
+        }
+        if self.has_mnf() {
+            write!(f, ", monitor trigger {}", self.montrig)?;
         }
         Ok(())
     }

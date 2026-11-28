@@ -7478,7 +7478,10 @@ otherwise `vmbus` prints `vmbus: version <major>.<minor>`.
 ID (`chm_chanid`), type and instance GUIDs, sub-channel index, `chm_flags1`
 (bit 0 `HASMNF`), `chm_montrig`, `chm_flags2` and connection ID
 (`chm_connid`); it prints each, `vmbus: offer <id>: <name>, connection
-<c>`, with `, sub-channel <n>` for a sub-channel, naming the types it knows
+<c>`, with `, sub-channel <n>` for a sub-channel and `, monitor trigger
+<t>` for an offer with `HASMNF` (so `net-mnf`'s log shows whether netvsc
+signals through the monitor page or, for an offer without it, with
+`SignalEvent`), naming the types it knows
 (netvsc `f8615163-df3e-46c5-913f-f2d2f965ed0e`, storvsc, synthetic video,
 keyboard, mouse, heartbeat, shutdown, time sync, KVP and VSS, from memory)
 and printing other GUIDs as FreeBSD does. A channel ID of 0 or above

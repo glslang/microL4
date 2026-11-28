@@ -365,6 +365,16 @@ fn guids_print_as_freebsd_does_and_name_their_devices() {
         format!("{o}"),
         "vmbus: offer 17: netvsc, connection 99, sub-channel 2"
     );
+    // HASMNF: the host may monitor the channel, through this trigger.
+    o.subchannel = 0;
+    o.flags1 = 1;
+    o.montrig = 77;
+    assert_eq!(
+        format!("{o}"),
+        "vmbus: offer 17: netvsc, connection 99, monitor trigger 77"
+    );
+    o.flags1 = 0xFE;
+    assert_eq!(format!("{o}"), "vmbus: offer 17: netvsc, connection 99");
 }
 
 #[test]

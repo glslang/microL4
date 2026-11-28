@@ -137,11 +137,11 @@ impl<'m> Rig<'m> {
 fn default_lines() -> Vec<String> {
     vec![
         "vmbus: version 4.0".into(),
-        "vmbus: offer 1: storvsc, connection 1".into(),
+        "vmbus: offer 1: storvsc, connection 1, monitor trigger 1".into(),
         "vmbus: offer 3: heartbeat, connection 3".into(),
-        "vmbus: offer 14: netvsc, connection 14".into(),
+        "vmbus: offer 14: netvsc, connection 14, monitor trigger 14".into(),
         format!(
-            "vmbus: offer 17: {}, connection 17",
+            "vmbus: offer 17: {}, connection 17, monitor trigger 17",
             hvmock::wire::guid_text(&hvmock::OfferSpec::unknown(17, 17).kind)
         ),
         "vmbus: netvsc channel 14 open, connection 14".into(),

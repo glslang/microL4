@@ -209,7 +209,9 @@ fn offers_in_any_order() {
         assert_eq!(r.host.gpadl(H0).unwrap().channel, first.channel);
         assert_eq!(r.bus.offers().len(), 4);
         assert_eq!(r.sys.lines.len(), 1 + 4 + 1);
-        let sub = String::from("vmbus: offer 15: netvsc, connection 15, sub-channel 1");
+        let sub = String::from(
+            "vmbus: offer 15: netvsc, connection 15, sub-channel 1, monitor trigger 15",
+        );
         assert!(r.sys.lines.contains(&sub));
     }
 }
