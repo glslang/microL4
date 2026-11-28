@@ -26,8 +26,10 @@ l4-<name>.rgb565. At a udp_echo: <n> (M9), once the line above it has
 matched and before any later step, Send-L4Udp.ps1 pings the guest and
 sends it n datagrams to echo, at the address of the net.ip= word in the
 scenario's cmdline:; its lines are logged as l4: lines, and a datagram
-missing or a bad echo fails the run. The guest prints nothing while the
-datagrams go, so no COM1 line waits on the exchange. The scenario's
+missing or a bad echo fails the run. Nothing reads the pipe while the
+datagrams go, and net may print its gateway line meanwhile, so run a
+udp_echo: scenario with -Raw, which copies COM1's bytes off the pipe as
+they come. The scenario's
 kernel:, exit:, timeout:, qemu_args: and nic: are QEMU's and are ignored,
 and so is cmdline: but for net.ip=: the VHDX carries its own command line.
 

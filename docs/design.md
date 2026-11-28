@@ -4442,6 +4442,10 @@ as the TLFS's "Establishing the Hypercall Interface" lists
    does when no guest OS identity was accepted, nothing calls the page:
    there is no Hypervisor capability and no SynIC, slots 12 to 14 are null,
    and the boot log says why ([ADR 0029](adr/0029-hypercall-page-read-back.md)).
+   If it reads back enabled but at another page, which no hypervisor
+   should do, the kernel clears the enable bit again
+   (`HypercallMsr::off`), so no overlay is left over memory that may
+   become untyped, and boots the same way (M9 review).
 
 Hypercall input lives in a page-aligned kernel BSS page, ordinary RAM and
 not an overlay page, as the TLFS requires, and the kernel passes its guest
@@ -4479,8 +4483,9 @@ cannot come back, since boot checked both privileges, nor
 common input, alignment and code errors, since the kernel builds the input
 value and block. Linux retries `INVALID_CONNECTION_ID`, except on an
 `INITIATE_CONTACT`, where it means the host wants an older message
-connection, and the buffer errors (`hv_post_message`, from memory); that is
-`vmbus`'s policy, not the kernel's.
+connection, and the buffer errors (`hv_post_message`, from memory), and
+FreeBSD retries every failure; `vmbus` retries as FreeBSD does
+([`vmbus`](#vmbus)). That is `vmbus`'s policy, not the kernel's.
 
 ### SynIC (M9)
 
@@ -6832,7 +6837,7 @@ by `from_words` in its entry stub, which panics on words it refuses.
 | Thread | `rdi` | `rsi` | `rdx` | `rcx` |
 | --- | --- | --- | --- | --- |
 | `virtio-net` | the DMA frame's physical base | the common and notify regions, 32 bits each, common in the low half: each its offset plus its length shifted up 16 bits | the device region, the same | `notify_off_multiplier` |
-| `vmbus` | the channel frame's physical base | the monitor pages' physical base (two pages) | the event-flags page's physical address | 0 |
+| `vmbus` | the channel frame's physical base | the monitor pages' physical base (two pages) | the event-flags page's physical address | BootInfo's `tsc_hz`, for the waits between `PostMessage` retries |
 | `netvsc` | the channel frame's physical base | 1 with `netvsc.mnf=1`, else 0 | 0 | 0 |
 | `net` | the address (bits 0 to 31) and prefix length (bits 32 to 39) | the gateway | 0 | 0 |
 
@@ -6934,7 +6939,7 @@ Each server's VSpace and CNode cost root one slot per image page and a few
 more ([Capabilities](#capabilities-2)), so they grow with M9's image:
 202 frames in the dev profile once root carries `vmbus` and `netvsc` too,
 on QEMU as well. Measured on QEMU with that image, the boot regions taking
-about 337 slots: `test=pci` ends at 437 of the root CNode's 4,096 slots,
+about 337 slots: `test=pci` ends at 439 of the root CNode's 4,096 slots,
 of which the carving takes 99 (ECAM's 2 MiB frame 15, the MSI-X table's
 page 25, the region pages 55, 3 and 1), where the design had allowed about
 150; `test=virtio_net` uses about 1,020 and `test=net` about 1,206, where
@@ -7568,9 +7573,16 @@ counted and ignored. With no timer, a host that never answers leaves
 `vmbus` waiting. There is no line per step, so the log's last `vmbus:` line
 says only how far contact and the offers went (the version, the offers, or
 the channel open), not which GPADL or open the host left unanswered.
-`PostMessage` answering `HV_STATUS_INSUFFICIENT_BUFFERS` (`0x13`) is
-retried after a `Yield`, at most 100 times (`vmbus::MAX_RETRIES`), then a
-panic; any other failed post is a panic.
+A failed `PostMessage`, whatever its status, is retried as FreeBSD's
+`vmbus_msghc_exec` retries it (`sys/dev/hyperv/vmbus/vmbus.c`): at most 20
+times (`vmbus::MAX_RETRIES`), waiting 1 ms first and twice as long each
+time up to 2 s, about 20 s in all, then a panic naming the status. The
+wait spins on the time-stamp counter at BootInfo's `tsc_hz`, which root
+passes in `rcx`, yielding meanwhile (a counter of unknown rate is taken
+as 4 GHz, so no wait is shorter than asked). It was a `Yield` after
+`HV_STATUS_INSUFFICIENT_BUFFERS` alone, 100 times, until the M9 review:
+with nothing else at `vmbus`'s priority those took microseconds, and a
+busy host could have failed a GPADL's run of posts.
 
 A host that refuses a step (a non-zero status) does not make `vmbus`
 panic: it prints `vmbus: netvsc channel <id>: the host refused <step>
@@ -7668,7 +7680,7 @@ message (`HN_NVS_REQSIZE_MIN` 32, plus 8 bytes of pad):
 | Step | Request | Answer checked |
 | --- | --- | --- |
 | 1 | `Attach` to `vmbus`, which blocks until the channel is open | the reply's words and the capability in slot 7 |
-| 2 | INIT (1) with `nvs_ver_min` = `nvs_ver_max` = 5 (`0x50000`), then 4 (`0x40000`), then 2 (`0x30002`): inband, completion requested; FreeBSD also tries 6.1, 6 and 1 | the completion's INIT_RESP (2), status at offset 12 = 1 (`HN_NVS_STATUS_OK`); a host that takes none of the three is a panic |
+| 2 | INIT (1) with `nvs_ver_min` = `nvs_ver_max` = 5 (`0x50000`), then 4 (`0x40000`), then 2 (`0x30002`): inband, completion requested; FreeBSD also tries 6.1, 6 and 1 | the completion's INIT_RESP (2), status at offset 12 = 1 (`HN_NVS_STATUS_OK`); each refusal prints `netvsc: NVSP <v> refused (<why>); asking for <next>`, the host's status kept (M9 review); a host that takes none of the three is a panic |
 | 3 | NDIS_CONF (125): MTU 1,514, capabilities `HN_NVS_NDIS_CONF_VLAN` (8), as FreeBSD below version 5 | none: no completion asked |
 | 4 | NDIS_INIT (100): NDIS 6.30 (`0x0006001E`) from version 5, else 6.1 (`0x00060001`) | none |
 | 5 | RXBUF_CONN (101): the receive buffer's GPADL, `nvs_sig` `0xCAFE` | RXBUF_CONNRESP (102), status 1, at least one section, each inside the buffer: its start at or before its end, its end and its slots within the 1 MiB (`nvs::RxSection::outside`); a refusal names the section's start, end, slot count and size and the check it failed |
@@ -7704,7 +7716,9 @@ ID 2^32 + `s`, body NVS RNDIS (107) with channel type 0 (data), section `s`
 and the message's size. The queue buffer goes back on `TX_FREE` at once. A
 completion (type 11) with that transaction ID and an RNDIS_ACK (108) frees
 `s`; one with a status other than 1 frees it too and is counted as
-ignored. With no free section, or no room in the outbound ring,
+ignored, and the first prints `netvsc: the host failed a send (status
+<s>); further failures are counted as ignored`, so a real host's refusal
+shows in the log (M9 review). With no free section, or no room in the outbound ring,
 the frame stays in `TX_FILLED` until a completion makes room: `netvsc` never
 drops a frame to send.
 
@@ -7821,7 +7835,7 @@ waiting for its answer; a rescind of `netvsc`'s channel revoking its
 capability, and one during setup stopping it; GPADLs split 26 + 28 + ...
 exactly; every message round trip and refusal; the event scan, a flag set
 before start, the late `MessagePending`, a message waiting at start; post
-retries, 100 then a panic; CHOPEN naming the VP index; the channel's rings
+retries, 20 with FreeBSD's waits, then a panic; CHOPEN naming the VP index; the channel's rings
 through a loopback device; and `random_hostile_messages_never_derail_vmbus`,
 a proptest of random hostile messages under which `vmbus` never panics,
 never reads outside its pages, and never posts a page outside root's. Five
@@ -7940,7 +7954,7 @@ MSI-X enabled`. Then it maps the region pages in its own VSpace, reads
 `pci: virtio-net: 3 queues, MAC 52:54:00:12:34:56` and `pci: virtio-net: 3
 region pages (12 KiB) carved and mapped uncached, then unmapped`, dumps the
 256 bytes as OVMF left them, prints `pci: configuration space and the
-MSI-X table unmapped; root CNode <k> of 4096 slots used` (437) and `TEST
+MSI-X table unmapped; root CNode <k> of 4096 slots used` (439) and `TEST
 PASS`. The scenario expects the ECAM line, the virtio-net function's line
 and its regions, its MSI-X line and the programmed entry, the MAC line,
 the dump's first line, the unmap and the halt; the other functions' lines
@@ -8130,8 +8144,8 @@ host's own requests.
 
 | Image | Run | The log must show | It settles |
 | --- | --- | --- | --- |
-| `net` | `-Scenario m9-net.scenario -TimeoutSeconds 120` | `cpu: hypervisor Hyper-V`; root's `servers: Hyper-V: SINT 2 is IRQ <n>; channel frame ..., monitor pages ... and ..., event flags ...; netvsc signals the host with SignalEvent` and `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130); root CNode <k> of 4096 slots used`; `vmbus: version 4.0` (or 3.0 or 2.4); every `vmbus: offer`, netvsc's among them; `vmbus: netvsc channel <id> open, connection <c>`; `netvsc: up: NVSP <v>, NDIS <v>, MAC 00:15:5d:..., link up, <n> send sections of <m> bytes`; `net: up: 192.168.77.2/24 via 192.168.77.1`; `echo: listening on UDP port 7`; the script's four ping replies and `udp_echo: 100 sent, 100 echoed`; `net: gateway 192.168.77.1 is at <mac>`; root's `vmbus:`, `netvsc:` and `net:` stats with `, 100 datagrams echoed,` and `, 4 ICMP echo requests answered,`; `TEST PASS` | the done-when on Hyper-V; the Hypervisor capability, SINT 2 and the SynIC frames on a real host; contact with no UNLOAD first; `SignalEvent` on a channel the host may monitor; the buffer sizes; the MAC Hyper-V assigned, against `Get-VMNetworkAdapter` |
-| `net-mnf` | `-Scenario m9-net-mnf.scenario -TimeoutSeconds 120` | the same, with `through monitor page 2 and the event flags (netvsc.mnf=1)` in root's first `servers:` line; netvsc's offer line ends `, monitor trigger <t>` if the host may monitor the channel, and `netvsc` then signals through the monitor page, else with `SignalEvent` | FreeBSD's monitor-page signalling; with `net`, which of the two the host takes |
+| `net` | `-Scenario m9-net.scenario -TimeoutSeconds 120 -Raw m9-net.com1` (`-Raw`: nothing reads the pipe during the exchange, and `net` may print its gateway line then; M9 review) | `cpu: hypervisor Hyper-V`; root's `servers: Hyper-V: SINT 2 is IRQ <n>; channel frame ..., monitor pages ... and ..., event flags ...; netvsc signals the host with SignalEvent` and `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130); root CNode <k> of 4096 slots used`; `vmbus: version 4.0` (or 3.0 or 2.4); every `vmbus: offer`, netvsc's among them; `vmbus: netvsc channel <id> open, connection <c>`; `netvsc: up: NVSP <v>, NDIS <v>, MAC 00:15:5d:..., link up, <n> send sections of <m> bytes`; `net: up: 192.168.77.2/24 via 192.168.77.1`; `echo: listening on UDP port 7`; the script's four ping replies and `udp_echo: 100 sent, 100 echoed`; `net: gateway 192.168.77.1 is at <mac>`; root's `vmbus:`, `netvsc:` and `net:` stats with `, 100 datagrams echoed,` and `, 4 ICMP echo requests answered,`; `TEST PASS` | the done-when on Hyper-V; the Hypervisor capability, SINT 2 and the SynIC frames on a real host; contact with no UNLOAD first; `SignalEvent` on a channel the host may monitor; the buffer sizes; the MAC Hyper-V assigned, against `Get-VMNetworkAdapter` |
+| `net-mnf` | `-Scenario m9-net-mnf.scenario -TimeoutSeconds 120 -Raw m9-net-mnf.com1` | the same, with `through monitor page 2 and the event flags (netvsc.mnf=1)` in root's first `servers:` line; netvsc's offer line ends `, monitor trigger <t>` if the host may monitor the channel, and `netvsc` then signals through the monitor page, else with `SignalEvent` | FreeBSD's monitor-page signalling; with `net`, which of the two the host takes |
 | `release-burst1` | `-Scenario m9-release-burst1.scenario`, twice, then once more with `-Raw` | `, burst 1,`; the 32 flood lines, each whole and right after the one before | with `release-burst15`, where COM1's bytes are lost (STATUS.md's plan) |
 | `release-burst15` | `-Scenario m9-release-burst15.scenario`, twice, then once more with `-Raw` | `, burst 15,`; the same; uart's `Writes held` above 0, so the flood filled its queue | |
 

@@ -313,15 +313,19 @@ CI builds `microl4-vhdx-m9-check` for M9's done-when on Hyper-V:
 net.gw=192.168.77.1` on the selftest kernel, `net-mnf/disk.vhdx` the same
 with `netvsc.mnf=1`, and beside them are the two scenarios the script
 follows, `m9-net.scenario` and `m9-net-mnf.scenario`. With the VM's
-adapter on the switch (`New-L4Switch.ps1`, above), run each once:
+adapter on the switch (`New-L4Switch.ps1`, above), run each once, through
+`-Raw`: the exchange runs inside the script's line handler, so nothing
+reads the pipe for its 5 to 35 s, and `net` prints its gateway line in
+that time; with `-Raw` the bytes are copied off the pipe as they come, so
+a pipe that drops unread bytes cannot fail the run's `expect:`:
 
 ```powershell
 gh run download --repo glslang/microL4 --name microl4-vhdx-m9-check --dir m9-check <run-id>
 
 .\Test-L4Vhdx.ps1 -VhdxPath .\m9-check\net\disk.vhdx -Scenario .\m9-check\m9-net.scenario `
-    -TimeoutSeconds 120 -LogPath m9-net.log
+    -TimeoutSeconds 120 -LogPath m9-net.log -Raw m9-net.com1
 .\Test-L4Vhdx.ps1 -VhdxPath .\m9-check\net-mnf\disk.vhdx -Scenario .\m9-check\m9-net-mnf.scenario `
-    -TimeoutSeconds 120 -LogPath m9-net-mnf.log
+    -TimeoutSeconds 120 -LogPath m9-net-mnf.log -Raw m9-net-mnf.com1
 ```
 
 Root starts `vmbus`, `netvsc` and `net`; once `net` prints `echo:
