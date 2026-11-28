@@ -376,7 +376,8 @@ fn receive_buffers_run_out_only_while_net_holds_them() {
     assert_eq!(w.queues.owned(Pool::Tx), Owned::NONE);
     assert_eq!(w.net.reclaim(), 64);
     let mut out = Vec::new();
-    while out.len() < 128 {
+    // Completions alone drain the 64 that wait: a few rounds at most.
+    for _ in 0..8 {
         out.extend(dev.transmit());
         w.settle();
         assert_eq!(w.queues.owned(Pool::Tx), Owned::NONE);
