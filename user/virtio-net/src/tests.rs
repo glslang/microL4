@@ -15,6 +15,8 @@
 //!   (ARP and ping for `10.0.2.2`, datagrams to `10.0.2.15` port 7), and
 //!   its tests through the driver: what the end-to-end test with `net`
 //!   needs.
+//! - [`e2e`]: the done-when on the host with `net` and the end-to-end
+//!   tests' scripted peer, and its interleavings.
 
 use std::vec::Vec;
 
@@ -24,6 +26,7 @@ use libsys::mem::Ram;
 use crate::{Driver, Region, Start, layout};
 
 mod device;
+mod e2e;
 mod model;
 mod props;
 mod rings;

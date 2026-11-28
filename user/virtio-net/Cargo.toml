@@ -18,6 +18,9 @@ doctest = false
 libsys = { path = "../libsys" }
 
 [dev-dependencies]
+# The end-to-end tests: the stack and its link to the frame queues, which
+# net runs beside the driver.
+net = { path = "../net" }
 # The random interleavings of the device, the driver and net. `std` alone:
 # no forking, timeouts or failure files, which Miri forbids.
 proptest = { version = "1", default-features = false, features = ["std"] }

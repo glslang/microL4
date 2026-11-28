@@ -274,6 +274,7 @@ name = "virtio-net"
 version = "0.1.0"
 dependencies = [
  "libsys",
+ "net",
  "proptest",
 ]
 
