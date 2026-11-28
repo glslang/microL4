@@ -3,9 +3,17 @@
 //! an oracle and of single-byte changes to an IPv4 header, the checksum
 //! against a naive sum and RFC 1071's examples, the ARP cache against a
 //! model, the configuration and its words, and the pump over a model of
-//! the frame queues.
+//! the frame queues; and [`e2e`], the stack against the end-to-end tests'
+//! scripted peer ([`peer`]), straight and over the frame queues with a
+//! model driver preempting `net` ([`preempt`], [`owners`]).
 
+mod e2e;
 mod golden;
+// Shared with `virtio-net`'s and `netvsc`'s end-to-end tests, which
+// include these files by path.
+pub mod owners;
+pub mod peer;
+pub mod preempt;
 mod props;
 mod unit;
 pub mod wire;
