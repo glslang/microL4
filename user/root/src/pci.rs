@@ -4,27 +4,29 @@
 //! uncached at [`WINDOW`] in its own VSpace, scans with the crate `pci`,
 //! sizes the virtio-net function's BARs, checks its regions and MSI-X
 //! ([`pci::Plan`]), carves the pages the driver will map and the MSI-X
-//! table's page, and unmaps configuration space and the table; it keeps
-//! every capability.
+//! table's page, programs MSI-X entry 0, and unmaps configuration space
+//! and the table; it keeps every capability.
 //!
-//! `test=pci` stops before programming MSI-X: `IRQControl_GetMSI` is not
-//! in the kernel yet, so it maps the table's page, reads entry 0's Vector
-//! Control (masked, as at reset) and leaves the table as it is, and never
-//! turns bus mastering on. It then maps the region pages in its own
-//! VSpace, reads the device's `num_queues` and MAC without touching its
-//! status, prints the function's first 256 bytes of configuration space
-//! as the firmware left them (the `pci` crate's fixture,
-//! `user/pci/tests/q35-virtio-net.cfg`), unmaps everything and passes.
+//! `test=pci` does all of that and programs MSI-X entry 0 with
+//! `IRQControl_GetMSI`'s message, leaving bus mastering off: no driver
+//! runs, so the device has nothing to send. It then maps the region pages
+//! in its own VSpace, reads the device's `num_queues` and MAC without
+//! touching its status, prints the function's first 256 bytes of
+//! configuration space as the firmware left them (the `pci` crate's
+//! fixture, `user/pci/tests/q35-virtio-net.cfg`), unmaps everything and
+//! passes. `test=net` (builder W) adds binding the handler, bus mastering
+//! and the driver.
 
 use core::fmt;
 use core::marker::PhantomData;
 
 use ::pci::{Address, Bytes, Config, Function, Kind, Msix, Plan, Segment};
-use libsys::bootinfo::{CAP_INIT_VSPACE, Ecam as EcamRange};
+use libsys::bootinfo::{CAP_INIT_VSPACE, CAP_IRQ_CONTROL, Ecam as EcamRange};
+use libsys::device::{Msi, irq_control_get_msi};
 use libsys::mem::{Mmio, Regs};
 use libsys::objects::{CarveError, Carver};
 use libsys::vspace::{self, HUGE_PAGE, PAGE, READ_WRITE, Table, UNCACHED};
-use libsys::{BootInfo, CPtr, Error, Ipc, ObjectAlloc, ObjectType, println};
+use libsys::{BootInfo, CPtr, Error, Ipc, ObjectAlloc, ObjectType, Slot, println};
 
 use crate::fail;
 
@@ -351,11 +353,26 @@ pub fn run(bi: &BootInfo) -> ! {
     let plan = plan(&ecam, &f);
     let pages = carve_pages(&mut ecam, &plan);
 
-    // Memory decode on, so the BAR pages answer; bus mastering stays off,
-    // since no MSI-X entry is programmed and the device does no DMA.
+    // Memory decode on, so the table and the region pages answer; bus
+    // mastering stays off: no driver runs, so the device has no message
+    // to send and no DMA to do.
+    let (_, msi) = get_msi(ipc, ecam.objects);
     let cfg = ecam.function(f.address);
     ::pci::enable_memory(&cfg, false);
-    look_at_table(ipc, &plan, &pages);
+    let was = program_msix(ipc, &cfg, &plan, &pages, &msi);
+    println!(
+        "pci: virtio-net: MSI-X entry 0 at {:#x} was {}masked (vector control {was:#x}); \
+         now IRQ {}: address {:#x}, data {:#x}, unmasked, MSI-X enabled",
+        plan.table,
+        if was & ::pci::msix::VECTOR_MASKED != 0 {
+            ""
+        } else {
+            "not "
+        },
+        msi.irq,
+        msi.address,
+        msi.data
+    );
     look_at_regions(ipc, &plan, &pages);
 
     for (i, row) in snapshot.chunks_exact(16).enumerate() {
@@ -365,7 +382,6 @@ pub fn run(bi: &BootInfo) -> ! {
         }
         println!("pci: cfg {:02x}:{}", 16 * i, line.as_str());
     }
-    drop(cfg);
     ecam.unmap();
     let slots = 1u64 << bi.root_cnode_bits;
     println!(
@@ -376,10 +392,26 @@ pub fn run(bi: &BootInfo) -> ! {
     libsys::exit(0)
 }
 
-/// Maps the MSI-X table's page at [`MSIX_WINDOW`], prints entry 0's
-/// Vector Control and unmaps it: `test=pci` leaves the table as reset
-/// left it.
-fn look_at_table(ipc: Ipc, plan: &Plan, pages: &Pages) {
+/// A handler for one MSI from `IRQControl_GetMSI`, in a fresh slot, and
+/// its message.
+pub fn get_msi(ipc: Ipc, objects: &mut ObjectAlloc<'_>) -> (CPtr, Msi) {
+    let slot = objects
+        .slots
+        .alloc(1)
+        .unwrap_or_else(|| fail!("pci: no free slot for the MSI handler"));
+    let msi = irq_control_get_msi(ipc, CAP_IRQ_CONTROL, Slot::root_cnode(slot))
+        .unwrap_or_else(|e| fail!("pci: IRQControl_GetMSI: {e}"));
+    (slot, msi)
+}
+
+/// Programs MSI-X entry 0 of the function `cfg` reaches to send `msi`
+/// (`docs/design.md`, "PCI on QEMU", "Interrupt"): maps the table's page
+/// uncached at [`MSIX_WINDOW`], programs it with [`Msix::program`], reads
+/// entry 0 and Message Control back, and unmaps the page, so no driver
+/// ever sees the table. Memory decode must be on. Returns entry 0's
+/// Vector Control as it was; fails the test if what reads back is not
+/// what was written.
+pub fn program_msix(ipc: Ipc, cfg: &Cfg<'_>, plan: &Plan, pages: &Pages, msi: &Msi) -> u32 {
     vspace::frame_map(
         ipc,
         pages.table,
@@ -394,18 +426,30 @@ fn look_at_table(ipc: Ipc, plan: &Plan, pages: &Pages) {
     // mapping, and stays mapped until the unmap below, after the last use
     // of `table`; it is reached only through `Mmio`.
     let table = unsafe { Cfg::new(MSIX_WINDOW, PAGE as usize) };
-    let vc = Msix::vector_control(&table, plan.entry0_in_page());
-    println!(
-        "pci: virtio-net: MSI-X entry 0 at {:#x}: vector control {vc:#x} ({}), left unprogrammed",
-        plan.table,
-        if vc & ::pci::msix::VECTOR_MASKED != 0 {
-            "masked"
-        } else {
-            "not masked"
-        }
-    );
+    let at = plan.entry0_in_page();
+    let was = Msix::vector_control(&table, at);
+    let message = ::pci::Message {
+        address: msi.address,
+        data: msi.data,
+    };
+    plan.msix.program(cfg, &table, at, message);
+    let entry = [0, 4, 8, 12].map(|o| table.read32(at + o));
+    let want = [
+        msi.address as u32,
+        (msi.address >> 32) as u32,
+        msi.data,
+        was & !::pci::msix::VECTOR_MASKED,
+    ];
+    let control = cfg.read16(u16::from(plan.msix.cap) + 2);
     vspace::frame_unmap(pages.table)
         .unwrap_or_else(|e| fail!("pci: unmapping the MSI-X table's page: {e}"));
+    if entry != want {
+        fail!("pci: virtio-net: MSI-X entry 0 reads back {entry:#x?}, not {want:#x?}");
+    }
+    if control & ::pci::msix::ENABLE == 0 || control & ::pci::msix::FUNCTION_MASK != 0 {
+        fail!("pci: virtio-net: MSI-X Message Control reads back {control:#x}");
+    }
+    was
 }
 
 /// Maps the region pages in root's own VSpace as the driver's windows lay

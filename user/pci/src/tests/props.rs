@@ -171,7 +171,7 @@ fn check(p: &Plan, bars: &Bars) -> Result<(), TestCaseError> {
         );
     }
     prop_assert!(u64::from(p.entry0_in_page()) + 16 <= PAGE);
-    prop_assert!(p.notify_off_multiplier % 2 == 0);
+    prop_assert!(p.notify_off_multiplier.is_multiple_of(2));
     prop_assert_eq!(p.page_count() as usize, n);
     Ok(())
 }

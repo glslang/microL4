@@ -286,7 +286,7 @@ impl Plan {
     /// table and the PBA inside its BAR, no region over 60 KiB, and no
     /// page of a region shared with the table, the PBA or another region.
     pub fn virtio_net(f: &Function, cfg: &impl Config, bars: &Bars) -> Result<Plan, Refusal> {
-        let mut found: [Option<(u8, Bar, u32, u32, u32)>; 3] = [None; 3];
+        let mut found: [Option<Found>; 3] = [None; 3];
         for at in f.capabilities.with_id(CAP_VENDOR) {
             let c = u16::from(at);
             let ty = cfg.read8(c + CFG_TYPE);
@@ -309,13 +309,13 @@ impl Plan {
             } else {
                 0
             };
-            found[kind.index()] = Some((
-                at,
+            found[kind.index()] = Some(Found {
+                cap: at,
                 bar,
-                cfg.read32(c + CAP_OFFSET),
-                cfg.read32(c + CAP_LENGTH),
+                offset: cfg.read32(c + CAP_OFFSET),
+                length: cfg.read32(c + CAP_LENGTH),
                 multiplier,
-            ));
+            });
         }
         let caps = Kind::ALL.map(|k| found[k.index()].ok_or(Refusal::NoCapability(k)));
         let caps = [caps[0]?, caps[1]?, caps[2]?];
@@ -332,7 +332,13 @@ impl Plan {
             paddr: 0,
         }; 3];
         for kind in Kind::ALL {
-            let (cap, bar, offset, length, _) = caps[kind.index()];
+            let Found {
+                cap,
+                bar,
+                offset,
+                length,
+                ..
+            } = caps[kind.index()];
             if length < kind.min_length() {
                 return Err(Refusal::TooShort { kind, length });
             }
@@ -361,7 +367,7 @@ impl Plan {
             }
             regions[kind.index()] = r;
         }
-        let multiplier = caps[Kind::Notify.index()].4;
+        let multiplier = caps[Kind::Notify.index()].multiplier;
         if multiplier % 2 != 0 {
             return Err(Refusal::OddMultiplier(multiplier));
         }
@@ -435,6 +441,17 @@ impl Plan {
     pub const fn entry0_in_page(&self) -> u16 {
         (self.table % PAGE) as u16
     }
+}
+
+/// A capability [`Plan::virtio_net`] takes: where it is, its BAR, its
+/// region's offset and length, and notify's multiplier (else 0).
+#[derive(Clone, Copy, Debug)]
+struct Found {
+    cap: u8,
+    bar: Bar,
+    offset: u32,
+    length: u32,
+    multiplier: u32,
 }
 
 /// The physical address of `bytes` bytes at `offset` in `bar`, if they lie

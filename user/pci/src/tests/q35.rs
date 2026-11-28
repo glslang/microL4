@@ -144,7 +144,7 @@ fn the_fixtures_plan_is_what_root_printed() {
     assert!(plan.regions.iter().all(|r| r.cap != 0x50 && r.cap != 0x84));
 }
 
-/// Entry 0 programmed as `test=net` will, with the message
+/// Entry 0 programmed as root programs it, with the message
 /// `IRQControl_GetMSI` gives for IRQ 1 (vector `0x31`): the table written
 /// only while Function Mask is set, then MSI-X enabled and unmasked.
 #[test]

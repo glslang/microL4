@@ -238,22 +238,22 @@ impl Model {
             "{n}-byte write at {off:#x}"
         );
         let mut v = v;
-        if (0x10..0x28).contains(&off) {
-            if let Some((i, d)) = self.bar_at(at - (at % 4)) {
-                if n != 4 {
-                    self.violation(format!("a {n}-byte write to BAR{i}"));
-                    return;
-                }
-                let cmd = self.get(0x04, 2) as u16;
-                let decodes = match d {
-                    Dword::Io { .. } => cmd & command::IO != 0,
-                    _ => cmd & command::MEMORY != 0,
-                };
-                if decodes {
-                    self.violation(format!("BAR{i} written with decode on ({cmd:#x})"));
-                }
-                v = self.masked(d, v, self.get(at, 4));
+        if (0x10..0x28).contains(&off)
+            && let Some((i, d)) = self.bar_at(at - (at % 4))
+        {
+            if n != 4 {
+                self.violation(format!("a {n}-byte write to BAR{i}"));
+                return;
             }
+            let cmd = self.get(0x04, 2) as u16;
+            let decodes = match d {
+                Dword::Io { .. } => cmd & command::IO != 0,
+                _ => cmd & command::MEMORY != 0,
+            };
+            if decodes {
+                self.violation(format!("BAR{i} written with decode on ({cmd:#x})"));
+            }
+            v = self.masked(d, v, self.get(at, 4));
         }
         let mut b = self.bytes.borrow_mut();
         b[off..off + n].copy_from_slice(&v.to_le_bytes()[..n]);

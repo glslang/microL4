@@ -1217,7 +1217,7 @@ mod tests {
         paddr: u64,
         bits: u32,
     ) -> Result<u64, CarveError> {
-        if paddr % (1 << bits) != 0 {
+        if !paddr.is_multiple_of(1 << bits) {
             return Err(CarveError::BadRequest);
         }
         let not_held = Err(CarveError::NotHeld { paddr, bits });
