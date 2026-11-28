@@ -193,6 +193,7 @@ impl Oracle {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: if cfg!(miri) { 3 } else { 256 },
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
