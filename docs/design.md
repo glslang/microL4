@@ -6931,14 +6931,51 @@ driver needs no handler, and one it held could rebind its interrupt.
 | each thread's TCB, CNode and VSpace, the originals of VN, VB, NS, NE, NV, NB, NH and NN, and a capability with badge 2 to each endpoint | `Stats`, and revoking a server |
 
 Each server's VSpace and CNode cost root one slot per image page and a few
-more ([Capabilities](#capabilities-2)), so they grow with M9's image, 179
-frames in the dev profile. Measured on QEMU, with the boot regions' 310
-slots: `test=pci` ends at 411 of the root CNode's 4,096 slots (389 when it
-was built, with a smaller image), of which the carving takes 99 (ECAM's 2
-MiB frame 15, the MSI-X table's page 25, the region pages 55, 3 and 1),
-where the design had allowed about 150; `test=virtio_net` uses 925 and
-`test=net` 1,088 to 1,093, where the design had estimated about 1,200. The
-`servers:` line prints the count, and `test=pci`'s last line too.
+more ([Capabilities](#capabilities-2)), so they grow with M9's image:
+202 frames in the dev profile once root carries `vmbus` and `netvsc` too,
+on QEMU as well. Measured on QEMU with that image, the boot regions taking
+about 337 slots: `test=pci` ends at 437 of the root CNode's 4,096 slots,
+of which the carving takes 99 (ECAM's 2 MiB frame 15, the MSI-X table's
+page 25, the region pages 55, 3 and 1), where the design had allowed about
+150; `test=virtio_net` uses about 1,020 and `test=net` about 1,206, where
+the design had estimated about 1,200. Before Hyper-V's half was linked in,
+with 179 image frames, they were 411 (389 when `test=pci` was built), 925
+and 1,088 to 1,093. On Hyper-V, with two more servers' VSpaces and CNodes,
+`test=net` should use about 1,320, as Y's faked run on QEMU did (1,318).
+The `servers:` line prints the count, and `test=pci`'s last line too.
+
+**Root's Hyper-V half** (`servers::start_hyperv`, with its decisions
+host-tested in `root::network`). With a Hypervisor capability in slot 12
+(`servers::platform`), `start_network` runs it for `test=net`; for
+`test=virtio_net` it fails the test, since the probe runs beside
+`virtio-net` on QEMU only. In order:
+
+| Step | What |
+| --- | --- |
+| 1 | `root::network::mnf`: `netvsc.mnf=1` signals through the monitor page, `0` or no word with `SignalEvent`; any other value fails the test, `servers: netvsc.mnf="<v>": not 0 or 1`, so a command line written by hand cannot run the other way unnoticed |
+| 2 | `check_windows` on `vmbus`'s one window (`VMBUS_WINDOWS`, the SynIC frames), `netvsc`'s three (`NETVSC_WINDOWS`: the channel frame, the monitor window, checked even without `netvsc.mnf=1`, and the queues' original) and `net`'s |
+| 3 | `IRQControl_GetSint(2)` (`VMBUS_SINT`) into a slot of root's: SINT 2 is unmasked from here, and root keeps the handler |
+| 4 | the objects: VB and NS; NB, NH and NN; the two TCBs and CNodes; the channel frame and the frame queues' frame (2 MiB each); monitor page 1, monitor page 2 and the event-flags page as three 4 KiB frames in one `Untyped_Retype` (`MONITOR_FRAMES`), which places them consecutively; the page tables of `vmbus`'s SynIC window and, with `netvsc.mnf=1`, `netvsc`'s monitor window; the queues' copy; NB minted with `SINT`; root's capabilities to VB and NS with badge 2, for `Stats` |
+| 5 | `Frame_GetAddress` of the channel frame and the three pages; `root::network::vmbus_start` requires the three to be consecutive, then checks the words as `vmbus`'s entry stub will (`vmbus::Start::from_words`), and `netvsc_start` as `netvsc`'s will, so a word either would refuse fails in root instead |
+| 6 | SINT 2's handler bound to NB with `SINT`, before `vmbus` has anything |
+| 7 | `vmbus`'s CNode (VB with Read and Grant, slot 12's Hypervisor capability copied unrestricted, NH with `CHANNEL`, F with `VMBUS`, C with badge 6) and VSpace: root's slots 13 and 14 themselves, the SIM and SIEF frames, at `vmbus::layout::SIM` and `SIEF` (`SYNIC_FRAMES`), write-back |
+| 8 | `netvsc`'s CNode (NS with Read, VB with badge 1, NN with `FRAMES`, F with `NETVSC`, C with badge 7) and VSpace: the channel frame at `netvsc::layout::CHANNEL`, the queues' original, and with `netvsc.mnf=1` monitor page 2 and the event-flags page at `MNF` (`MNF_FRAMES`) |
+| 9 | the line `servers: Hyper-V: SINT 2 is IRQ <n>; channel frame <a>, monitor pages <m> and <m + 0x1000>, event flags <e>; netvsc signals the host with SignalEvent`, or `through monitor page 2 and the event flags (netvsc.mnf=1)` (`root::network::HyperVLine`): the pages `vmbus` will name to the host and which way `netvsc` rings it |
+| 10 | `net` (`servers::start_net`, shared with QEMU: its CNode with NH badged `FRAMES` as its driver's notification, the queues' copy, bound to NN), then `netvsc` (140, bound to NH), then `vmbus` (145, bound to NB), all below root, so none runs before root waits |
+
+Root then prints the Hyper-V `servers:` line (`servers: vmbus (priority
+145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130); root
+CNode <k> of 4096 slots used`, `root::check::net::Started` with
+`Drivers::HyperV`). Its decisions are host-tested in root's library
+(`the_hyperv_windows`, `the_netvsc_mnf_word`, `vmbus_and_netvscs_words`,
+`vmbus_and_netvscs_words_refused`, `the_hyperv_line`,
+`the_hyperv_servers_line`, `the_hyperv_stats_lines`,
+`the_hyperv_verdict`). No test runs steps 3, 6 and 7 before the owner's
+check: QEMU's TCG has no SynIC, so `GetSint` is `IllegalOperation` and
+slots 12 to 14 are null. Y ran the rest on QEMU once, with those three
+steps faked, and root used 1,318 slots; the experiment was reverted.
+Nothing of `vmbus` against a real host, the hypercalls, SINT delivery,
+the SynIC frames or the host's answers has run anywhere yet.
 
 #### Failures
 
@@ -7118,8 +7155,8 @@ hand like term's: a `config:` line, then steps, `start:` (`Stack::start`),
 `in:` lines with a frame in hex (spaces allowed, `#` comments) and `tx:
 <n>` (the transmit buffers left free), each followed by the `out:` frames
 the stack must send, in order, and the `event:` lines it prints, and a
-last `stats:` line with every counter that is not 0. 163 cases in eight
-groups: `ethernet` (18), `arp` (31), `ipv4` (32), `icmp` (22), `udp` (16),
+last `stats:` line with every counter that is not 0. 165 cases in eight
+groups: `ethernet` (18), `arp` (33), `ipv4` (32), `icmp` (22), `udp` (16),
 `echo` (26), `checksum` (9) and `held` (9, waiting packets), with a case
 for every row of the tables above; the expected frames were computed by
 an independent model written for the purpose, not by the stack.
@@ -7138,10 +7175,21 @@ change); `net::checksum` against a naive sum and RFC 1071's examples; and
 the ARP cache's replacement and merge rules against a small model
 (`tests/props.rs`); unit tests of the configuration, the words, the texts
 root and the scenarios match, and `net::link` against the driver's side of
-the same queues (`tests/unit.rs`). 37 host tests in all, 0.5 s; under Miri
-28 run, the golden tests skipped (Miri cannot read files). Two seeded bugs
-were both caught. A `cargo-fuzz` target over `Stack::input` is optional and
-not built, as M2's is.
+the same queues (`tests/unit.rs`); and the end-to-end tests
+(`tests/e2e.rs`, [End-to-end tests](#end-to-end-tests)): the stack
+against the scripted peer straight, a peer that asks first, the peer's
+payloads equal to the harness's, and six tests that the peer refuses what
+it must (a second or altered echo, echoes out of order, a bad UDP
+checksum, an identification out of turn, padding that is not zeros), then
+`net` preempted at every access and by its driver anywhere
+(`net_preempted_at_every_access_loses_nothing`,
+`net_preempted_by_its_driver_anywhere_loses_nothing`, 64 cases). 49 host
+tests in all; under Miri the golden tests are skipped (Miri cannot read
+files) and the end-to-end ones send 26 datagrams, about 3 minutes. Two
+seeded bugs were both caught, and a pump that never signalled its driver
+was caught end to end. `net` takes short frames unpadded, as libslirp
+sends them, and pads its own to 60 bytes with zeros. A `cargo-fuzz`
+target over `Stack::input` is optional and not built, as M2's is.
 
 ### PCI on QEMU
 
@@ -7418,9 +7466,15 @@ free, reaches `RX_FILLED` once and in order, and every `TX_FILLED` frame
 reaches the network once and in order; and the gateway's ARP and ping and
 datagrams to port 7 through the driver and the model network. Of 15
 seeded bugs, 14 were caught; the one missed, a removed fence, is for
-review. With `net` as a dev-dependency,
-`a_hundred_datagrams_echo_through_the_model` runs the done-when on the
-host (the test writer's).
+review. With `net` as a dev-dependency, `tests/e2e.rs` adds four
+([End-to-end tests](#end-to-end-tests)), 47 in all:
+`a_hundred_datagrams_echo_through_the_model`, the done-when on the host;
+`random_interleavings_through_net_lose_nothing` (128 cases);
+`preempted_at_every_access_loses_nothing`; and
+`completions_just_before_the_driver_asks_for_them_are_not_lost`, which
+only the driver's second look at the used ring after it turns completions
+on (2.7.14) passes: a mutation that dropped that look passed the 43
+earlier tests.
 
 ### `vmbus`
 
@@ -7617,7 +7671,7 @@ message (`HN_NVS_REQSIZE_MIN` 32, plus 8 bytes of pad):
 | 2 | INIT (1) with `nvs_ver_min` = `nvs_ver_max` = 5 (`0x50000`), then 4 (`0x40000`), then 2 (`0x30002`): inband, completion requested; FreeBSD also tries 6.1, 6 and 1 | the completion's INIT_RESP (2), status at offset 12 = 1 (`HN_NVS_STATUS_OK`); a host that takes none of the three is a panic |
 | 3 | NDIS_CONF (125): MTU 1,514, capabilities `HN_NVS_NDIS_CONF_VLAN` (8), as FreeBSD below version 5 | none: no completion asked |
 | 4 | NDIS_INIT (100): NDIS 6.30 (`0x0006001E`) from version 5, else 6.1 (`0x00060001`) | none |
-| 5 | RXBUF_CONN (101): the receive buffer's GPADL, `nvs_sig` `0xCAFE` | RXBUF_CONNRESP (102), status 1, at least one section, each inside the buffer |
+| 5 | RXBUF_CONN (101): the receive buffer's GPADL, `nvs_sig` `0xCAFE` | RXBUF_CONNRESP (102), status 1, at least one section, each inside the buffer: its start at or before its end, its end and its slots within the 1 MiB (`nvs::RxSection::outside`); a refusal names the section's start, end, slot count and size and the check it failed |
 | 6 | CHIM_CONN (104): the send buffer's GPADL, `nvs_sig` `0xFACE` | CHIM_CONNRESP (105), status 1, a section size that is a multiple of 4 and at least 44 + 1,514 bytes; sections = 768 KiB / size, at most 128 (6,144 bytes give 128) |
 | 7 | RNDIS INITIALIZE (2): request ID `1 << 16` (FreeBSD's IDs are `n << 16`), version 1.0, `max_xfersz` 2,048 | INITIALIZE_CMPLT (`0x80000002`), status 0; `rm_align` is a shift, the alignment `1 << rm_align`, and one below 4 is taken as 4, as FreeBSD's `hn_rndis_init` does |
 | 8 | QUERY (4) `OID_802_3_PERMANENT_ADDRESS` (`0x01010101`) | QUERY_CMPLT, status 0, exactly 6 bytes: the MAC |
@@ -7695,7 +7749,9 @@ completions, status indications, packets that broke a ring, packets
 skipped, ignored messages, bad queue entries; 15 words).
 
 **Tests** (`user/netvsc/src/tests/{setup,data,hostile}.rs`, 46, 0.2 s;
-under Miri all but the two largest run, in about 4.5 minutes): NVSP 5 and
+under Miri all but the two largest run, in about 4.5 minutes; with the
+five end-to-end tests of `tests/e2e.rs`, [End-to-end
+tests](#end-to-end-tests), 51): NVSP 5 and
 RNDIS brought up and the link handed to `net`; NVSP falling back from 5
 to 4 and 2 with NDIS 6.1; a host that takes none; every refusal of the
 receive buffer, the send buffer and RNDIS; the filter waiting for `net`'s
@@ -7710,7 +7766,10 @@ hostile packets, notes and completions of nothing; the arguments, the
 `Attach` reply and `Stats`; and two proptests, of hostile packets and of
 raw ring bytes, under which `netvsc` never panics or follows what it
 refused. Of 20 planted bugs 19 were caught; the one missed cannot be,
-since an acknowledgement and a data packet both take 64 bytes of ring.
+since an acknowledgement and a data packet both take 64 bytes of ring. A
+mutation that wrote the write index before the packet's bytes passed
+these and is caught end to end. The section tests check the refusal's
+text, which names each field and the check it failed.
 
 ### The mock VMBus host
 
@@ -7767,9 +7826,47 @@ through a loopback device; and `random_hostile_messages_never_derail_vmbus`,
 a proptest of random hostile messages under which `vmbus` never panics,
 never reads outside its pages, and never posts a page outside root's. Five
 seeded bugs were all caught. `netvsc`'s are in [`netvsc`](#netvsc). With
-`vmbus`, `net` and `hvmock` together,
-`a_hundred_datagrams_echo_through_the_mock_host` is to run the Hyper-V
-done-when on the host (the test writer's).
+`vmbus`, `net` and `hvmock` together, `netvsc`'s
+`a_hundred_datagrams_echo_through_the_mock_host` runs the Hyper-V
+done-when on the host ([End-to-end tests](#end-to-end-tests)).
+
+### End-to-end tests
+
+The done-when runs on the host too, with every crate's real code between
+a scripted peer and the stack. Three files under `user/net/src/tests/`
+are shared: `net`'s tests use them as modules, and `virtio-net`'s and
+`netvsc`'s include them by path, with `net` a dev-dependency of both.
+
+| File | What |
+| --- | --- |
+| `peer.rs` | the station at the far end of the link, which is also the gateway: libslirp's `10.0.2.2` or the switch's `192.168.77.1`. It answers ARP for its address and pings to it, learns the guest's MAC from its ARP packets (asking once if it must), then pings the guest 4 times, as `Send-L4Udp.ps1` does, and sends `udp_echo:`'s datagrams, written again from [The harness: `nic:` and `udp_echo:`](#the-harness-nic-and-udp_echo) rather than taken from xtask, at most 8 unanswered. It checks every frame the guest sends with builders and an RFC 1071 checksum of its own: the Ethernet addresses, the ARP fields, the IPv4 header as "Sending IPv4" has it (identification from 1, DF, TTL 64), the ICMP and UDP checksums, zeros in any padding, and each echo once, unaltered and in its flow's order |
+| `preempt.rs` | a `Memory` whose every access first runs a hook, so another thread acts between any two of a thread's accesses: a device or the host on its own processor inside a driver's `on_signal`, or a driver preempting `net` inside its pump, as its priority lets it |
+| `owners.rs` | between the threads' turns, every queue buffer is in exactly one place, held by one side or named by one entry between `tail` and `head`, and no queue holds more than 128 |
+
+| Test | Crate | Steps |
+| --- | --- | --- |
+| `a_hundred_datagrams_echo_through_the_model` | `virtio-net` | V's model device, `virtio_net::Driver` and `net::link` over one `Ram` for the frame queues; the driver (140) whenever its notification holds a signal, then `net` (130), then the device and the peer: 100 datagrams echoed, with the counters `root::check::net` requires |
+| `random_interleavings_through_net_lose_nothing` (128 cases), `preempted_at_every_access_loses_nothing`, `completions_just_before_the_driver_asks_for_them_are_not_lost` | `virtio-net` | the same in any order: `net` before a signalled driver, signals merged and late, the device delivering and completing late and out of order or so rarely that the transmit ring fills, polling instead of notifications, up to three flows and windows up to 100, with the device acting inside `on_signal` and the driver preempting `net` at random accesses: nothing lost, duplicated or reordered within a flow, one owner per buffer after every turn, clean counters, no stall |
+| `a_hundred_datagrams_echo_through_the_mock_host`, `..._with_the_monitor_page` | `netvsc` | `hvmock`'s host and netvsc device, `vmbus::Bus`, `netvsc::Adapter` and `net::link`; `vmbus` (145) at SINT 2's edge, `netvsc` (140) at `CHANNEL` or `FRAMES`, `net` (130) at `FRAMES`, then the host and the peer as the switch's host: 4 pings and 100 datagrams, with `SignalEvent` and with `netvsc.mnf=1` |
+| `random_interleavings_through_the_mock_host_lose_nothing` (96 cases), `preempted_at_every_access_loses_nothing`, `a_host_that_drains_the_ring_before_the_request_for_room_still_hears_netvsc` | `netvsc` | the same in any order, the host holding send completions and returning them in any order, reading the outbound ring late, packing several frames a packet with per-packet information, offering as few as 8 send sections, both ways of signalling; every receive-buffer packet acknowledged. The last is `ask_room`'s second look (b121abd) end to end: without it, 41 acknowledgements wait for good |
+| the `net` tests above | `net` | the stack against the peer straight, and over the frame queues with a model driver preempting it |
+
+Under Miri the counts shrink: `net`'s end-to-end tests send 26 datagrams
+(about 3 minutes), `virtio-net`'s 13 (under 5 minutes), and `netvsc`'s
+ring-flooding test is skipped (under 6 minutes); each proptest ran 4,000 cases
+once with no failure. The test wire waits for a posted receive buffer
+before it delivers a frame, as QEMU queues frames (from memory). Mutations
+showed what the crates' own tests had missed, each now caught: the
+used-ring re-check above, `netvsc` writing the write index before the
+packet's bytes, a frame-queue producer writing `head` before the entry
+(caught by the preemption tests), and `net`'s pump never signalling its
+driver. Two facts the note was silent on: a driver's lost wakeup is mostly
+hidden end to end, since `net` handing a receive buffer back counts as a
+push, so every batch of `net`'s signals the driver; and with the mock's
+default receive sections of 1,728 bytes `netvsc`'s outbound ring cannot
+fill with acknowledgements (1 MiB holds at most 606 sections, whose
+acknowledgements take about 47 of the ring's 60 KiB), so the test that
+floods the ring uses 256-byte sections.
 
 ### DMA and trust
 
@@ -7843,7 +7940,7 @@ MSI-X enabled`. Then it maps the region pages in its own VSpace, reads
 `pci: virtio-net: 3 queues, MAC 52:54:00:12:34:56` and `pci: virtio-net: 3
 region pages (12 KiB) carved and mapped uncached, then unmapped`, dumps the
 256 bytes as OVMF left them, prints `pci: configuration space and the
-MSI-X table unmapped; root CNode <k> of 4096 slots used` (411) and `TEST
+MSI-X table unmapped; root CNode <k> of 4096 slots used` (437) and `TEST
 PASS`. The scenario expects the ECAM line, the virtio-net function's line
 and its regions, its MSI-X line and the programmed entry, the MAC line,
 the dump's first line, the unmap and the halt; the other functions' lines
@@ -7854,8 +7951,8 @@ starts `virtio-net` as `test=net` does, but no `net`: the probe
 ([Where the network servers run](#where-the-network-servers-run)) takes
 the link block, hands the driver the receive buffers, sends an ARP
 request for `10.0.2.2` built with `net::arp`, and waits for the reply
-frame. The `servers:` line ends `probe (priority 130); root CNode 925 of
-4096 slots used`. Root prints `virtio_net: ARP reply: 10.0.2.2 is at
+frame. The `servers:` line ends `probe (priority 130); root CNode <k> of
+4096 slots used` (about 1,020). Root prints `virtio_net: ARP reply: 10.0.2.2 is at
 52:55:0a:00:02:02` (libslirp's MAC, as the run shows), `virtio_net: the
 probe: 1 frames sent, 0 other frames taken before the reply`, then the
 driver's `Stats` (frames each way, signals, 0 bad elements and entries,
@@ -7895,22 +7992,32 @@ points its output at console, sets up PCI and starts `net` and
 sends IRQ 1 (address 0xfee00000, data 0x31); bus mastering on;
 configuration space and the MSI-X table unmapped`, then `servers:
 virtio-net (priority 140, MSI-X IRQ 1), net (priority 130); root CNode
-<k> of 4096 slots used` (1,088 to 1,093), and reads a line as client 1.
+<k> of 4096 slots used` (about 1,206), and reads a line as client 1.
 Console adds a blank line after each server line while root's `Read`
 waits: after each line another client prints it restores root's input
 line, which is empty, as M7's [Output](#output) defines restoring. On
-Hyper-V the same test is to print `servers: vmbus (priority 145, SINT 2
-IRQ <n>), netvsc (priority 140), net (priority 130); ...` instead, only
-with a Hypervisor capability in slot 12, and no `pci:` lines; root tells
-the platforms apart by `Hypervisor_VpIndex` on slot 12, which succeeds
-only on a Hypervisor capability (`servers::platform`,
-`root::network::Platform::choose`). After the `\r`, it asks the driver's
-and `net`'s `Stats` (on QEMU two, `virtio-net`'s and `net`'s), prints
-them, and requires (`root::check::net`): no bad queue entry or used
-element, no IP or UDP checksum error, no frame dropped for want of a
-buffer on either side, `net`'s side of the queues included, and at least
-100 datagrams echoed; the scenario's `expect:` pins exactly 100. Then
-`TEST PASS`. A run shows `virtio-net: stats: 33 signals, 102 frames
+Hyper-V the same test prints no `pci:` lines but `servers: Hyper-V: ...`
+and `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority
+140), net (priority 130); ...` instead ([Root's Hyper-V
+half](#where-the-network-servers-run)); root tells the platforms apart by
+`Hypervisor_VpIndex` on slot 12, which succeeds only on a Hypervisor
+capability (`servers::platform`, `root::network::Platform::choose`).
+After the `\r`, it asks the drivers' and `net`'s `Stats` (on QEMU
+`virtio-net`'s and `net`'s; on Hyper-V `vmbus`'s, `netvsc`'s and
+`net`'s), prints them, and requires (`root::check::net`). On QEMU
+(`check::net`): no bad queue entry or used element, no IP or UDP checksum
+error, no frame dropped for want of a buffer on either side, `net`'s side
+of the queues included, and at least 100 datagrams echoed; the scenario's
+`expect:` pins exactly 100. On Hyper-V (`check::hyperv`): `vmbus`'s
+netvsc channel open (`check::vmbus`); no packet that broke a ring, no bad
+queue entry and no frame dropped for want of a receive buffer in
+`netvsc`'s counters (`check::netvsc`); `net`'s as on QEMU; and at least
+the script's 4 pings answered (`check::PINGS`). It does not fail on
+`netvsc`'s ignored messages (the host's notes and a send completion with
+a bad status are counted there) or its skipped packets, nor on `vmbus`'s
+stray events or ignored messages: a real host may send what neither
+uses, and a frame lost that way is missing from the echoes, which the
+script checks. Then `TEST PASS`. A run shows `virtio-net: stats: 33 signals, 102 frames
 received, 0 dropped for no buffer, 0 bad used elements, 102 frames sent,
 0 waits for a descriptor, 0 bad queue entries, ...` and `net: stats: 102
 frames in, 102 frames out, ...; queues: 102 frames sent, 102 received,
@@ -7970,13 +8077,38 @@ The two burst images, and their scenarios, go to the owner first, in
 `microl4-vhdx-m9-com1`, which CI builds from wave 0 (the `Build the M9
 COM1 images` step of `.github/workflows/ci.yml`): a lost byte can break
 any later check's `expect:`, and they need no M9 kernel piece ([Order of
-work](#order-of-work)). `microl4-vhdx-m9-check` is to hold the networking
-images, `net` and `net-mnf`, with `tools/hyperv/m9-net.scenario` and
-`m9-net-mnf.scenario`, which root's Hyper-V half brings.
-xtask's `the_com1_runs_are_release_with_the_cap_and_the_flood` checks the
-burst scenarios, and QEMU's `release_burst1` and `release_burst15`, which
-boot the same command lines, against `m8-release` and `release` step by
-step, and CI's command lines against theirs.
+work](#order-of-work)). `microl4-vhdx-m9-check` holds the networking
+images, `net/disk.vhdx` and `net-mnf/disk.vhdx`, each built with `cargo
+xtask image --cmdline` and its command line, beside
+`tools/hyperv/m9-net.scenario` and `m9-net-mnf.scenario` (the `Build the
+M9 check images` step). xtask's
+`the_com1_runs_are_release_with_the_cap_and_the_flood` checks the burst
+scenarios, and QEMU's `release_burst1` and `release_burst15`, which boot
+the same command lines, against `m8-release` and `release` step by step,
+and CI's command lines against theirs; `the_network_runs_are_net_on_hyperv`
+checks `m9-net` and `m9-net-mnf` against QEMU's `net`: their command
+lines, the selftest kernel, the exit and `nic:`, one `udp_echo:` whose
+exchange and Enter are QEMU's and come right after the listening line,
+and the lines before and after it in order.
+
+The two network scenarios follow QEMU's `net` with what differs on
+Hyper-V. Root's first line there is `servers: Hyper-V: SINT 2 is IRQ
+<n>; ...; netvsc signals the host with SignalEvent` (`through monitor
+page 2 and the event flags (netvsc.mnf=1)` in `m9-net-mnf`), before the
+`servers:` line. The exchange and the Enter come right after `echo:
+listening on UDP port 7`, before `net: gateway 192.168.77.1 is at`, which
+`net` prints once the host answers its ARP request, so always after the
+listening line: a host that never answers still leaves root's `Stats` in
+the log, whose `netvsc:` line shows what was sent and completed. They
+expect `vmbus:` and `netvsc:` `Stats` lines with 0 dropped for no
+buffer, 0 broken packets and 0 bad queue entries, and `net:`'s with `, 4
+ICMP echo requests answered,`; they forbid `USER PANIC`, which a server's
+refused setup prints, beside `TEST FAIL` and `KERNEL PANIC`. A refused
+receive-buffer section names its fields: `netvsc: the host refused the
+receive buffer: section <i> (start <s>, end <e>, <n> slots of <m> bytes):
+it starts after it ends` (or `it ends past the 0x100000-byte receive
+buffer`, or `its slots reach <x>, past ...`; `netvsc::nvs::RxSection::outside`),
+so one run on a real host shows which check a real layout fails.
 
 **The network.** The VM's adapter goes on an internal switch with a fixed
 subnet, not the Default Switch, whose NAT subnet changes when the host
@@ -7998,8 +8130,8 @@ host's own requests.
 
 | Image | Run | The log must show | It settles |
 | --- | --- | --- | --- |
-| `net` | `-Scenario m9-net.scenario` | `cpu: hypervisor Hyper-V`; root's `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130)`; `vmbus: version 4.0` (or 3.0 or 2.4); every `vmbus: offer`, netvsc's among them; `vmbus: netvsc channel <id> open, connection <c>`; `netvsc: up: NVSP <v>, NDIS <v>, MAC 00:15:5d:...`; `net: up: 192.168.77.2/24 via 192.168.77.1`; `echo: listening on UDP port 7`; `net: gateway 192.168.77.1 is at <mac>`; the script's four ping replies and `udp_echo: 100 sent, 100 echoed`; root's stats with `, 100 datagrams echoed,` and `, 4 ICMP echo requests answered,`; `TEST PASS` | the done-when on Hyper-V; contact with no UNLOAD first; `SignalEvent` on a channel the host may monitor; the buffer sizes; the MAC Hyper-V assigned, against `Get-VMNetworkAdapter` |
-| `net-mnf` | `-Scenario m9-net-mnf.scenario` | the same | FreeBSD's monitor-page signalling; with `net`, which of the two the host takes |
+| `net` | `-Scenario m9-net.scenario -TimeoutSeconds 120` | `cpu: hypervisor Hyper-V`; root's `servers: Hyper-V: SINT 2 is IRQ <n>; channel frame ..., monitor pages ... and ..., event flags ...; netvsc signals the host with SignalEvent` and `servers: vmbus (priority 145, SINT 2 IRQ <n>), netvsc (priority 140), net (priority 130); root CNode <k> of 4096 slots used`; `vmbus: version 4.0` (or 3.0 or 2.4); every `vmbus: offer`, netvsc's among them; `vmbus: netvsc channel <id> open, connection <c>`; `netvsc: up: NVSP <v>, NDIS <v>, MAC 00:15:5d:..., link up, <n> send sections of <m> bytes`; `net: up: 192.168.77.2/24 via 192.168.77.1`; `echo: listening on UDP port 7`; the script's four ping replies and `udp_echo: 100 sent, 100 echoed`; `net: gateway 192.168.77.1 is at <mac>`; root's `vmbus:`, `netvsc:` and `net:` stats with `, 100 datagrams echoed,` and `, 4 ICMP echo requests answered,`; `TEST PASS` | the done-when on Hyper-V; the Hypervisor capability, SINT 2 and the SynIC frames on a real host; contact with no UNLOAD first; `SignalEvent` on a channel the host may monitor; the buffer sizes; the MAC Hyper-V assigned, against `Get-VMNetworkAdapter` |
+| `net-mnf` | `-Scenario m9-net-mnf.scenario -TimeoutSeconds 120` | the same, with `through monitor page 2 and the event flags (netvsc.mnf=1)` in root's first `servers:` line; netvsc's offer line ends `, monitor trigger <t>` if the host may monitor the channel, and `netvsc` then signals through the monitor page, else with `SignalEvent` | FreeBSD's monitor-page signalling; with `net`, which of the two the host takes |
 | `release-burst1` | `-Scenario m9-release-burst1.scenario`, twice, then once more with `-Raw` | `, burst 1,`; the 32 flood lines, each whole and right after the one before | with `release-burst15`, where COM1's bytes are lost (STATUS.md's plan) |
 | `release-burst15` | `-Scenario m9-release-burst15.scenario`, twice, then once more with `-Raw` | `, burst 15,`; the same; uart's `Writes held` above 0, so the flood filled its queue | |
 
@@ -8067,12 +8199,12 @@ from this note.
 | --- | --- | --- |
 | Device windows and shared memory; the frame queues; the M9 protocols; the Hypervisor, MSI, SINT and `GetAddress` invocations; carving | `libsys::mem` (`Regs`, `Memory`, `Mmio`, `Shared`, `Part`, `copy`, the host's `Ram`), `libsys::frames` (`Driver`, `Net`, `Link`, `Entry`, `Owned`, `Mac`, `Counters`), `libsys::proto` (`VIRTIO_NET_STATS` `0x150`, `VMBUS_ATTACH` `0x160`, `VMBUS_STATS` `0x161`, `NETVSC_STATS` `0x170`, `NET_STATS` `0x180`, `Unavailable` `0x105`, `FRAMES` bit 33, `SINT` and `CHANNEL` bit 32, `VMBUS_CLIENT`; `VirtioNetStats`, `VmbusStats`, `NetvscStats` and their texts; `VmbusAttach`; no `NetStats`, since `net` words its own), `libsys::hyperv` (`post_message`, `signal_event`, `eom`, `vp_index`, `Status`, `Restriction`, the SynIC layout), `libsys::device` (`irq_control_get_msi`, `irq_control_get_sint`), `libsys::vspace::frame_get_address`, `libsys::objects::Carver` | 107 in `libsys`, 0.7 s: bounds and alignment of every access; the queues against a model of two owners (`frames::tests::model`: two honest sides, a hostile peer against a reference copy, indices wrapping past 2^32, two threads), bad entries counted and never followed; stats round trips and the texts the scenarios match; each invocation's message; random untyped lists and addresses carved as an oracle says, no untyped retyped twice, the slot count, refusals outside device untyped and over the framebuffer |
 | PCI | crate `pci` (`user/pci`): `scan` and the `Segment` trait, `Function`, BARs and their sizing (`size`), `enable_memory`, the capability walk, `Msix`, `is_virtio_net`, `Plan` (the pages to carve and map) | 41 (`src/tests/{bars,model,msix,plan,props,q35,scan}.rs`): the q35 fixture and its plan as root printed it; synthetic spaces with bridges, bus loops, multi-function devices, capability loops and bad pointers, 64-bit BARs, regions outside a BAR, too short or too long, sharing a page, an odd multiplier; the sizing sequence on a model that fails it if decode is on; proptests of the scan and of mutated headers' plans |
-| The stack and echo | crate `net` (`user/net`): `Stack`, `arp`, `ipv4`, `icmp`, `udp`, `echo`, `checksum`, `ethernet`, `config` (`Config`), `stats` (`Stats`, `Outcome`), `held`, `link` (`start`, `pump`, `Sender`, `Up`, `request`, `Report`); `net::run` on the target | 37: the 163 goldens and the proptests of [`net`](#net) |
-| The QEMU driver | crate `virtio_net` (`user/virtio-net`): `Driver`, `virtq`, `pci` (its capabilities), `Start`, `layout`, `slot`; `run` | 43 against the model device and the model network ([`virtio-net`](#virtio-net)); the end-to-end test with `net` (the test writer's) |
+| The stack and echo | crate `net` (`user/net`): `Stack`, `arp`, `ipv4`, `icmp`, `udp`, `echo`, `checksum`, `ethernet`, `config` (`Config`), `stats` (`Stats`, `Outcome`), `held`, `link` (`start`, `pump`, `Sender`, `Up`, `request`, `Report`); `net::run` on the target | 49: the 165 goldens, the proptests and the end-to-end tests of [`net`](#net); `tests/{peer,preempt,owners}.rs`, shared with `virtio-net`'s and `netvsc`'s end-to-end tests ([End-to-end tests](#end-to-end-tests)) |
+| The QEMU driver | crate `virtio_net` (`user/virtio-net`): `Driver`, `virtq`, `pci` (its capabilities), `Start`, `layout`, `slot`; `run` | 47: 43 against the model device and the model network ([`virtio-net`](#virtio-net)), and 4 end to end with `net` (`tests/e2e.rs`) |
 | VMBus | crate `vmbus` (`user/vmbus`): `Bus`, `msg` (every channel message), `offer`, `gpadl`, `synic`, `Start`, `slot`, `layout`; `run` | 36 against `hvmock` ([The mock VMBus host](#the-mock-vmbus-host)) |
-| The Hyper-V driver | crate `netvsc` (`user/netvsc`): `Adapter`, `ring`, `nvs`, `rndis`, `layout`, `slot`, `Start`, `attach_reply`; `run` | 46 against `hvmock`'s netvsc device ([`netvsc`](#netvsc)); the end-to-end test with `vmbus` and `net` (the test writer's) |
+| The Hyper-V driver | crate `netvsc` (`user/netvsc`): `Adapter`, `ring`, `nvs`, `rndis`, `layout`, `slot`, `Start`, `attach_reply`; `run` | 51: 46 against `hvmock`'s netvsc device ([`netvsc`](#netvsc)), and 5 end to end with `vmbus` and `net` (`tests/e2e.rs`) |
 | The mock host | crate `hvmock` (`user/hvmock`), host only: `Machine`, `Host`, `wire`, `ring`, `device`, `netvsc` | 20 of its own |
-| Root's setup, the tests and verdicts | the library: `root::network` (`Platform::choose`, `default_config`, `check_windows`, `VIRTIO_NET_WINDOWS`, `QUEUES`, `virtio_net_start`, `net_words`, the priorities and console clients, the probe's ARP request and reply and `ProbeReport`), `root::check::net` (the `servers:`, ARP and `Stats` lines, the `Stats` replies, the verdicts `net`, `stack` and `probe`), `root::flood`, `root::process` (`UartBurst`, `watch`'s badges 4 to 7); the program: `user/root/src/pci.rs` (`test=pci` and the PCI setup), `net.rs` (`test=virtio_net`, `net`, `virtio_net_fault`, the probe's thread), `servers.rs` (`platform`, `start_network` and its QEMU half, the entry stubs `virtio_net_main` and `net_main`, which alone make `Mmio` and `Shared` windows, each with its `SAFETY:` comment, as `term_main` makes term's slices), `release.rs` (the flood) | 68 in root's library (14 new for the network): the arguments' words and their refusals, the windows, the platform, the priorities and clients, the probe's frames and report, the verdicts and lines; `watchs_line_for_each_fault` with the new badges; the flood's lines |
+| Root's setup, the tests and verdicts | the library: `root::network` (`Platform::choose`, `default_config`, `check_windows`, `VIRTIO_NET_WINDOWS`, `QUEUES`, `virtio_net_start`, `net_words`, the priorities and console clients, the probe's ARP request and reply and `ProbeReport`; for Hyper-V `VMBUS_SINT`, `VMBUS_WINDOWS`, `NETVSC_WINDOWS`, `SYNIC_FRAMES`, `MONITOR_FRAMES`, `MNF_FRAMES`, `mnf`, `vmbus_start`, `netvsc_start` and `HyperVLine`), `root::check::net` (the `servers:` line with `Drivers::{VirtioNet, HyperV}`, the ARP and `Stats` lines, `VmbusLine` and `NetvscLine` among them, the `Stats` replies, the verdicts `net`, `stack`, `probe`, `vmbus`, `netvsc` and `hyperv`, `DATAGRAMS` and `PINGS`), `root::flood`, `root::process` (`UartBurst`, `watch`'s badges 4 to 7); the program: `user/root/src/pci.rs` (`test=pci` and the PCI setup), `net.rs` (`test=virtio_net`, `net` on both platforms, `virtio_net_fault`, the probe's thread), `servers.rs` (`platform`, `start_network`, `start_qemu`, `start_hyperv` and `start_net`, the entry stubs `virtio_net_main`, `net_main`, `vmbus_main` and `netvsc_main`, which alone make `Mmio` and `Shared` windows, each with its `SAFETY:` comment, as `term_main` makes term's slices), `release.rs` (the flood) | 76 in root's library (22 new for the network): the arguments' words and their refusals, the windows, the platform, `netvsc.mnf=`, the priorities and clients, the probe's frames and report, both platforms' verdicts and lines; `watchs_line_for_each_fault` with the new badges; the flood's lines |
 | The harness | `xtask/src/scenario.rs`, `udp.rs`, `qemu.rs`, `main.rs` (`run --nic`) | those of [The harness: `nic:` and `udp_echo:`](#the-harness-nic-and-udp_echo) |
 
 `cargo xtask test` runs the new crates' host tests beside the others',
@@ -8083,10 +8215,12 @@ what the host cannot: ECAM and BARs through device untyped, uncached device
 frames above 4 GiB, an MSI from a device through the kernel to a
 notification, `Frame_GetAddress`, DMA by a device into RAM frames, two
 VSpaces sharing a frame, and the forwarded port. Under Miri, run locally
-as for M8's crates: `libsys` (under 2 minutes), `net` (28 tests, the
-goldens skipped, 2 minutes), `virtio-net` (about 5 minutes), `vmbus` and
-`hvmock` (under 2 minutes), `netvsc` (about 4.5 minutes), root's library
-(27 s); CI runs Miri on `l4core` only.
+as for M8's crates: `libsys` (under 2 minutes), `net` (the goldens
+skipped, 2 minutes, and about 3 for its end-to-end tests), `virtio-net`
+(about 5 minutes, and under 5 for its end-to-end tests), `vmbus` and
+`hvmock` (under 2 minutes), `netvsc` (about 4.5 minutes, and under 6 for
+its end-to-end tests), root's library (27 s, and 33 s for `network::` and
+`check::net::` after the Hyper-V half); CI runs Miri on `l4core` only.
 The kernel's M9 scenarios are `msi`, `frame_address` and `ecam`
 ([Interrupts](#interrupts), [Hyper-V interface](#hyper-v-interface)); with
 the network scenarios and the two burst runs, `cargo xtask test` runs 63
@@ -8096,20 +8230,20 @@ scenarios, in about 2 minutes 20 seconds.
 
 | Invariant | Enforced by | Milestone |
 | --- | --- | --- |
-| Only `virtio-net` and `vmbus`, besides root, can make a device or the host write memory they were not given; `netvsc` can make the host read any page but write only its receive buffer; `net` can do neither | the slot tables and `servers::fill`, which fills each CNode only from its crate's `slot` constants; `virtio-net`'s descriptors name only its DMA frame's buffers, written once by `virtq::Virtq::init` (host test `every_descriptor_names_its_own_buffer`; the model device fails any other address, `descriptor_rules`); `vmbus` posts only pages computed from `vmbus::Start` and `vmbus::layout` (`hvmock` fails any other: host tests `a_connect_naming_another_page_fails_the_test`, `a_gpadl_naming_another_page_fails_the_test`, and `random_hostile_messages_never_derail_vmbus`); no thread holds an IRQHandler, frame, paging or untyped capability (`servers.rs`'s fills); [DMA and trust](#dma-and-trust); review. On QEMU only until root's Hyper-V half fills `vmbus`'s and `netvsc`'s CNodes | M9 |
-| `net` never maps memory a device or the host writes, so no frame changes while it is parsed | `start_qemu` maps in `net`'s VSpace only the image and the frame queues' copy; the drivers copy every frame between their own memory and the queues and give no device an address in the queues; `net::link::pump` copies each frame out of the queues before the stack sees it; review | M9 |
-| The only pages writable in two VSpaces are the frame queues' frame, shared by one driver and `net` (with `test=virtio_net`'s probe, by the driver and root); this amends M7's "no page is writable in two VSpaces" | `start_qemu` maps that frame's original in the driver and one copy in `net` or, for the probe, in root's own VSpace; every other writable page is fresh and mapped once (`root::process::Plan`, M7's invariant); review | M9 |
+| Only `virtio-net` and `vmbus`, besides root, can make a device or the host write memory they were not given; `netvsc` can make the host read any page but write only its receive buffer; `net` can do neither | the slot tables and `servers::fill`, which fills each CNode only from its crate's `slot` constants; `virtio-net`'s descriptors name only its DMA frame's buffers, written once by `virtq::Virtq::init` (host test `every_descriptor_names_its_own_buffer`; the model device fails any other address, `descriptor_rules`); `vmbus` posts only pages computed from `vmbus::Start` and `vmbus::layout` (`hvmock` fails any other: host tests `a_connect_naming_another_page_fails_the_test`, `a_gpadl_naming_another_page_fails_the_test`, and `random_hostile_messages_never_derail_vmbus`); no thread holds an IRQHandler, frame, paging or untyped capability (`servers.rs`'s fills: `start_qemu`'s, and on Hyper-V `start_hyperv`'s, which give `vmbus` slot 12's unrestricted copy and map the SIM and SIEF frames in its VSpace, and give `netvsc` only its endpoints, notification and the empty slot `Attach`'s reply fills); root checks the pages `vmbus` will name (`root::network::vmbus_start`, host-tested); [DMA and trust](#dma-and-trust); review. No test runs `start_hyperv` before the owner's check: TCG has no SynIC | M9 |
+| `net` never maps memory a device or the host writes, so no frame changes while it is parsed | `servers::start_net`, shared by both platforms, maps in `net`'s VSpace only the image and the frame queues' copy; the drivers copy every frame between their own memory and the queues and give no device an address in the queues; `net::link::pump` copies each frame out of the queues before the stack sees it; the end-to-end tests give `net` the queues' memory alone; review | M9 |
+| The only pages writable in two VSpaces are the frame queues' frame, shared by one driver and `net` (with `test=virtio_net`'s probe, by the driver and root); this amends M7's "no page is writable in two VSpaces" | `start_qemu` and `start_hyperv` map that frame's original in the driver and one copy in `net` or, for the probe, in root's own VSpace; every other writable page is fresh and mapped once, the SIM and SIEF frames in `vmbus`'s VSpace alone and the channel frame and monitor pages in `netvsc`'s alone (`root::process::Plan`, M7's invariant); review | M9 |
 | No driver maps configuration space, the MSI-X table or the PBA; root maps them only during setup | `pci::Plan::virtio_net` refuses a region page shared with the table, the PBA or another region (host test `no_region_shares_a_page_with_the_table_the_pba_or_another_region`) and MSI-X entry 0 across a page (`msix_entry_0_must_lie_in_one_page`); `root::pci::program_msix` unmaps the table's page before it returns, and `root::pci::Ecam::unmap` unmaps ECAM before the driver starts; the `pci`, `virtio_net` and `net` scenarios' `configuration space and the MSI-X table unmapped` lines; review | M9 |
 | A driver's device frames are the pages of the three regions it uses, inside BARs root sized, mapped uncached | `pci::size` with decode off (host tests `bars_are_sized_with_decode_off_and_restored`, `the_model_catches_a_bar_written_while_it_decodes`); `Plan`'s checks (`regions_and_the_table_must_lie_inside_their_bar`, `a_regions_pages_must_lie_inside_its_bar`, `regions_too_short_or_too_long_are_refused`, and `plans_of_mutated_headers_keep_their_rules` on the fixture and synthetic spaces); `start_qemu` maps `Plan::pages` alone, `Uncached`; `Frame_Map`'s rule that a device frame maps only `Uncached` or `WriteCombining`; the `pci` scenario | M9 |
-| An honest side never holds a queue buffer twice, and between two honest sides every buffer has one owner; neither side follows an entry with an index out of range, a buffer it owns, or a length that does not fit its queue, nor reads a queue holding more than 128 | `libsys::frames`'s `Owned` maps and `Entry::fits`; host tests `frames::tests::model::{two_honest_sides_hand_every_buffer_on_once, a_hostile_peer_is_counted_and_never_followed, indices_wrap_past_two_to_the_32, two_threads_hand_frames_back_and_forth}`, `bad_entries_are_counted_and_passed`, `broken_indices_are_counted_and_never_followed`, `a_buffer_handed_over_twice_is_taken_once`; the scenarios require 0 bad entries (`root::check::net`) | M9 |
+| An honest side never holds a queue buffer twice, and between two honest sides every buffer has one owner; neither side follows an entry with an index out of range, a buffer it owns, or a length that does not fit its queue, nor reads a queue holding more than 128 | `libsys::frames`'s `Owned` maps and `Entry::fits`; host tests `frames::tests::model::{two_honest_sides_hand_every_buffer_on_once, a_hostile_peer_is_counted_and_never_followed, indices_wrap_past_two_to_the_32, two_threads_hand_frames_back_and_forth}`, `bad_entries_are_counted_and_passed`, `broken_indices_are_counted_and_never_followed`, `a_buffer_handed_over_twice_is_taken_once`; the end-to-end tests' owners' check (`user/net/src/tests/owners.rs`) after every turn, with preemption at every access (`preempted_at_every_access_loses_nothing` in `virtio-net` and `netvsc`, `net_preempted_at_every_access_loses_nothing`); the scenarios require 0 bad entries (`root::check::net`) | M9 |
 | `Stack::input` never panics, does bounded work, sends at most three frames, and counts every frame once | the layer checks above, and at most 128 frames a signal (`net::link::BATCH`); the proptest `random_and_mutated_frames_keep_the_invariants`; host test `every_outcome_has_its_own_counter`; the goldens | M9 |
 | `net` never sends from a source that is not its own, to a broadcast, multicast or zero address learnt from a packet, or an echo to a broadcast, to port 0 or 7, or from one: no amplification and no echo loops | the drop rules (`Stack`'s peer check, its ARP sender checks and the UDP refusals); `random_and_mutated_frames_keep_the_invariants`, which checks every frame sent; goldens `echo/refuses_*`, `arp/` and `ipv4/` | M9 |
 | Every IPv4 header, ICMP message and UDP datagram `net` sends has a correct checksum, and an echo's payload equals the request's | `net::checksum` (host tests `the_sum_is_the_naive_sum_however_it_is_split`, `rfc_1071s_example_sums`); `every_echo_equals_the_oracles`, whose oracle has its own checksum code; `a_changed_header_byte_is_never_answered`; the `net` scenario, where libslirp drops a bad checksum (from memory) and `udp::exchange` compares every payload | M9 |
 | `virtio-net` negotiates only `VERSION_1`, `MAC` and `STATUS`, sets up the device in the specification's order, and never reposts a descriptor the device holds | `Driver::start`'s steps and `Virtq::post`'s assertion; host tests `setup_follows_the_specifications_order`, `of_every_feature_offered_only_three_are_accepted`, the model device's state checks (`status_rules`, `register_rules`, `queue_rules`, `ring_rules`) and `random_interleavings_lose_nothing`; the `net` scenario's features line | M9 |
 | `vmbus` and `netvsc` take nothing the host writes on trust: every message, offer, index, packet length, range and RNDIS offset is checked before use, and nothing is read outside their pages | `vmbus::msg`'s and `offer`'s checks, `netvsc::ring`'s, `nvs`'s and `rndis`'s, and `libsys::mem`'s bounds; `hvmock`'s hostile modes and the proptests `random_hostile_messages_never_derail_vmbus`, `hostile_packets_are_refused_never_followed` and `raw_ring_bytes_never_panic`; review | M9, M10 |
-| `netvsc` acknowledges every receive-buffer packet once, so the host never loses a section | `netvsc`'s receive path and its queue of 64 waiting acknowledgements; `hvmock`'s netvsc device, which reuses a section only after its acknowledgement and records a guest that breaks its rules (`Netvsc::unacked`, `Netvsc::faults`, host test `the_netvsc_device_records_a_guest_that_breaks_its_rules`); host tests `a_full_receive_pool_drops_frames_and_still_acknowledges`, `acknowledgements_wait_on_a_full_ring_ahead_of_frames`, `packets_over_4_kib_are_skipped_and_receive_buffer_ones_acknowledged`, `receive_buffer_packets_with_bad_headers_are_ignored_and_acknowledged`. Not yet run against a real host | M9 |
-| `netvsc`'s Hypervisor capability may only signal its own channel's connection, and `vmbus` keeps its original | `vmbus::Bus::mint_data`, the connection with `signal` only, minted into `vmbus`'s slot 8; the kernel's narrowing ([The Hypervisor capability (M9)](#the-hypervisor-capability-m9); host tests `mint_narrows_never_widens_and_makes_an_original`, `a_restricted_capability_acts_only_on_its_connection_with_its_rights`); `hvmock::Host::signal_restricted` fails a signal on another connection or without `signal` (`netvsc_s_capability_signals_only_its_connection`, `a_restricted_capability_without_signal_fails_the_test`); review | M9 |
-| Priorities: console above `vmbus` above `netvsc`, and each driver above `net` | `root::network`'s `VMBUS_PRIORITY`, `DRIVER_PRIORITY` and `NET_PRIORITY`, set with an equal MCP (host test `the_priorities_and_clients`); the `servers:` lines, which the scenarios expect and `root::check::net` reads (`the_servers_line`); review | M9 |
+| `netvsc` acknowledges every receive-buffer packet once, so the host never loses a section | `netvsc`'s receive path and its queue of 64 waiting acknowledgements; `hvmock`'s netvsc device, which reuses a section only after its acknowledgement and records a guest that breaks its rules (`Netvsc::unacked`, `Netvsc::faults`, host test `the_netvsc_device_records_a_guest_that_breaks_its_rules`); host tests `a_full_receive_pool_drops_frames_and_still_acknowledges`, `acknowledgements_wait_on_a_full_ring_ahead_of_frames`, `packets_over_4_kib_are_skipped_and_receive_buffer_ones_acknowledged`, `receive_buffer_packets_with_bad_headers_are_ignored_and_acknowledged`; `random_interleavings_through_the_mock_host_lose_nothing`, which checks every receive-buffer packet acknowledged after any order of the threads, and `a_host_that_drains_the_ring_before_the_request_for_room_still_hears_netvsc`. Not yet run against a real host | M9 |
+| `netvsc`'s Hypervisor capability may only signal its own channel's connection, and `vmbus` keeps its original | `vmbus::Bus::mint_data`, the connection with `signal` only, minted into `vmbus`'s slot 8; the kernel's narrowing ([The Hypervisor capability (M9)](#the-hypervisor-capability-m9); host tests `mint_narrows_never_widens_and_makes_an_original`, `a_restricted_capability_acts_only_on_its_connection_with_its_rights`); `hvmock::Host::signal_restricted` fails a signal on another connection or without `signal` (`netvsc_s_capability_signals_only_its_connection`, `a_restricted_capability_without_signal_fails_the_test`, and every end-to-end run through the mock host); `start_hyperv` leaves `netvsc`'s slot 7 empty for `Attach`'s reply and gives only `vmbus` slot 12's copy; review | M9 |
+| Priorities: console above `vmbus` above `netvsc`, and each driver above `net` | `root::network`'s `VMBUS_PRIORITY`, `DRIVER_PRIORITY` and `NET_PRIORITY`, set with an equal MCP by `start_qemu` and `start_hyperv` (host test `the_priorities_and_clients`); the `servers:` lines, which `root::check::net::Started` prints for either platform (`the_servers_line`, `the_hyperv_servers_line`) and the scenarios expect, `m9-net`'s on Hyper-V; the end-to-end tests step the threads in that order; review | M9 |
 | A fault of any network server ends the run with failure, whatever root waits on | F with badges 4 to 7 (`root::process::fault_badge`) and `watch`; host test `watchs_line_for_each_fault`; the `virtio_net_fault` scenario | M9 |
 | Every datagram the harness sends comes back once, unaltered, or the scenario fails | `xtask::udp::exchange`, which listens 500 ms past the last echo, and its host tests (`every_datagram_answered`, `a_lost_datagram_is_missing`, `a_duplicate_fails`, `a_duplicate_of_the_last_echo_fails`, `an_altered_or_cut_echo_fails`, `an_echo_from_another_port_fails`, `an_echo_of_nothing_outstanding_fails`); `Send-L4Udp.ps1` on Hyper-V | M9 |
 | uart writes no more than `uart.burst` bytes per THRE | `uart::Cap` and `Uart::start`'s cap; host tests `a_capped_burst_fills_the_fifo_with_at_most_the_cap`, `every_cap_keeps_the_fifo_from_overflowing`; `release_burst1` and `release_burst15`, which expect `, burst 1,` and `, burst 15,` | M9 |

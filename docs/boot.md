@@ -104,7 +104,7 @@ the key counts; the kernel ignores them. None changes the ABI:
 | `release.flood=<n>` | `root::flood::Flood`, in `test=release` | `n` decimal from 1 to 64: root prints `n` numbered lines of 75 bytes with CR LF right after its summary (`release: flood 01/32 ...`). Any other value prints `release: release.flood="<v>" ignored: not a number from 1 to 64` and no flood |
 | `net.ip=<a.b.c.d>/<n>` | `net::Config::parse`, in `test=net`, `virtio_net` and `virtio_net_fault` | `net`'s address and prefix length, 8 to 30; on QEMU it defaults to `10.0.2.15/24`, on Hyper-V it is required |
 | `net.gw=<a.b.c.d>` | the same | `net`'s gateway, another host of the same subnet; on QEMU it defaults to `10.0.2.2`, on Hyper-V it is required |
-| `netvsc.mnf=1` | root's Hyper-V half (M9, not yet built) | `netvsc` signals the host through the monitor page and event flags, as FreeBSD does, rather than `SignalEvent` |
+| `netvsc.mnf=<v>` | `root::network::mnf`, in `test=net` on Hyper-V | `1`: `netvsc` signals the host as FreeBSD does, through the event-flags page and, if the offer has `HASMNF`, monitor page 2, which root then maps in its VSpace; `0`, or no word, `SignalEvent`. Any other value fails the test with `servers: netvsc.mnf="<v>": not 0 or 1`. On QEMU root ignores it |
 
 A `net.ip=` or `net.gw=` that `net::Config` refuses fails the test with
 the reason (`net: no address: pass net.ip=<a.b.c.d>/<n>
