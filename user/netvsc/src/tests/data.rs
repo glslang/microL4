@@ -270,6 +270,69 @@ fn acknowledgements_wait_on_a_full_ring_ahead_of_frames() {
     assert_eq!(r.nic.take_sent(), [late]);
 }
 
+/// Review D (M9): the outbound ring has room for three more 64-byte
+/// packets and no acknowledgement waits, so only the room check stands
+/// between a frame and the ring. Of five frames from net, three are sent
+/// and two wait in `TX_FILLED`, none taken and lost; all five reach the
+/// host, in order, once it reads again. With `transmit`'s room check
+/// removed, `acknowledgements_wait_on_a_full_ring_ahead_of_frames` still
+/// passes, since there the waiting acknowledgements hold the frame back.
+#[test]
+#[cfg_attr(miri, ignore = "hundreds of packets: minutes under Miri")]
+fn frames_wait_for_room_with_no_acknowledgement_waiting() {
+    let m = Machine::new();
+    let q = queues();
+    let mut r = up(
+        &m,
+        &q,
+        Setup {
+            nic: nic::Config {
+                receive_section: 128,
+                ..nic::Config::default()
+            },
+            ..Setup::default()
+        },
+    );
+    r.nic.pause_reading();
+    let data = (layout::OUTBOUND_PAGES - 1) * layout::PAGE;
+    // How many more 64-byte packets (an acknowledgement or a data
+    // packet, trailer included) the outbound ring takes: a write needs
+    // more free bytes than it writes.
+    let room = |m: &Machine| {
+        let mut free = data - outbound(m).held().unwrap();
+        let mut n = 0;
+        while free > 64 {
+            free -= 64;
+            n += 1;
+        }
+        n
+    };
+    let mut k = 0;
+    while room(&m) > 3 {
+        r.nic.deliver(&frame(MAC, 60, k));
+        r.run();
+        k += 1;
+        assert!(k < 2000, "the ring never filled");
+    }
+    assert_eq!(room(&m), 3);
+    assert_eq!(r.a.stats().acks_waiting, 0);
+    let before = r.a.stats().sent;
+    let want: Vec<Vec<u8>> = (0..5)
+        .map(|i| frame(PEER, 100 + i, 1000 + i as u64))
+        .collect();
+    for f in &want {
+        r.send(f);
+    }
+    r.run();
+    assert_eq!(r.a.stats().sent - before, 3);
+    assert_eq!(room(&m), 0);
+    r.nic.resume_reading();
+    r.run();
+    r.honest();
+    assert_eq!(r.a.stats().sent - before, 5);
+    assert_eq!(r.nic.take_sent(), want);
+}
+
 /// The host waits for room in the inbound ring (its pending send size),
 /// and only netvsc's signal after a batch tells it there is: the host has
 /// masked the outbound ring, so netvsc's writes signal nothing. (A masked
